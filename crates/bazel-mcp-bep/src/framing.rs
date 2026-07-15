@@ -1,9 +1,11 @@
 use std::io::{self, Read};
 
-use prost::Message;
+use buffa::{Message, MessageView, bytes::Bytes};
 use thiserror::Error;
 
-use crate::proto::BuildEvent;
+use crate::proto::{
+    BuildEvent, BuildEventId, BuildEventIdView, BuildEventOwnedView, BuildEventView,
+};
 
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_STREAM_BYTES: usize = 128 * 1024 * 1024;
@@ -24,12 +26,52 @@ pub enum FrameError {
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
-    Decode(#[from] prost::DecodeError),
+    Decode(#[from] buffa::DecodeError),
+}
+
+/// A self-contained decoded BEP event whose generated view borrows from its
+/// retained protobuf frame without copying strings or byte fields.
+#[derive(Clone, Debug)]
+pub struct BepEvent {
+    inner: BuildEventOwnedView,
+}
+
+impl BepEvent {
+    /// Decode and retain an already-owned protobuf frame without copying it.
+    pub fn decode(frame: Vec<u8>) -> Result<Self, buffa::DecodeError> {
+        Ok(Self {
+            inner: BuildEventOwnedView::decode(Bytes::from(frame))?,
+        })
+    }
+
+    /// Decode a borrowed frame by copying only the frame backing allocation.
+    pub fn decode_slice(frame: &[u8]) -> Result<Self, buffa::DecodeError> {
+        Ok(Self {
+            inner: BuildEventOwnedView::decode(Bytes::copy_from_slice(frame))?,
+        })
+    }
+
+    /// Encode an owned generated message and decode it as a retained view.
+    pub fn from_owned(event: &BuildEvent) -> Result<Self, buffa::DecodeError> {
+        Ok(Self {
+            inner: BuildEventOwnedView::from_owned(event)?,
+        })
+    }
+
+    #[must_use]
+    pub fn view(&self) -> &BuildEventView<'_> {
+        self.inner.view()
+    }
+
+    #[must_use]
+    pub fn frame_bytes(&self) -> &[u8] {
+        self.inner.bytes()
+    }
 }
 
 #[derive(Debug)]
 pub struct PartialStream {
-    pub events: Vec<BuildEvent>,
+    pub events: Vec<BepEvent>,
     pub terminal_error: Option<FrameError>,
 }
 
@@ -61,7 +103,7 @@ pub fn read_frame<R: Read>(
     Ok(Some(frame))
 }
 
-pub fn decode_stream<R: Read>(reader: R, max_bytes: usize) -> Result<Vec<BuildEvent>, FrameError> {
+pub fn decode_stream<R: Read>(reader: R, max_bytes: usize) -> Result<Vec<BepEvent>, FrameError> {
     let partial = decode_stream_partial_bounded(
         reader,
         max_bytes,
@@ -116,7 +158,7 @@ pub fn decode_stream_partial_bounded<R: Read>(
                     };
                 }
                 stream_bytes = next_bytes;
-                match BuildEvent::decode(frame.as_slice()) {
+                match BepEvent::decode(frame) {
                     Ok(event) => events.push(event),
                     Err(error) => {
                         return PartialStream {
@@ -149,6 +191,22 @@ pub fn encode_frame<M: Message>(message: &M) -> Vec<u8> {
     write_varint(body.len() as u64, &mut framed);
     framed.extend_from_slice(&body);
     framed
+}
+
+/// Decode a single borrowed frame into a retained zero-copy event handle.
+pub fn decode_event(frame: &[u8]) -> Result<BepEvent, buffa::DecodeError> {
+    BepEvent::decode_slice(frame)
+}
+
+/// Decode an event-id submessage as a borrowed view into its parent event.
+pub fn decode_event_id(input: &[u8]) -> Result<BuildEventIdView<'_>, buffa::DecodeError> {
+    BuildEventIdView::decode_view(input)
+}
+
+/// Encode an owned event-id submessage for fixtures and benchmarks.
+#[must_use]
+pub fn encode_event_id(id: &BuildEventId) -> Vec<u8> {
+    id.encode_to_vec()
 }
 
 fn read_varint<R: Read>(reader: &mut R) -> Result<Option<u64>, FrameError> {
@@ -195,16 +253,23 @@ mod tests {
 
     proptest! {
         #[test]
-        fn frame_round_trips(stdout in ".{0,1024}") {
+    fn frame_round_trips(stdout in ".{0,1024}") {
             let event = BuildEvent {
                 payload: Some(crate::proto::build_event::Payload::Progress(
-                    crate::proto::Progress { stdout, stderr: String::new() }
+                    Box::new(crate::proto::Progress { stdout, stderr: String::new() })
                 )),
                 ..Default::default()
             };
             let framed = encode_frame(&event);
             let decoded = decode_stream(Cursor::new(framed), DEFAULT_MAX_FRAME_BYTES).unwrap();
-            prop_assert_eq!(decoded, vec![event]);
+            prop_assert_eq!(decoded.len(), 1);
+            let Some(crate::view::build_event::Payload::Progress(progress)) =
+                decoded[0].view().payload.as_ref()
+            else {
+                prop_assert!(false, "missing progress payload");
+                return Ok(());
+            };
+            prop_assert_eq!(progress.stdout, event_progress_stdout(&event));
         }
     }
 
@@ -229,12 +294,12 @@ mod tests {
     #[test]
     fn retains_partial_events_when_the_stream_budget_is_exhausted() {
         let event = BuildEvent {
-            payload: Some(crate::proto::build_event::Payload::Progress(
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
                 crate::proto::Progress {
                     stdout: "output".into(),
                     stderr: String::new(),
                 },
-            )),
+            ))),
             ..Default::default()
         };
         let frame = encode_frame(&event);
@@ -243,7 +308,7 @@ mod tests {
         let partial = decode_stream_partial_bounded(
             input.as_slice(),
             DEFAULT_MAX_FRAME_BYTES,
-            event.encoded_len().saturating_sub(1),
+            event.encoded_len().saturating_sub(1) as usize,
             10,
         );
         assert!(partial.events.is_empty());
@@ -258,10 +323,37 @@ mod tests {
             DEFAULT_MAX_STREAM_BYTES,
             1,
         );
-        assert_eq!(partial.events, vec![event]);
+        assert_eq!(partial.events.len(), 1);
+        let Some(crate::view::build_event::Payload::Progress(progress)) =
+            partial.events[0].view().payload.as_ref()
+        else {
+            panic!("missing progress payload");
+        };
+        assert_eq!(progress.stdout, "output");
         assert!(matches!(
             partial.terminal_error,
             Some(FrameError::TooManyEvents { .. })
         ));
+    }
+
+    #[test]
+    fn ignores_unknown_fields_without_rejecting_the_event() {
+        let event = BuildEvent::default();
+        let mut body = event.encode_to_vec();
+        body.extend_from_slice(&[0xf8, 0x07, 0x01]);
+        let mut framed = Vec::new();
+        write_varint(body.len() as u64, &mut framed);
+        framed.extend_from_slice(&body);
+
+        let decoded = decode_stream(framed.as_slice(), DEFAULT_MAX_FRAME_BYTES).unwrap();
+        assert_eq!(decoded.len(), 1);
+    }
+
+    fn event_progress_stdout(event: &BuildEvent) -> &str {
+        let Some(crate::proto::build_event::Payload::Progress(progress)) = event.payload.as_ref()
+        else {
+            panic!("missing progress payload");
+        };
+        &progress.stdout
     }
 }

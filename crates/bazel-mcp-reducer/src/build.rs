@@ -1,15 +1,17 @@
-use bazel_mcp_bep::proto::{BuildEvent, BuildEventId, build_event, build_event_id};
+use bazel_mcp_bep::{
+    BepEvent, decode_event_id,
+    view::{BuildEventIdView, FileView, NamedSetOfFilesView, build_event, build_event_id, file},
+};
 use bazel_mcp_types::{
     Artifact, ArtifactKind, Diagnostic, DiagnosticCategory, InvocationSummary, Severity,
     TargetCounts, TargetResult, TestCounts, TestResult, TestStatus,
 };
-use prost::Message;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Budget, deduplicate_lines, normalize_terminal_text};
 
 pub struct ReductionInput<'a> {
-    pub events: &'a [BuildEvent],
+    pub events: &'a [BepEvent],
     pub stdout: &'a [u8],
     pub stderr: &'a [u8],
     pub exit_code: Option<i32>,
@@ -25,12 +27,13 @@ pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
     let mut tests = Vec::new();
 
     for event in input.events {
-        let id = BuildEventId::decode(event.id.as_slice()).ok();
-        match &event.payload {
+        let event = event.view();
+        let id = decode_event_id(event.id).ok();
+        match event.payload.as_ref() {
             Some(build_event::Payload::Aborted(aborted)) => diagnostics.push(Diagnostic {
                 severity: Severity::Error,
                 category: abort_category(aborted.reason),
-                message: aborted.description.clone(),
+                message: aborted.description.to_owned(),
                 location: None,
                 target: label_from_id(id.as_ref()),
                 action: None,
@@ -45,13 +48,13 @@ pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
                         if action.r#type.is_empty() {
                             "Bazel".to_owned()
                         } else {
-                            action.r#type.clone()
+                            action.r#type.to_owned()
                         },
                         action.exit_code
                     ),
                     location: None,
-                    target: label_from_id(id.as_ref()).or_else(|| nonempty(&action.label)),
-                    action: nonempty(&action.r#type),
+                    target: label_from_id(id.as_ref()).or_else(|| nonempty(action.label)),
+                    action: nonempty(action.r#type),
                     repetition_count: 1,
                 });
             }
@@ -166,39 +169,31 @@ fn deduplicate_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
 }
 
 #[must_use]
-pub fn reduce_artifacts(events: &[BuildEvent]) -> Vec<Artifact> {
-    let mut sets = BTreeMap::<
-        String,
-        (
-            &[bazel_mcp_bep::proto::File],
-            &[build_event_id::NamedSetOfFilesId],
-        ),
-    >::new();
-    let mut roots = Vec::new();
-    let mut direct = Vec::<&bazel_mcp_bep::proto::File>::new();
+pub fn reduce_artifacts<'a>(events: &'a [BepEvent]) -> Vec<Artifact> {
+    let mut sets = BTreeMap::<&'a str, &'a NamedSetOfFilesView<'a>>::new();
+    let mut roots = Vec::<&'a str>::new();
+    let mut direct = Vec::<&'a FileView<'a>>::new();
     for event in events {
-        let id = BuildEventId::decode(event.id.as_slice()).ok();
-        match &event.payload {
+        let event = event.view();
+        let id = decode_event_id(event.id).ok();
+        match event.payload.as_ref() {
             Some(build_event::Payload::NamedSetOfFiles(set)) => {
                 if let Some(build_event_id::Id::NamedSet(named_set)) =
                     id.as_ref().and_then(|id| id.id.as_ref())
                 {
-                    sets.insert(
-                        named_set.id.clone(),
-                        (set.files.as_slice(), set.file_sets.as_slice()),
-                    );
+                    sets.insert(named_set.id, set);
                 }
             }
             Some(build_event::Payload::Completed(completed)) => {
                 for group in &completed.output_group {
-                    roots.extend(group.file_sets.iter().map(|set| set.id.clone()));
+                    roots.extend(group.file_sets.iter().map(|set| set.id));
                     direct.extend(group.inline_files.iter());
                 }
                 direct.extend(completed.important_output.iter());
                 direct.extend(completed.directory_output.iter());
             }
             Some(build_event::Payload::Action(action)) if !action.success => {
-                if let Some(output) = &action.primary_output {
+                if let Some(output) = action.primary_output.as_option() {
                     direct.push(output);
                 }
             }
@@ -208,15 +203,15 @@ pub fn reduce_artifacts(events: &[BuildEvent]) -> Vec<Artifact> {
             _ => {}
         }
     }
-    let mut visited = BTreeSet::new();
+    let mut visited = BTreeSet::<&str>::new();
     let mut pending = roots;
     while let Some(id) = pending.pop() {
-        if !visited.insert(id.clone()) {
+        if !visited.insert(id) {
             continue;
         }
-        if let Some((files, children)) = sets.get(&id) {
-            direct.extend(files.iter());
-            pending.extend(children.iter().map(|set| set.id.clone()));
+        if let Some(set) = sets.get(id) {
+            direct.extend(set.files.iter());
+            pending.extend(set.file_sets.iter().map(|set| set.id));
         }
     }
     let mut seen = BTreeSet::new();
@@ -228,31 +223,37 @@ pub fn reduce_artifacts(events: &[BuildEvent]) -> Vec<Artifact> {
 }
 
 #[must_use]
-pub fn extract_canonical_arguments(events: &[BuildEvent]) -> Option<Vec<String>> {
-    events.iter().find_map(|event| match &event.payload {
-        Some(build_event::Payload::OptionsParsed(options)) => {
-            let mut arguments = options.startup_options.clone();
-            arguments.extend(options.cmd_line.iter().cloned());
-            Some(arguments)
-        }
-        _ => None,
-    })
+pub fn extract_canonical_arguments(events: &[BepEvent]) -> Option<Vec<String>> {
+    events
+        .iter()
+        .find_map(|event| match event.view().payload.as_ref() {
+            Some(build_event::Payload::OptionsParsed(options)) => {
+                let mut arguments = options
+                    .startup_options
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>();
+                arguments.extend(options.cmd_line.iter().map(|value| (*value).to_owned()));
+                Some(arguments)
+            }
+            _ => None,
+        })
 }
 
-fn file_artifact(file: &bazel_mcp_bep::proto::File) -> Option<Artifact> {
+fn file_artifact(file: &FileView<'_>) -> Option<Artifact> {
     let name = bounded_text(
         &file
             .path_prefix
             .iter()
             .chain(std::iter::once(&file.name))
             .filter(|part| !part.is_empty())
-            .cloned()
+            .copied()
             .collect::<Vec<_>>()
             .join("/"),
         1_000,
     );
     let (uri, kind, locally_available) = match &file.file {
-        Some(bazel_mcp_bep::proto::file::File::Uri(uri)) => {
+        Some(file::File::Uri(uri)) => {
             let kind = if file.name == "test.log" || file.name == "test.xml" {
                 ArtifactKind::TestLog
             } else if file.name.contains("coverage") || file.name.ends_with(".dat") {
@@ -264,12 +265,10 @@ fn file_artifact(file: &bazel_mcp_bep::proto::File) -> Option<Artifact> {
             };
             (bounded_text(uri, 1_000), kind, uri.starts_with("file:"))
         }
-        Some(bazel_mcp_bep::proto::file::File::SymlinkTargetPath(target)) => {
+        Some(file::File::SymlinkTargetPath(target)) => {
             (bounded_text(target, 1_000), ArtifactKind::File, true)
         }
-        Some(bazel_mcp_bep::proto::file::File::Contents(_)) => {
-            ("inline://redacted".to_owned(), ArtifactKind::File, true)
-        }
+        Some(file::File::Contents(_)) => ("inline://redacted".to_owned(), ArtifactKind::File, true),
         None => return None,
     };
     Some(Artifact {
@@ -357,14 +356,14 @@ fn abort_category(reason: i32) -> DiagnosticCategory {
     }
 }
 
-fn label_from_id(id: Option<&BuildEventId>) -> Option<String> {
+fn label_from_id(id: Option<&BuildEventIdView<'_>>) -> Option<String> {
     match id.and_then(|value| value.id.as_ref()) {
-        Some(build_event_id::Id::TargetCompleted(value)) => nonempty(&value.label),
-        Some(build_event_id::Id::ActionCompleted(value)) => nonempty(&value.label),
-        Some(build_event_id::Id::TestSummary(value)) => nonempty(&value.label),
-        Some(build_event_id::Id::TestResult(value)) => nonempty(&value.label),
-        Some(build_event_id::Id::UnconfiguredLabel(value)) => nonempty(&value.label),
-        Some(build_event_id::Id::ConfiguredLabel(value)) => nonempty(&value.label),
+        Some(build_event_id::Id::TargetCompleted(value)) => nonempty(value.label),
+        Some(build_event_id::Id::ActionCompleted(value)) => nonempty(value.label),
+        Some(build_event_id::Id::TestSummary(value)) => nonempty(value.label),
+        Some(build_event_id::Id::TestResult(value)) => nonempty(value.label),
+        Some(build_event_id::Id::UnconfiguredLabel(value)) => nonempty(value.label),
+        Some(build_event_id::Id::ConfiguredLabel(value)) => nonempty(value.label),
         _ => None,
     }
 }
@@ -385,9 +384,9 @@ fn test_status(value: i32) -> TestStatus {
     }
 }
 
-fn file_uri(file: &bazel_mcp_bep::proto::File) -> Option<String> {
+fn file_uri(file: &FileView<'_>) -> Option<String> {
     match &file.file {
-        Some(bazel_mcp_bep::proto::file::File::Uri(uri)) => Some(uri.clone()),
+        Some(file::File::Uri(uri)) => Some((*uri).to_owned()),
         _ => None,
     }
 }
@@ -395,22 +394,30 @@ fn file_uri(file: &bazel_mcp_bep::proto::File) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use bazel_mcp_bep::proto::{
-        ActionExecuted, BuildEventId, File, NamedSetOfFiles, build_event, build_event_id, file,
+        ActionExecuted, BuildEvent, BuildEventId, File, FileOwnedView, NamedSetOfFiles,
     };
+    use bazel_mcp_bep::proto::{
+        build_event as owned_build_event, build_event_id as owned_build_event_id,
+        file as owned_file,
+    };
+    use bazel_mcp_bep::{BepEvent, encode_event_id};
 
     use super::*;
 
     #[test]
     fn reduces_noisy_failure_to_root_cause() {
         let event = BuildEvent {
-            payload: Some(build_event::Payload::Action(ActionExecuted {
-                success: false,
-                exit_code: 1,
-                r#type: "CppCompile".into(),
-                ..Default::default()
-            })),
+            payload: Some(owned_build_event::Payload::Action(Box::new(
+                ActionExecuted {
+                    success: false,
+                    exit_code: 1,
+                    r#type: "CppCompile".into(),
+                    ..Default::default()
+                },
+            ))),
             ..Default::default()
         };
+        let event = BepEvent::from_owned(&event).unwrap();
         let stderr = b"warning: duplicate\nwarning: duplicate\nfile.cc:7: error: bad type\n";
         let summary = reduce_invocation(ReductionInput {
             events: &[event],
@@ -474,51 +481,61 @@ mod tests {
     #[test]
     fn resolves_nested_named_sets_once_even_when_cyclic() {
         fn event_id(id: &str) -> Vec<u8> {
-            BuildEventId {
-                id: Some(build_event_id::Id::NamedSet(
-                    build_event_id::NamedSetOfFilesId { id: id.into() },
-                )),
-            }
-            .encode_to_vec()
+            encode_event_id(&BuildEventId {
+                id: Some(owned_build_event_id::Id::NamedSet(Box::new(
+                    bazel_mcp_bep::proto::build_event_id::NamedSetOfFilesId { id: id.into() },
+                ))),
+            })
         }
         let first = BuildEvent {
             id: event_id("first"),
-            payload: Some(build_event::Payload::NamedSetOfFiles(NamedSetOfFiles {
-                files: vec![File {
-                    name: "local.out".into(),
-                    file: Some(file::File::Uri("file:///tmp/local.out".into())),
-                    ..Default::default()
-                }],
-                file_sets: vec![build_event_id::NamedSetOfFilesId {
-                    id: "second".into(),
-                }],
-            })),
+            payload: Some(owned_build_event::Payload::NamedSetOfFiles(Box::new(
+                NamedSetOfFiles {
+                    files: vec![File {
+                        name: "local.out".into(),
+                        file: Some(owned_file::File::Uri("file:///tmp/local.out".into())),
+                        ..Default::default()
+                    }],
+                    file_sets: vec![bazel_mcp_bep::proto::build_event_id::NamedSetOfFilesId {
+                        id: "second".into(),
+                    }],
+                },
+            ))),
             ..Default::default()
         };
         let second = BuildEvent {
             id: event_id("second"),
-            payload: Some(build_event::Payload::NamedSetOfFiles(NamedSetOfFiles {
-                files: vec![File {
-                    name: "remote.out".into(),
-                    file: Some(file::File::Uri("bytestream://cache/digest".into())),
-                    ..Default::default()
-                }],
-                file_sets: vec![build_event_id::NamedSetOfFilesId { id: "first".into() }],
-            })),
+            payload: Some(owned_build_event::Payload::NamedSetOfFiles(Box::new(
+                NamedSetOfFiles {
+                    files: vec![File {
+                        name: "remote.out".into(),
+                        file: Some(owned_file::File::Uri("bytestream://cache/digest".into())),
+                        ..Default::default()
+                    }],
+                    file_sets: vec![bazel_mcp_bep::proto::build_event_id::NamedSetOfFilesId {
+                        id: "first".into(),
+                    }],
+                },
+            ))),
             ..Default::default()
         };
         let completed = BuildEvent {
-            payload: Some(build_event::Payload::Completed(
+            payload: Some(owned_build_event::Payload::Completed(Box::new(
                 bazel_mcp_bep::proto::TargetComplete {
                     output_group: vec![bazel_mcp_bep::proto::OutputGroup {
-                        file_sets: vec![build_event_id::NamedSetOfFilesId { id: "first".into() }],
+                        file_sets: vec![bazel_mcp_bep::proto::build_event_id::NamedSetOfFilesId {
+                            id: "first".into(),
+                        }],
                         ..Default::default()
                     }],
                     ..Default::default()
                 },
-            )),
+            ))),
             ..Default::default()
         };
+        let completed = BepEvent::from_owned(&completed).unwrap();
+        let second = BepEvent::from_owned(&second).unwrap();
+        let first = BepEvent::from_owned(&first).unwrap();
         let artifacts = reduce_artifacts(&[completed, second, first]);
         assert_eq!(artifacts.len(), 2);
         assert!(artifacts.iter().any(|artifact| {
@@ -540,10 +557,11 @@ mod tests {
     fn bounds_symlink_artifact_paths() {
         let file = File {
             name: "artifact".into(),
-            file: Some(file::File::SymlinkTargetPath("x".repeat(2_000))),
+            file: Some(owned_file::File::SymlinkTargetPath("x".repeat(2_000))),
             ..Default::default()
         };
-        let artifact = file_artifact(&file).unwrap();
+        let file = FileOwnedView::from_owned(&file).unwrap();
+        let artifact = file_artifact(file.view()).unwrap();
         assert!(artifact.uri.len() <= 1_003);
         assert!(artifact.uri.ends_with('…'));
     }
