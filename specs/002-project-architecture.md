@@ -770,7 +770,8 @@ workspace has its own committed `fuzz/Cargo.lock`.
 ## Server configuration
 
 Configuration is user-level and MUST NOT require modifying a target Bazel
-repository.
+repository. It is optional; when no source is present, the server uses built-in
+defaults and does not restrict workspace roots.
 
 Resolution order:
 

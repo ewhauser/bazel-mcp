@@ -12,12 +12,14 @@ pub fn validate_workspace(
         return Err(PolicyError::WorkspaceNotAbsolute(workspace.to_owned()));
     }
     let canonical = workspace.canonicalize()?;
-    let allowed = allowed_roots.iter().any(|root| {
-        root.canonicalize()
-            .is_ok_and(|canonical_root| canonical.starts_with(canonical_root))
-    });
-    if !allowed {
-        return Err(PolicyError::WorkspaceNotAllowed(canonical));
+    if !allowed_roots.is_empty() {
+        let allowed = allowed_roots.iter().any(|root| {
+            root.canonicalize()
+                .is_ok_and(|canonical_root| canonical.starts_with(canonical_root))
+        });
+        if !allowed {
+            return Err(PolicyError::WorkspaceNotAllowed(canonical));
+        }
     }
     if !WORKSPACE_MARKERS
         .iter()
@@ -44,6 +46,19 @@ mod tests {
         fs::write(workspace.join("MODULE.bazel"), "").unwrap();
         assert_eq!(
             validate_workspace(&workspace, &[root.path().to_owned()]).unwrap(),
+            workspace.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn accepts_a_bazel_workspace_when_roots_are_unrestricted() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("repo");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("MODULE.bazel"), "").unwrap();
+
+        assert_eq!(
+            validate_workspace(&workspace, &[]).unwrap(),
             workspace.canonicalize().unwrap()
         );
     }

@@ -12,7 +12,7 @@ The server exposes exactly three tools:
 - `bazel.inspect` reads a bounded, filtered, paginated retained view.
 - `bazel.cancel` cancels a known queued or running invocation.
 
-## Install and configure
+## Install
 
 Build from source with Rust 1.94.1:
 
@@ -20,20 +20,25 @@ Build from source with Rust 1.94.1:
 cargo build --release -p bazel-mcp-server
 ```
 
-Copy `examples/config.toml`, set at least one `allowed_roots` entry, and register
-the binary as a stdio MCP server in the host. Standard output is reserved for
-MCP protocol frames; logs always go to standard error.
+Register the binary as a stdio MCP server in the host. No configuration file is
+required. Standard output is reserved for MCP protocol frames; logs always go
+to standard error.
 
 ```json
 {
   "mcpServers": {
     "bazel": {
-      "command": "/absolute/path/to/bazel-mcp",
-      "args": ["--config", "/absolute/path/to/config.toml"]
+      "command": "/absolute/path/to/bazel-mcp"
     }
   }
 }
 ```
+
+Built-in defaults allow any Bazel workspace while retaining command,
+environment, timeout, storage, and output limits. To restrict workspace paths or
+customize other settings, copy `examples/config.toml` and pass it with
+`--config`, set `BAZEL_MCP_CONFIG`, or place it in the OS user configuration
+directory.
 
 All invocation data remains in the configured local cache. `clean`, `run`, and
 `shutdown` are denied by default, shell evaluation is never used, and server-

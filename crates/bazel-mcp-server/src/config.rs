@@ -101,11 +101,6 @@ impl ServerConfig {
         if let Some(cache_root) = &cli.cache_root {
             config.cache_root = cache_root.clone();
         }
-        if config.allowed_roots.is_empty() {
-            anyhow::bail!(
-                "no allowed workspace roots configured; set allowed_roots or use --allow-root"
-            );
-        }
         if config.global_concurrency == 0 {
             anyhow::bail!("global concurrency must be greater than zero");
         }
@@ -274,6 +269,21 @@ mod tests {
             "default_timeout_seconds = 0\nmaximum_timeout_seconds = 0\n",
         );
         assert!(ServerConfig::load(&cli(timeout)).is_err());
+    }
+
+    #[test]
+    fn accepts_configuration_without_allowed_roots() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            format!("cache_root = {:?}\n", root.path().join("cache")),
+        )
+        .unwrap();
+
+        let config = ServerConfig::load(&cli(path)).unwrap();
+
+        assert!(config.allowed_roots.is_empty());
     }
 
     #[cfg(unix)]

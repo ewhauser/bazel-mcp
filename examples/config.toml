@@ -1,3 +1,5 @@
+# Optional: set one or more roots to restrict which Bazel workspaces may run.
+# Leave the list empty (the built-in default) to allow any Bazel workspace.
 allowed_roots = ["/absolute/path/to/bazel/workspaces"]
 global_concurrency = 4
 default_timeout_seconds = 1800
