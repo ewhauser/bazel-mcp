@@ -20,7 +20,7 @@ jobs:
         with: { persist-credentials: false }
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo install cargo-shear --version 1.13.1 --locked && cargo shear
+      - run: cargo install cargo-shear --version 1.12.0 --locked && cargo shear
   cargo-test-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
