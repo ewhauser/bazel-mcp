@@ -47,8 +47,8 @@ toml = "0.9"
 uuid = { version = "1", features = ["serde", "v7"] }
 
 # BEP and reduction
-prost = "0.14"
-prost-build = "0.14"
+buffa = "=0.8.1"
+buffa-build = "=0.8.1"
 protoc-bin-vendored = "3"
 quick-xml = { version = "0.41", features = ["serialize"] }
 

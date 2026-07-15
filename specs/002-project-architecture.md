@@ -195,13 +195,15 @@ byte slices.
 
 Responsibilities:
 
-- Generated `prost` types for the pinned Bazel BEP schema.
+- Generated Buffa owned messages and borrowed views for the pinned Bazel BEP
+  schema.
 - Varint frame decoding with explicit incomplete-frame outcomes.
 - Event identity, announcement, and reference tracking.
 - `NamedSetOfFiles` graph resolution without quadratic expansion.
 - Compatibility metadata for the Bazel version used to vendor the protos.
-- Conversion from generated protobufs into small BEP-oriented Rust views used by
-  reducers.
+- A self-contained event handle that retains the raw protobuf frame while
+  reducers borrow generated views from it without copying protobuf strings,
+  bytes, nested messages, or repeated messages.
 
 Suggested layout:
 
@@ -230,10 +232,12 @@ crates/bazel-mcp-bep/
         └── bazel-9/
 ```
 
-`build.rs` uses `prost-build` and a vendored `protoc` binary so ordinary Cargo
-builds do not depend on a system protobuf installation. It declares
-`rerun-if-changed` for the vendored proto tree. Generated Rust is written to
-`OUT_DIR` and included from `generated.rs`; generated files are not committed.
+`build.rs` invokes a vendored `protoc` binary directly to create a descriptor
+set, then uses `buffa-build` to generate owned messages and borrowed views.
+Ordinary Cargo builds therefore do not depend on a system protobuf
+installation. The script declares `rerun-if-changed` for the vendored proto
+tree. Generated Rust is written to `OUT_DIR` and included from `lib.rs`;
+generated files are not committed.
 
 The proto `README.md` records the upstream Bazel tag, source paths, update
 procedure, and checksums. The Apache-2.0 license accompanying vendored Bazel
@@ -662,7 +666,7 @@ set includes:
 | --- | --- |
 | MCP and async | `rmcp`, `tokio`, `tokio-util`, `futures` |
 | Serialization and schemas | `serde`, `serde_json`, `schemars`, `uuid` |
-| BEP | `prost`, `prost-types`, `prost-build`, vendored `protoc` support |
+| BEP | `buffa`, `buffa-build`, vendored `protoc` support |
 | Storage | `turso`, `tempfile` |
 | Parsing | a bounded XML parser, LCOV parser or internal LCOV reader, `memchr`, ANSI stripping |
 | Errors and logging | `thiserror`, `anyhow`, `tracing`, `tracing-subscriber` |
@@ -1227,7 +1231,7 @@ feat(server): add MCP task execution
 fix(runner): reap cancelled Bazel clients
 perf(reducer): avoid duplicate diagnostic buffers
 docs(specs): define remote artifact adapter boundary
-chore(deps): update prost
+chore(deps): update buffa
 ```
 
 release-please maintains a draft release PR, updates

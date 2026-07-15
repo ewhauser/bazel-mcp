@@ -555,7 +555,10 @@ It MUST reap every child and MUST NOT leave an untracked Bazel client running.
 
 - Bazel BEP `.proto` files and required imports are vendored at a pinned Bazel
   release tag.
-- Rust types are generated with `prost-build`.
+- Rust owned messages and borrowed views are generated with `buffa-build`.
+- Decoded events retain their protobuf frame and expose Buffa views so string,
+  byte, nested-message, and repeated-message fields are not copied into a
+  second owned object graph.
 - The selected protobuf version MUST decode fixtures from every supported Bazel
   major version.
 - Unknown protobuf fields are ignored, and missing optional fields are handled
@@ -1036,7 +1039,7 @@ Expected foundational dependencies include:
 
 - `rmcp`
 - `tokio` and `tokio-util`
-- `prost` and `prost-build`
+- `buffa` and `buffa-build`
 - `serde`, `serde_json`, and `schemars`
 - `uuid`
 - `turso` in embedded local mode

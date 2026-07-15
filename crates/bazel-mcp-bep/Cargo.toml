@@ -10,11 +10,11 @@ publish = false
 build = "build.rs"
 
 [dependencies]
-prost.workspace = true
+buffa.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]
-prost-build.workspace = true
+buffa-build.workspace = true
 protoc-bin-vendored.workspace = true
 
 [dev-dependencies]

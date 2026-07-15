@@ -12,7 +12,6 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
-prost = "0.14"
 bazel-mcp-bep = { path = "../crates/bazel-mcp-bep" }
 bazel-mcp-policy = { path = "../crates/bazel-mcp-policy" }
 bazel-mcp-reducer = { path = "../crates/bazel-mcp-reducer" }
