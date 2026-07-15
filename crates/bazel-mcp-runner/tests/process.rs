@@ -16,6 +16,16 @@ use bazel_mcp_types::{
 };
 use tempfile::TempDir;
 
+async fn wait_for_path(path: &Path) {
+    for _ in 0..500 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
 async fn service(root: &TempDir, workspace: &Path, script: &str) -> InvocationService {
     service_with_redaction(root, workspace, script, Vec::new()).await
 }
@@ -30,6 +40,10 @@ async fn service_with_redaction(
         .await
         .unwrap();
     let executable = root.path().join("fake-bazel");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo 'bazel 9.1.0'; exit 0; fi\n{}",
+        script.strip_prefix("#!/bin/sh\n").unwrap_or(script)
+    );
     tokio::fs::write(&executable, script).await.unwrap();
     tokio::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
         .await
@@ -49,6 +63,41 @@ async fn service_with_redaction(
             cancellation_terminate_grace: Duration::from_millis(100),
             ..RunnerConfig::default()
         },
+    )
+    .unwrap()
+}
+
+async fn configured_service(
+    root: &TempDir,
+    workspace: &Path,
+    script: &str,
+    configure: impl FnOnce(&mut RunnerConfig),
+) -> InvocationService {
+    tokio::fs::write(workspace.join("MODULE.bazel"), "module(name='test')\n")
+        .await
+        .unwrap();
+    let executable = root.path().join("configured-fake-bazel");
+    tokio::fs::write(&executable, script).await.unwrap();
+    tokio::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .await
+        .unwrap();
+    let policy = PolicyConfig {
+        allowed_roots: vec![root.path().to_owned()],
+        bazel_executable: Some(executable),
+        ..PolicyConfig::default()
+    };
+    let mut config = RunnerConfig {
+        policy,
+        cancellation_interrupt_grace: Duration::from_millis(100),
+        cancellation_terminate_grace: Duration::from_millis(100),
+        ..RunnerConfig::default()
+    };
+    configure(&mut config);
+    InvocationService::new(
+        Store::open(root.path().join("configured-store"))
+            .await
+            .unwrap(),
+        config,
     )
     .unwrap()
 }
@@ -231,6 +280,130 @@ async fn cancellation_stops_a_running_process_group() {
 }
 
 #[tokio::test]
+async fn dropping_an_invocation_future_kills_the_entire_process_group() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let child_pid = root.path().join("child.pid");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n(sleep 30) &\necho $! > '{}'\nwait\n",
+        child_pid.display()
+    );
+    let store_root = root.path().join("configured-store");
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+    let request = InvocationRequest::new(workspace, BazelCommand::Build, vec!["//:target".into()]);
+    let id = request.id;
+    let running = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(request).await }
+    });
+    wait_for_path(&child_pid).await;
+    let pid: i32 = tokio::fs::read_to_string(&child_pid)
+        .await
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
+    for _ in 0..100 {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err());
+
+    drop(service);
+    let reopened = Store::open(store_root).await.unwrap();
+    assert_eq!(
+        reopened.get_invocation(id).await.unwrap().state,
+        InvocationState::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn bounds_hundreds_of_pending_requests_with_an_explicit_queue_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = configured_service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nsleep 30\n",
+        |config| {
+            config.global_concurrency = 1;
+            config.maximum_pending_invocations = 8;
+        },
+    )
+    .await;
+    let mut accepted = Vec::new();
+    for index in 0..8 {
+        let request = InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Build,
+            vec![format!("//:queued-{index}")],
+        );
+        let id = request.id;
+        accepted.push((
+            id,
+            tokio::spawn({
+                let service = service.clone();
+                async move { service.run(request).await }
+            }),
+        ));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for index in 8..300 {
+        let error = service
+            .run(InvocationRequest::new(
+                workspace.clone(),
+                BazelCommand::Build,
+                vec![format!("//:rejected-{index}")],
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, bazel_mcp_runner::RunnerError::QueueFull(8)));
+    }
+    for (id, task) in accepted {
+        service.cancel(id).await.unwrap();
+        let record = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, InvocationState::Cancelled);
+    }
+}
+
+#[tokio::test]
+async fn rejects_unsupported_bazel_versions_before_creating_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = configured_service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 6.5.0'; exit 0; fi\nexit 0\n",
+        |_| {},
+    )
+    .await;
+    let error = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//:target".into()],
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        bazel_mcp_runner::RunnerError::UnsupportedBazelVersion { detected: 6, .. }
+    ));
+}
+
+#[tokio::test]
 async fn queued_cancellation_returns_a_complete_terminal_summary() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
@@ -341,7 +514,7 @@ async fn scheduler_uses_effective_output_base_and_never_evaluates_arguments() {
         BazelCommand::Build,
         vec!["//...".into()],
     ));
-    tokio::time::timeout(Duration::from_millis(500), independent)
+    tokio::time::timeout(Duration::from_secs(2), independent)
         .await
         .expect("same-workspace waiters exhausted the global concurrency pool")
         .unwrap();
@@ -368,6 +541,31 @@ async fn server_owned_flags_precede_the_target_argument_delimiter() {
     );
 
     let record = service.run(request).await.unwrap();
+    assert_eq!(record.state, InvocationState::Succeeded);
+}
+
+#[tokio::test]
+async fn preserves_user_bes_flags_while_adding_the_private_bep_file() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nseen_bes=0\nseen_bep=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --bes_backend=grpc://example.invalid:1985) seen_bes=1 ;;\n    --build_event_binary_file=*) seen_bep=1 ;;\n  esac\ndone\n[ \"$seen_bes\" -eq 1 ] && [ \"$seen_bep\" -eq 1 ]\n",
+    )
+    .await;
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec![
+                "//:target".into(),
+                "--bes_backend=grpc://example.invalid:1985".into(),
+            ],
+        ))
+        .await
+        .unwrap();
     assert_eq!(record.state, InvocationState::Succeeded);
 }
 
@@ -517,4 +715,72 @@ async fn postprocessing_failures_do_not_leave_invocations_running() {
     assert!(record.state.is_terminal());
     assert_eq!(record.state, InvocationState::Failed);
     assert!(record.summary.is_some());
+}
+
+#[tokio::test]
+async fn evidence_file_failures_become_terminal_instead_of_stranding_starting_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = service(
+        &root,
+        &workspace,
+        "#!/bin/sh\ntrap 'exit 130' INT TERM\nsleep 30\n",
+    )
+    .await;
+    let blocker_request = InvocationRequest::new(
+        workspace.clone(),
+        BazelCommand::Build,
+        vec!["//:blocker".into()],
+    );
+    let blocker_id = blocker_request.id;
+    let blocker = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(blocker_request).await }
+    });
+    loop {
+        if service
+            .store()
+            .get_invocation(blocker_id)
+            .await
+            .is_ok_and(|record| record.state == InvocationState::Running)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let request =
+        InvocationRequest::new(workspace, BazelCommand::Build, vec!["//:disk-full".into()]);
+    let id = request.id;
+    let queued = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(request).await }
+    });
+    let paths = loop {
+        if let Ok(record) = service.store().get_invocation(id).await {
+            break service.store().paths_for(&record);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    tokio::fs::create_dir(&paths.stdout).await.unwrap();
+    service.cancel(blocker_id).await.unwrap();
+    assert_eq!(
+        blocker.await.unwrap().unwrap().state,
+        InvocationState::Cancelled
+    );
+
+    let record = queued.await.unwrap().unwrap();
+    assert_eq!(record.state, InvocationState::Failed);
+    assert!(matches!(
+        record.termination,
+        Some(Termination::SpawnFailure { .. })
+    ));
+    assert!(
+        record
+            .summary
+            .unwrap()
+            .headline
+            .contains("Could not prepare Bazel invocation")
+    );
 }

@@ -1,0 +1,15 @@
+B
+default
+root@
+	j
+childz3
+)
+
+remote.outbytestream://cache/abc/100
+
+rootB
+j
+rootz6
++
+	local.outfile://<WORKSPACE>/local.out0
+child

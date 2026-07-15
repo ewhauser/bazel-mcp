@@ -1,7 +1,11 @@
-load(":rules.bzl", "failing_action", "matrix_test", "slow_action", "write_file")
+load(":rules.bzl", "failing_action", "large_graph", "matrix_test", "remote_cache_action", "slow_action", "write_file")
 
 write_file(name = "ok")
+remote_cache_action(name = "remote_cache_target")
 failing_action(name = "action_failure")
+failing_action(name = "keep_going_failure_one")
+failing_action(name = "keep_going_failure_two")
+failing_action(name = "keep_going_failure_three")
 slow_action(name = "slow")
 matrix_test(name = "test_success")
 matrix_test(
@@ -9,3 +13,5 @@ matrix_test(
     exit_code = 1,
     message = "MATRIX_TEST_ROOT_CAUSE",
 )
+
+large_graph(320)

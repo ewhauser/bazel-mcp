@@ -34,7 +34,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{cancel::terminate_child, capture};
+use crate::{
+    cancel::{ProcessGroupGuard, terminate_child},
+    capture,
+    version::detect_bazel_version,
+};
 
 const REDUCTION_LOG_LIMIT: usize = 16 * 1024 * 1024;
 
@@ -47,6 +51,11 @@ pub struct RunnerConfig {
     pub cancellation_terminate_grace: Duration,
     pub global_concurrency: usize,
     pub output_user_root: Option<PathBuf>,
+    pub isolated_bazel_server_idle_timeout: Duration,
+    pub supported_bazel_major_versions: std::collections::BTreeSet<u32>,
+    pub allow_unsupported_bazel_versions: bool,
+    pub version_check_timeout: Duration,
+    pub maximum_pending_invocations: usize,
 }
 
 impl Default for RunnerConfig {
@@ -59,6 +68,11 @@ impl Default for RunnerConfig {
             cancellation_terminate_grace: Duration::from_secs(5),
             global_concurrency: 4,
             output_user_root: None,
+            isolated_bazel_server_idle_timeout: Duration::from_secs(60),
+            supported_bazel_major_versions: [7, 8, 9].into_iter().collect(),
+            allow_unsupported_bazel_versions: false,
+            version_check_timeout: Duration::from_secs(30),
+            maximum_pending_invocations: 256,
         }
     }
 }
@@ -75,8 +89,14 @@ pub enum RunnerError {
     Join(#[from] tokio::task::JoinError),
     #[error("global invocation semaphore was closed")]
     SchedulerClosed,
+    #[error("invocation queue is full (maximum {0} running or pending invocations)")]
+    QueueFull(usize),
     #[error("invalid runner configuration: {0}")]
     InvalidConfiguration(&'static str),
+    #[error("unsupported Bazel major version {detected}; supported major versions: {supported:?}")]
+    UnsupportedBazelVersion { detected: u32, supported: Vec<u32> },
+    #[error("Bazel compatibility check failed: {0}")]
+    VersionCheck(String),
     #[error("invocation is already terminal: {0}")]
     AlreadyTerminal(InvocationId),
     #[error("requested log cursor is invalid or outside the file")]
@@ -93,8 +113,17 @@ pub struct InvocationService {
     config: RunnerConfig,
     redactor: Redactor,
     global: Arc<Semaphore>,
+    pending: Arc<Semaphore>,
     workspace_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
     live: Arc<Mutex<HashMap<InvocationId, CancellationToken>>>,
+    version_cache: Arc<Mutex<HashMap<VersionCacheKey, u32>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct VersionCacheKey {
+    executable: PathBuf,
+    workspace: PathBuf,
+    environment: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -174,6 +203,11 @@ impl InvocationService {
                 "global concurrency must be greater than zero",
             ));
         }
+        if config.maximum_pending_invocations < config.global_concurrency {
+            return Err(RunnerError::InvalidConfiguration(
+                "maximum pending invocations must be at least global concurrency",
+            ));
+        }
         if config.maximum_timeout.is_zero() {
             return Err(RunnerError::InvalidConfiguration(
                 "maximum timeout must be greater than zero",
@@ -184,14 +218,33 @@ impl InvocationService {
                 "default timeout exceeds maximum timeout",
             ));
         }
+        if config.version_check_timeout.is_zero() {
+            return Err(RunnerError::InvalidConfiguration(
+                "version check timeout must be greater than zero",
+            ));
+        }
+        if config.isolated_bazel_server_idle_timeout.is_zero() {
+            return Err(RunnerError::InvalidConfiguration(
+                "isolated Bazel server idle timeout must be greater than zero",
+            ));
+        }
+        if !config.allow_unsupported_bazel_versions
+            && config.supported_bazel_major_versions.is_empty()
+        {
+            return Err(RunnerError::InvalidConfiguration(
+                "supported Bazel major versions must not be empty",
+            ));
+        }
         let redactor = Redactor::new(&config.policy.redaction_patterns)?;
         Ok(Self {
             store,
             global: Arc::new(Semaphore::new(config.global_concurrency)),
+            pending: Arc::new(Semaphore::new(config.maximum_pending_invocations)),
             config,
             redactor,
             workspace_locks: Arc::new(Mutex::new(HashMap::new())),
             live: Arc::new(Mutex::new(HashMap::new())),
+            version_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -214,10 +267,16 @@ impl InvocationService {
         validate_arguments(&request.startup_arguments)?;
         validate_arguments(&request.arguments)?;
         validate_query_arguments(&request.command, &request.arguments)?;
+        let _pending_permit = self
+            .pending
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RunnerError::QueueFull(self.config.maximum_pending_invocations))?;
         let workspace = validate_workspace(&request.workspace, &self.config.policy.allowed_roots)?;
         let lock_key = effective_output_base(&workspace, &request.startup_arguments)?
             .unwrap_or_else(|| workspace.clone());
         let executable = resolve_bazel_executable(&workspace, &self.config.policy)?;
+        self.validate_bazel_version(&executable, &workspace).await?;
         request.workspace = workspace.clone();
         let id = request.id;
         let queued = InvocationRecord::queued(request);
@@ -245,9 +304,47 @@ impl InvocationService {
             if cancellation.is_cancelled() {
                 return self.finish_cancelled(id).await;
             }
-            self.store
+            if let Err(error) = self
+                .store
                 .transition(id, InvocationState::Starting, None, None)
-                .await?;
+                .await
+            {
+                let message = self.redactor.redact_bounded(
+                    &format!("could not record Bazel starting state: {error}"),
+                    1_000,
+                );
+                tracing::warn!(invocation_id = %id, %message);
+                if self
+                    .store
+                    .get_invocation(id)
+                    .await
+                    .is_ok_and(|record| !record.state.is_terminal())
+                {
+                    let _ = self
+                        .store
+                        .transition(
+                            id,
+                            InvocationState::Failed,
+                            Some(Termination::SpawnFailure {
+                                message: message.clone(),
+                            }),
+                            Some(bazel_mcp_types::InvocationSummary {
+                                success: false,
+                                headline: format!("Could not start Bazel: {message}"),
+                                truncated: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await;
+                }
+                if let Ok(record) = self.store.get_invocation(id).await
+                    && record.state.is_terminal()
+                    && record.summary.is_some()
+                {
+                    return Ok(record);
+                }
+                return Err(error.into());
+            }
             let result = self
                 .execute(&queued, &paths, &executable, cancellation.clone())
                 .await;
@@ -260,8 +357,73 @@ impl InvocationService {
         result
     }
 
+    async fn validate_bazel_version(
+        &self,
+        executable: &Path,
+        workspace: &Path,
+    ) -> Result<(), RunnerError> {
+        if self.config.allow_unsupported_bazel_versions {
+            return Ok(());
+        }
+        let environment = filtered_environment(&self.config.policy);
+        let key = VersionCacheKey {
+            executable: executable.to_owned(),
+            workspace: workspace.to_owned(),
+            environment: environment
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        };
+        let mut version_cache = self.version_cache.lock().await;
+        let major = if let Some(major) = version_cache.get(&key).copied() {
+            major
+        } else {
+            let version = detect_bazel_version(
+                executable,
+                workspace,
+                &environment,
+                self.config.version_check_timeout,
+                self.config.cancellation_interrupt_grace,
+                self.config.cancellation_terminate_grace,
+            )
+            .await
+            .map_err(|error| RunnerError::VersionCheck(error.to_string()))?;
+            version_cache.insert(key, version.major);
+            version.major
+        };
+        drop(version_cache);
+        if self.config.supported_bazel_major_versions.contains(&major) {
+            Ok(())
+        } else {
+            Err(RunnerError::UnsupportedBazelVersion {
+                detected: major,
+                supported: self
+                    .config
+                    .supported_bazel_major_versions
+                    .iter()
+                    .copied()
+                    .collect(),
+            })
+        }
+    }
+
     pub async fn cancel(&self, id: InvocationId) -> Result<CancelResult, RunnerError> {
         self.cancel_with_reason(id, None).await
+    }
+
+    /// Request cancellation for every invocation owned by this server process.
+    /// Used during graceful transport and operating-system shutdown.
+    pub async fn cancel_all_active(&self) -> usize {
+        let cancellations: Vec<_> = self.live.lock().await.values().cloned().collect();
+        let count = cancellations.len();
+        for cancellation in cancellations {
+            cancellation.cancel();
+        }
+        count
+    }
+
+    pub async fn active_invocation_count(&self) -> usize {
+        self.live.lock().await.len()
     }
 
     pub async fn cancel_with_reason(
@@ -559,14 +721,45 @@ impl InvocationService {
             bazel_mcp_types::unix_timestamp_ms().saturating_sub(queued.request.requested_at_ms),
         )
         .unwrap_or_default();
-        let (stdout, stderr) = capture::open_stdio(paths).await?;
+        let (stdout, stderr) = match capture::open_stdio(paths).await {
+            Ok(streams) => streams,
+            Err(error) => {
+                let message = self.redactor.redact_bounded(
+                    &format!("could not create Bazel evidence files: {error}"),
+                    1_000,
+                );
+                let summary = bazel_mcp_types::InvocationSummary {
+                    success: false,
+                    headline: format!("Could not prepare Bazel invocation: {message}"),
+                    truncated: true,
+                    ..Default::default()
+                };
+                return self
+                    .store
+                    .transition(
+                        queued.request.id,
+                        InvocationState::Failed,
+                        Some(Termination::SpawnFailure {
+                            message: message.clone(),
+                        }),
+                        Some(summary),
+                    )
+                    .await
+                    .map_err(Into::into);
+            }
+        };
         let mut command = Command::new(executable);
         command
             .current_dir(&queued.request.workspace)
             .env_clear()
             .envs(filtered_environment(&self.config.policy));
         if let Some(output_user_root) = &self.config.output_user_root {
-            command.arg(format!("--output_user_root={}", output_user_root.display()));
+            command
+                .arg(format!("--output_user_root={}", output_user_root.display()))
+                .arg(format!(
+                    "--max_idle_secs={}",
+                    self.config.isolated_bazel_server_idle_timeout.as_secs()
+                ));
         }
         command
             .args(&queued.request.startup_arguments)
@@ -616,6 +809,7 @@ impl InvocationService {
                     .map_err(Into::into);
             }
         };
+        let mut process_group = ProcessGroupGuard::for_child(&child);
         if let Err(error) = self
             .store
             .transition(queued.request.id, InvocationState::Running, None, None)
@@ -697,6 +891,7 @@ impl InvocationService {
                 (Some(status), Termination::Timeout, InvocationState::TimedOut)
             }
         };
+        process_group.disarm();
         let bazel_wall_ms = duration_millis(started.elapsed());
         let postprocess: Result<InvocationRecord, RunnerError> = async {
             let reduction_started = Instant::now();
@@ -939,7 +1134,8 @@ impl InvocationService {
         if current.state.is_terminal() {
             return Ok(current);
         }
-        self.store
+        match self
+            .store
             .transition(
                 id,
                 InvocationState::Cancelled,
@@ -947,7 +1143,23 @@ impl InvocationService {
                 Some(cancelled_summary()),
             )
             .await
-            .map_err(Into::into)
+        {
+            Ok(record) => Ok(record),
+            Err(StoreError::State(_)) => {
+                let record = self.store.get_invocation(id).await?;
+                if record.state.is_terminal() {
+                    Ok(record)
+                } else {
+                    Err(RunnerError::Store(StoreError::State(
+                        bazel_mcp_types::StateTransitionError {
+                            current: record.state,
+                            next: InvocationState::Cancelled,
+                        },
+                    )))
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn redacted_request(&self, request: &InvocationRequest) -> InvocationRequest {

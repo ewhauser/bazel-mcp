@@ -1,0 +1,22 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.1.0) and connecting to it...
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: target //consumer:uses_private (5 packages loaded, 6 targets configured)
+Analyzing: target //consumer:uses_private (5 packages loaded, 6 targets configured)
+
+ERROR: <WORKSPACE>/consumer/BUILD.bazel:3:17: in fixture_consumer rule //consumer:uses_private: Visibility error:
+target '//private:private' is not visible from
+target '//consumer:uses_private'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+ERROR: <WORKSPACE>/consumer/BUILD.bazel:3:17: Analysis of target '//consumer:uses_private' (config: 680dcaf) failed
+ERROR: Analysis of target '//consumer:uses_private' failed; build aborted
+INFO: Elapsed time: 4.865s, Critical Path: 0.01s
+INFO: 1 process: 1 internal.
+ERROR: Build did NOT complete successfully
+FAILED:
+INFO: Build Event Protocol files produced successfully.

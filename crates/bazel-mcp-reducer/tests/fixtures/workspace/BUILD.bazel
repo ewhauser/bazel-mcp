@@ -1,0 +1,64 @@
+load("//:fixture_rules.bzl", "fixture_action", "fixture_test")
+
+fixture_action(
+    name = "compile_failure",
+    command = "echo 'fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE' >&2; exit 1",
+)
+
+fixture_action(
+    name = "custom_failure_one",
+    command = "echo 'ERROR: CUSTOM_ACTION_ROOT_CAUSE_ONE' >&2; exit 1",
+)
+
+fixture_action(
+    name = "custom_failure_two",
+    command = "echo 'ERROR: CUSTOM_ACTION_ROOT_CAUSE_TWO' >&2; exit 1",
+)
+
+fixture_test(
+    name = "pass",
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${TEST_SHARD_STATUS_FILE:-}" ]]; then touch "$TEST_SHARD_STATUS_FILE"; fi
+echo PASS
+""",
+)
+
+fixture_test(
+    name = "fail",
+    script = """#!/usr/bin/env bash
+echo TEST_ROOT_CAUSE >&2
+exit 1
+""",
+)
+
+fixture_test(
+    name = "flaky",
+    flaky = True,
+    script = """#!/usr/bin/env bash
+marker=/tmp/bazel-mcp-fixture-flaky-marker
+if [[ -e "$marker" ]]; then echo FLAKY_RECOVERED; exit 0; fi
+touch "$marker"
+echo FLAKY_ROOT_CAUSE >&2
+exit 1
+""",
+)
+
+fixture_test(
+    name = "sharded",
+    shard_count = 2,
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+touch "$TEST_SHARD_STATUS_FILE"
+echo SHARD_${TEST_SHARD_INDEX}
+""",
+)
+
+fixture_test(
+    name = "timeout",
+    script = """#!/usr/bin/env bash
+echo TIMEOUT_ROOT_CAUSE >&2
+sleep 5
+""",
+    timeout = "short",
+)

@@ -1,0 +1,17 @@
+Extracting Bazel installation...
+Starting local Bazel server and connecting to it...
+Computing main repo mapping:
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: target //consumer:uses_private (1 packages loaded, 0 targets configured)
+Analyzing: target //consumer:uses_private (1 packages loaded, 0 targets configured)
+
+ERROR: <WORKSPACE>/consumer/BUILD.bazel:3:17: in fixture_consumer rule //consumer:uses_private: target '//private:private' is not visible from target '//consumer:uses_private'. Check the visibility declaration of the former target if you think the dependency is legitimate
+ERROR: <WORKSPACE>/consumer/BUILD.bazel:3:17: Analysis of target '//consumer:uses_private' failed
+ERROR: Analysis of target '//consumer:uses_private' failed; build aborted
+INFO: Elapsed time: 3.116s, Critical Path: 0.01s
+INFO: 1 process: 1 internal.
+ERROR: Build did NOT complete successfully
+FAILED:
+INFO: Build Event Protocol files produced successfully.

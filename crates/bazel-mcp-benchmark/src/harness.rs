@@ -14,9 +14,11 @@ use tokio::{
 };
 
 use crate::{
-    AdapterMetrics, BenchmarkReport, EnvironmentMetadata, ProjectManifest, Scenario,
-    SummaryStatistics, Transcript, TranscriptEvent, TranscriptKind,
+    AdapterMetrics, BaselineComparison, BenchmarkReport, EnvironmentMetadata, Estimate,
+    ProjectManifest, Scenario, SummaryStatistics, Transcript, TranscriptEvent, TranscriptKind,
 };
+
+const BOOTSTRAP_RESAMPLES: usize = 4_000;
 
 const SYSTEM_PROMPT: &str = "You are a coding agent operating in a large Bazel repository. Run the requested validation, wait for it to finish, and identify the actionable root cause on failure. Tool results and prior messages remain in context at every model decision.";
 const OPTIMIZED_INSTRUCTIONS: &str = "Batch compatible targets. Use a 30-second initial yield. If still running, poll once after 30 seconds and then no more often than every 60 seconds. Use concise progress updates. Configure Bazel with color and curses disabled, a 60-second progress rate limit, and test output only on errors. Read a failed-test log at most once.";
@@ -155,7 +157,11 @@ pub async fn run_integration(config: HarnessConfig) -> anyhow::Result<BenchmarkR
                     let evidence_path = run_root
                         .join("evidence")
                         .join(format!("{artifact_name}.log"));
-                    tokio::fs::write(&evidence_path, &observation.raw_evidence).await?;
+                    tokio::fs::write(
+                        &evidence_path,
+                        canonicalize_output(&observation.raw_evidence, &worktree, &output_root),
+                    )
+                    .await?;
                     ensure!(
                         observation.exit_code == Some(scenario.expected_exit),
                         "{} {} expected exit {}, observed {:?}; evidence: {}",
@@ -208,15 +214,23 @@ pub async fn run_integration(config: HarnessConfig) -> anyhow::Result<BenchmarkR
         }
     }
 
-    let aggregate_reduction_percent = aggregate(&samples, None)?;
-    let reduction_percent_by_cache = config
-        .cache_conditions
+    let comparisons = [Adapter::ShellDefault, Adapter::ShellOptimized]
+        .into_iter()
+        .map(|baseline| build_comparison(&samples, baseline, &config.cache_conditions))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let default_comparison = comparisons
         .iter()
-        .map(|cache| Ok((cache.clone(), aggregate(&samples, Some(cache))?)))
-        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        .find(|comparison| comparison.baseline_adapter == Adapter::ShellDefault.name())
+        .context("default shell comparison is missing")?;
+    let aggregate_reduction_percent = point_estimates(&default_comparison.aggregate);
+    let reduction_percent_by_cache = default_comparison
+        .by_cache
+        .iter()
+        .map(|(cache, estimates)| (cache.clone(), point_estimates(estimates)))
+        .collect();
     let statistics = statistics(&samples);
     let report = BenchmarkReport {
-        schema_version: 2,
+        schema_version: 3,
         project: config.project.name.clone(),
         commit: config.project.commit.clone(),
         bazel_version: config.project.bazel_version.clone(),
@@ -227,6 +241,7 @@ pub async fn run_integration(config: HarnessConfig) -> anyhow::Result<BenchmarkR
         environment: environment_metadata(),
         samples,
         statistics,
+        comparisons,
         aggregate_reduction_percent,
         reduction_percent_by_cache,
     };
@@ -257,6 +272,59 @@ pub async fn run_integration(config: HarnessConfig) -> anyhow::Result<BenchmarkR
         assert_gates(&report, &scenarios)?;
     }
     Ok(report)
+}
+
+/// Recompute schema-v3 statistics and paired confidence intervals from a
+/// completed schema-v2-or-newer run without re-executing Bazel. Raw samples are
+/// retained byte-for-byte; the report and Markdown summary are replaced.
+pub async fn recompute_report(path: &Path) -> anyhow::Result<BenchmarkReport> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read benchmark report {}", path.display()))?;
+    let mut report: BenchmarkReport = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse benchmark report {}", path.display()))?;
+    ensure!(
+        report.schema_version >= 2,
+        "only schema-v2-or-newer reports can be recomputed"
+    );
+    let cache_conditions: Vec<_> = report
+        .samples
+        .iter()
+        .map(|sample| sample.cache_condition.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    ensure!(
+        !cache_conditions.is_empty(),
+        "report has no benchmark samples"
+    );
+    report.comparisons = [Adapter::ShellDefault, Adapter::ShellOptimized]
+        .into_iter()
+        .map(|baseline| build_comparison(&report.samples, baseline, &cache_conditions))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let default_comparison = report
+        .comparisons
+        .iter()
+        .find(|comparison| comparison.baseline_adapter == Adapter::ShellDefault.name())
+        .context("default shell comparison is missing")?;
+    report.aggregate_reduction_percent = point_estimates(&default_comparison.aggregate);
+    report.reduction_percent_by_cache = default_comparison
+        .by_cache
+        .iter()
+        .map(|(cache, estimates)| (cache.clone(), point_estimates(estimates)))
+        .collect();
+    report.statistics = statistics(&report.samples);
+    report.schema_version = 3;
+    tokio::fs::write(path, serde_json::to_vec_pretty(&report)?).await?;
+    tokio::fs::write(path.with_file_name("report.md"), report.markdown()).await?;
+    Ok(report)
+}
+
+pub fn assert_acceptance_gates(
+    report: &BenchmarkReport,
+    scenarios: &[Scenario],
+) -> anyhow::Result<()> {
+    assert_gates(report, scenarios)
 }
 
 async fn shutdown_bazel(config: &HarnessConfig, worktree: &Path, output_root: &Path) {
@@ -719,94 +787,206 @@ fn poll_schedule(adapter: Adapter, elapsed_ms: u64) -> Vec<u64> {
     polls
 }
 
-fn aggregate(
+fn build_comparison(
     samples: &[AdapterMetrics],
-    cache_condition: Option<&str>,
-) -> anyhow::Result<BTreeMap<String, f64>> {
-    let baseline: Vec<_> = samples
+    baseline: Adapter,
+    cache_conditions: &[String],
+) -> anyhow::Result<BaselineComparison> {
+    let aggregate = compare(samples, baseline, None)?;
+    let by_cache = cache_conditions
         .iter()
-        .filter(|sample| {
-            sample.adapter == Adapter::ShellDefault.name()
-                && cache_condition.is_none_or(|cache| sample.cache_condition == cache)
-        })
-        .collect();
-    let candidate: Vec<_> = samples
+        .map(|cache| Ok((cache.clone(), compare(samples, baseline, Some(cache))?)))
+        .collect::<anyhow::Result<_>>()?;
+    Ok(BaselineComparison {
+        baseline_adapter: baseline.name().to_owned(),
+        candidate_adapter: Adapter::BazelMcp.name().to_owned(),
+        aggregate,
+        by_cache,
+    })
+}
+
+fn compare(
+    samples: &[AdapterMetrics],
+    baseline: Adapter,
+    cache_condition: Option<&str>,
+) -> anyhow::Result<BTreeMap<String, Estimate>> {
+    let pairs = paired_samples(samples, baseline, cache_condition)?;
+    let seed_prefix = format!("{}:{}", baseline.name(), cache_condition.unwrap_or("all"));
+    Ok(BTreeMap::from([
+        (
+            "cumulative_context_tokens".to_owned(),
+            bootstrap_reduction(
+                &pairs,
+                |sample| sample.transcript.cumulative_context_tokens,
+                stable_seed(&format!("{seed_prefix}:context")),
+            ),
+        ),
+        (
+            "model_visible_bytes".to_owned(),
+            bootstrap_reduction(
+                &pairs,
+                |sample| sample.transcript.model_visible_bytes,
+                stable_seed(&format!("{seed_prefix}:bytes")),
+            ),
+        ),
+        (
+            "visible_tool_tokens".to_owned(),
+            bootstrap_reduction(
+                &pairs,
+                |sample| sample.transcript.visible_tool_tokens,
+                stable_seed(&format!("{seed_prefix}:tool")),
+            ),
+        ),
+        (
+            "bazel_wall_overhead".to_owned(),
+            bootstrap_wall_overhead(&pairs, stable_seed(&format!("{seed_prefix}:wall"))),
+        ),
+    ]))
+}
+
+fn paired_samples<'a>(
+    samples: &'a [AdapterMetrics],
+    baseline: Adapter,
+    cache_condition: Option<&str>,
+) -> anyhow::Result<Vec<(&'a AdapterMetrics, &'a AdapterMetrics)>> {
+    let key = |sample: &'a AdapterMetrics| {
+        (
+            sample.cache_condition.as_str(),
+            sample.scenario.as_str(),
+            sample.sample,
+        )
+    };
+    let candidate: BTreeMap<_, _> = samples
         .iter()
         .filter(|sample| {
             sample.adapter == Adapter::BazelMcp.name()
                 && cache_condition.is_none_or(|cache| sample.cache_condition == cache)
         })
+        .map(|sample| (key(sample), sample))
         .collect();
+    let baseline_samples: Vec<_> = samples
+        .iter()
+        .filter(|sample| {
+            sample.adapter == baseline.name()
+                && cache_condition.is_none_or(|cache| sample.cache_condition == cache)
+        })
+        .collect();
+    ensure!(!baseline_samples.is_empty(), "comparison has no samples");
     ensure!(
-        !baseline.is_empty() && baseline.len() == candidate.len(),
-        "incomplete adapter samples"
+        baseline_samples.len() == candidate.len(),
+        "incomplete {} versus {} sample pairs",
+        baseline.name(),
+        Adapter::BazelMcp.name()
     );
-    let baseline_context: u64 = baseline
-        .iter()
-        .map(|sample| sample.transcript.cumulative_context_tokens)
-        .sum();
-    let candidate_context: u64 = candidate
-        .iter()
-        .map(|sample| sample.transcript.cumulative_context_tokens)
-        .sum();
-    let baseline_visible: u64 = baseline
-        .iter()
-        .map(|sample| sample.transcript.model_visible_bytes)
-        .sum();
-    let candidate_visible: u64 = candidate
-        .iter()
-        .map(|sample| sample.transcript.model_visible_bytes)
-        .sum();
-    let baseline_tool: u64 = baseline
-        .iter()
-        .map(|sample| sample.transcript.visible_tool_tokens)
-        .sum();
-    let candidate_tool: u64 = candidate
-        .iter()
-        .map(|sample| sample.transcript.visible_tool_tokens)
-        .sum();
-    let baseline_wall: BTreeMap<_, _> = baseline
-        .iter()
-        .map(|sample| {
-            (
-                (
-                    sample.cache_condition.as_str(),
-                    sample.scenario.as_str(),
-                    sample.sample,
-                ),
-                sample.bazel_wall_ms,
-            )
+    baseline_samples
+        .into_iter()
+        .map(|baseline_sample| {
+            let candidate_sample =
+                candidate
+                    .get(&key(baseline_sample))
+                    .copied()
+                    .with_context(|| {
+                        format!(
+                            "missing {} sample for {}/{}/{}",
+                            Adapter::BazelMcp.name(),
+                            baseline_sample.cache_condition,
+                            baseline_sample.scenario,
+                            baseline_sample.sample
+                        )
+                    })?;
+            Ok((baseline_sample, candidate_sample))
         })
-        .collect();
-    let paired_overheads = candidate
+        .collect()
+}
+
+fn bootstrap_reduction(
+    pairs: &[(&AdapterMetrics, &AdapterMetrics)],
+    metric: impl Fn(&AdapterMetrics) -> u64 + Copy,
+    seed: u64,
+) -> Estimate {
+    let value = reduction(
+        pairs.iter().map(|(_, candidate)| metric(candidate)).sum(),
+        pairs.iter().map(|(baseline, _)| metric(baseline)).sum(),
+    );
+    let mut random = DeterministicRandom::new(seed);
+    let mut estimates = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        let mut baseline_total = 0_u64;
+        let mut candidate_total = 0_u64;
+        for _ in 0..pairs.len() {
+            let (baseline, candidate) = pairs[random.index(pairs.len())];
+            baseline_total = baseline_total.saturating_add(metric(baseline));
+            candidate_total = candidate_total.saturating_add(metric(candidate));
+        }
+        estimates.push(reduction(candidate_total, baseline_total));
+    }
+    estimate_with_interval(value, estimates)
+}
+
+fn bootstrap_wall_overhead(pairs: &[(&AdapterMetrics, &AdapterMetrics)], seed: u64) -> Estimate {
+    let paired_overheads: Vec<_> = pairs
         .iter()
-        .filter_map(|sample| {
-            let baseline = baseline_wall.get(&(
-                sample.cache_condition.as_str(),
-                sample.scenario.as_str(),
-                sample.sample,
-            ))?;
-            Some(overhead(sample.bazel_wall_ms, *baseline))
-        })
+        .map(|(baseline, candidate)| overhead(candidate.bazel_wall_ms, baseline.bazel_wall_ms))
         .collect();
-    Ok(BTreeMap::from([
-        (
-            "cumulative_context_tokens".to_owned(),
-            reduction(candidate_context, baseline_context),
-        ),
-        (
-            "model_visible_bytes".to_owned(),
-            reduction(candidate_visible, baseline_visible),
-        ),
-        (
-            "visible_tool_tokens".to_owned(),
-            reduction(candidate_tool, baseline_tool),
-        ),
-        (
-            "bazel_wall_overhead".to_owned(),
-            median_f64(paired_overheads),
-        ),
-    ]))
+    let value = median_f64(paired_overheads.clone());
+    let mut random = DeterministicRandom::new(seed);
+    let mut estimates = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
+        let resample = (0..paired_overheads.len())
+            .map(|_| paired_overheads[random.index(paired_overheads.len())])
+            .collect();
+        estimates.push(median_f64(resample));
+    }
+    estimate_with_interval(value, estimates)
+}
+
+fn estimate_with_interval(value: f64, mut estimates: Vec<f64>) -> Estimate {
+    estimates.sort_by(f64::total_cmp);
+    Estimate {
+        value,
+        ci95_lower: percentile_sorted_f64(&estimates, 25, 1_000),
+        ci95_upper: percentile_sorted_f64(&estimates, 975, 1_000),
+    }
+}
+
+fn percentile_sorted_f64(values: &[f64], numerator: usize, denominator: usize) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let index = (values.len() * numerator)
+        .div_ceil(denominator)
+        .saturating_sub(1)
+        .min(values.len() - 1);
+    values[index]
+}
+
+fn point_estimates(estimates: &BTreeMap<String, Estimate>) -> BTreeMap<String, f64> {
+    estimates
+        .iter()
+        .map(|(metric, estimate)| (metric.clone(), estimate.value))
+        .collect()
+}
+
+struct DeterministicRandom(u64);
+
+impl DeterministicRandom {
+    fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
+
+    fn index(&mut self, length: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 as usize) % length
+    }
+}
+
+fn stable_seed(value: &str) -> u64 {
+    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 fn statistics(samples: &[AdapterMetrics]) -> Vec<SummaryStatistics> {
@@ -910,26 +1090,44 @@ fn environment_metadata() -> EnvironmentMetadata {
 }
 
 fn assert_gates(report: &BenchmarkReport, scenarios: &[Scenario]) -> anyhow::Result<()> {
-    ensure!(
-        scenarios.iter().any(|scenario| scenario.command == "build")
-            && scenarios.iter().any(|scenario| scenario.command == "test"),
-        "the acceptance run must include both Bazel build and test"
-    );
-    let context = report.aggregate_reduction_percent["cumulative_context_tokens"];
-    let bytes = report.aggregate_reduction_percent["model_visible_bytes"];
-    let overhead = report.aggregate_reduction_percent["bazel_wall_overhead"];
-    ensure!(
-        context >= 75.0,
-        "context token reduction {context:.2}% is below 75%"
-    );
-    ensure!(
-        bytes >= 75.0,
-        "visible byte reduction {bytes:.2}% is below 75%"
-    );
-    ensure!(
-        overhead <= 3.0,
-        "Bazel wall-time overhead {overhead:.2}% exceeds 3%"
-    );
+    for required in [
+        "build_success",
+        "build_compile_failure",
+        "build_noisy_failure",
+        "test_success",
+        "test_failure",
+        "query",
+    ] {
+        ensure!(
+            scenarios.iter().any(|scenario| scenario.name == required),
+            "the acceptance run is missing required scenario {required}"
+        );
+    }
+    for comparison in &report.comparisons {
+        let context = &comparison.aggregate["cumulative_context_tokens"];
+        let bytes = &comparison.aggregate["model_visible_bytes"];
+        let overhead = &comparison.aggregate["bazel_wall_overhead"];
+        ensure!(
+            context.value >= 75.0 && context.ci95_lower >= 75.0,
+            "context token reduction against {} is {:.2}% (95% CI lower {:.2}%), below 75%",
+            comparison.baseline_adapter,
+            context.value,
+            context.ci95_lower
+        );
+        ensure!(
+            bytes.value >= 75.0 && bytes.ci95_lower >= 75.0,
+            "visible byte reduction against {} is {:.2}% (95% CI lower {:.2}%), below 75%",
+            comparison.baseline_adapter,
+            bytes.value,
+            bytes.ci95_lower
+        );
+        ensure!(
+            overhead.value <= 3.0,
+            "Bazel wall-time overhead against {} is {:.2}%, above 3%",
+            comparison.baseline_adapter,
+            overhead.value
+        );
+    }
     ensure!(
         report.samples.iter().all(|sample| sample.diagnostic_found),
         "at least one expected root cause was absent from model-visible output"

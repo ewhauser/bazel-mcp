@@ -12,4 +12,12 @@ redaction_patterns = ["(?i)token=[^\\s]+"]
 retention_days = 7
 maximum_storage_bytes = 10737418240
 # Model-visible tool results: "text" (compact JSON), "toon", "structured", or "both".
+retention_cleanup_interval_seconds = 3600
 result_encoding = "text"
+supported_bazel_major_versions = [7, 8, 9]
+# Set only to explicitly accept an untested Bazel major version.
+allow_unsupported_bazel_versions = false
+version_check_timeout_seconds = 30
+maximum_pending_invocations = 256
+# Applied only when output_user_root isolates the server from the user's daemon.
+isolated_bazel_server_idle_seconds = 60

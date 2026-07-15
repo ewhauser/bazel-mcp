@@ -11,6 +11,7 @@ fuzz/corpus/
 fuzz/artifacts/
 fuzz/target/
 /bazel-mcp.cdx.xml
+/docs/benchmarks/
 *.cdx.json
 *.db
 *.db-shm

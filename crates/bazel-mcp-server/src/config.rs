@@ -56,6 +56,12 @@ pub struct ServerConfig {
     pub retention_days: u64,
     pub maximum_storage_bytes: u64,
     pub result_encoding: ResultEncoding,
+    pub supported_bazel_major_versions: BTreeSet<u32>,
+    pub allow_unsupported_bazel_versions: bool,
+    pub version_check_timeout_seconds: u64,
+    pub maximum_pending_invocations: usize,
+    pub retention_cleanup_interval_seconds: u64,
+    pub isolated_bazel_server_idle_seconds: u64,
 }
 
 impl Default for ServerConfig {
@@ -80,6 +86,12 @@ impl Default for ServerConfig {
             retention_days: 7,
             maximum_storage_bytes: 10 * 1024 * 1024 * 1024,
             result_encoding: ResultEncoding::Text,
+            supported_bazel_major_versions: [7, 8, 9].into_iter().collect(),
+            allow_unsupported_bazel_versions: false,
+            version_check_timeout_seconds: 30,
+            maximum_pending_invocations: 256,
+            retention_cleanup_interval_seconds: 60 * 60,
+            isolated_bazel_server_idle_seconds: 60,
         }
     }
 }
@@ -104,6 +116,9 @@ impl ServerConfig {
         if config.global_concurrency == 0 {
             anyhow::bail!("global concurrency must be greater than zero");
         }
+        if config.maximum_pending_invocations < config.global_concurrency {
+            anyhow::bail!("maximum pending invocations must be at least global concurrency");
+        }
         if config.maximum_timeout_seconds == 0 {
             anyhow::bail!("maximum timeout must be greater than zero");
         }
@@ -115,6 +130,20 @@ impl ServerConfig {
         }
         if config.progress_initial_seconds == 0 || config.progress_interval_seconds == 0 {
             anyhow::bail!("progress timing must be greater than zero");
+        }
+        if config.version_check_timeout_seconds == 0 {
+            anyhow::bail!("version check timeout must be greater than zero");
+        }
+        if config.retention_cleanup_interval_seconds == 0 {
+            anyhow::bail!("retention cleanup interval must be greater than zero");
+        }
+        if config.isolated_bazel_server_idle_seconds == 0 {
+            anyhow::bail!("isolated Bazel server idle timeout must be greater than zero");
+        }
+        if !config.allow_unsupported_bazel_versions
+            && config.supported_bazel_major_versions.is_empty()
+        {
+            anyhow::bail!("supported Bazel major versions must not be empty");
         }
         config.cache_root = canonicalize_with_missing_tail(&config.cache_root)?;
         config.allowed_roots = config

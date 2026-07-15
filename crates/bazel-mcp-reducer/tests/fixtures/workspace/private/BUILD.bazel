@@ -1,0 +1,6 @@
+load("//:fixture_rules.bzl", "fixture_library")
+
+fixture_library(
+    name = "private",
+    visibility = ["//visibility:private"],
+)
