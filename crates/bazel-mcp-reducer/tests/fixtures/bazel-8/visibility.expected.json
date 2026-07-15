@@ -1,0 +1,94 @@
+{
+  "event_count": 52,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: in fixture_consumer rule //consumer:uses_private: Visibility error:\ntarget '//private:private' is not visible from\ntarget '//consumer:uses_private'\nRecommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility",
+    "targets": [],
+    "target_counts": {
+      "requested": 0,
+      "succeeded": 0,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "in fixture_consumer rule //consumer:uses_private: Visibility error:\ntarget '//private:private' is not visible from\ntarget '//consumer:uses_private'\nRecommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility",
+        "location": null,
+        "target": "//consumer:uses_private",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "visibility",
+        "message": "ERROR: <WORKSPACE>/consumer/BUILD.bazel:3:17: in fixture_consumer rule //consumer:uses_private: Visibility error:",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "ERROR: <WORKSPACE>/consumer/BUILD.bazel:3:17: Analysis of target '//consumer:uses_private' (config: 7f8856b) failed",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "ERROR: Analysis of target '//consumer:uses_private' failed; build aborted",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "unknown",
+        "message": "FAILED:",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

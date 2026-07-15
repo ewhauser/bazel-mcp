@@ -1,1 +1,4 @@
 module(name = "bazel_mcp_matrix")
+
+broken = use_extension("//:repo_ext.bzl", "broken_extension")
+use_repo(broken, "matrix_broken_repo")

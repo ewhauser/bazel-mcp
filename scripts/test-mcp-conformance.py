@@ -39,7 +39,11 @@ def main():
         (workspace / "MODULE.bazel").write_text("module(name='conformance')\n")
         wrapper = workspace / "tools" / "bazel"
         wrapper.parent.mkdir()
-        wrapper.write_text("#!/bin/sh\nsleep 2\nexit 0\n")
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "if [ \"${1:-}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n"
+            "sleep 2\nexit 0\n"
+        )
         wrapper.chmod(0o700)
         config = temporary / "config.toml"
         config.write_text(

@@ -22,6 +22,7 @@ const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_targets_coverage.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_canonical_arguments.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_cancellation_reason.sql");
+const LATEST_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -33,6 +34,10 @@ pub enum StoreError {
     InvalidCursor,
     #[error("unexpected database value in column {0}")]
     InvalidColumn(usize),
+    #[error("database schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: i64, supported: i64 },
+    #[error("database schema is inconsistent: {0}")]
+    InconsistentSchema(String),
     #[error(transparent)]
     Database(#[from] turso::Error),
     #[error(transparent)]
@@ -804,6 +809,14 @@ impl Store {
     async fn migrate(&self) -> Result<(), StoreError> {
         let _guard = self.write_coordinator.lock().await;
         let connection = self.database.connect()?;
+        if let Some(found) = recorded_schema_version(&connection).await?
+            && found > LATEST_SCHEMA_VERSION
+        {
+            return Err(StoreError::UnsupportedSchemaVersion {
+                found,
+                supported: LATEST_SCHEMA_VERSION,
+            });
+        }
         // Migration 1 creates the ledger itself, so its idempotent DDL and
         // ledger write are always attempted in the same transaction.
         apply_migration(&connection, 1, MIGRATION_1).await?;
@@ -816,6 +829,7 @@ impl Store {
                 apply_migration(&connection, version, sql).await?;
             }
         }
+        validate_schema(&connection).await?;
         Ok(())
     }
 
@@ -894,6 +908,72 @@ async fn migration_applied(connection: &Connection, version: i64) -> Result<bool
         )
         .await?;
     Ok(rows.next().await?.is_some())
+}
+
+async fn recorded_schema_version(connection: &Connection) -> Result<Option<i64>, StoreError> {
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name = 'schema_migrations'",
+            (),
+        )
+        .await?;
+    let exists = rows
+        .next()
+        .await?
+        .ok_or(StoreError::InvalidColumn(0))?
+        .get::<i64>(0)?
+        > 0;
+    drop(rows);
+    if !exists {
+        return Ok(None);
+    }
+    let mut rows = connection
+        .query("SELECT MAX(version) FROM schema_migrations", ())
+        .await?;
+    let row = rows.next().await?.ok_or(StoreError::InvalidColumn(0))?;
+    match row.get_value(0)? {
+        Value::Null => Ok(None),
+        Value::Integer(version) => Ok(Some(version)),
+        _ => Err(StoreError::InvalidColumn(0)),
+    }
+}
+
+async fn validate_schema(connection: &Connection) -> Result<(), StoreError> {
+    for (table, columns) in [
+        (
+            "invocations",
+            &[
+                "id",
+                "request_json",
+                "metrics_json",
+                "canonical_arguments_json",
+                "cancellation_reason",
+            ][..],
+        ),
+        ("diagnostics", &["invocation_id", "record_json"]),
+        ("test_results", &["invocation_id", "record_json"]),
+        ("query_rows", &["invocation_id", "value"]),
+        ("artifacts", &["invocation_id", "record_json"]),
+        ("target_results", &["invocation_id", "record_json"]),
+        ("coverage_files", &["invocation_id", "record_json"]),
+    ] {
+        let mut rows = connection
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await?;
+        let mut found = BTreeSet::new();
+        while let Some(row) = rows.next().await? {
+            found.insert(row.get::<String>(1)?);
+        }
+        for column in columns {
+            if !found.contains(*column) {
+                return Err(StoreError::InconsistentSchema(format!(
+                    "table {table} is missing required column {column}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn apply_migration(
@@ -1372,6 +1452,116 @@ mod tests {
         }
         assert!(columns.contains("canonical_arguments_json"));
         assert!(columns.contains("cancellation_reason"));
+    }
+
+    #[tokio::test]
+    async fn rejects_corrupt_newer_and_inconsistent_databases_without_overwriting_them() {
+        let corrupt = tempdir().unwrap();
+        tokio::fs::write(corrupt.path().join("index.db"), b"not a database")
+            .await
+            .unwrap();
+        assert!(Store::open(corrupt.path()).await.is_err());
+        assert_eq!(
+            tokio::fs::read(corrupt.path().join("index.db"))
+                .await
+                .unwrap(),
+            b"not a database"
+        );
+
+        let newer = tempdir().unwrap();
+        let database_path = newer.path().join("index.db");
+        let database = turso::Builder::new_local(database_path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute_batch(MIGRATION_1).await.unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at_ms) VALUES (999, 1)",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+        assert!(matches!(
+            Store::open(newer.path()).await,
+            Err(StoreError::UnsupportedSchemaVersion { found: 999, .. })
+        ));
+
+        let inconsistent = tempdir().unwrap();
+        let database_path = inconsistent.path().join("index.db");
+        let database = turso::Builder::new_local(database_path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection.execute_batch(MIGRATION_1).await.unwrap();
+        for version in 1..=LATEST_SCHEMA_VERSION {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (?1, 1)",
+                    params![version],
+                )
+                .await
+                .unwrap();
+        }
+        drop(connection);
+        drop(database);
+        assert!(matches!(
+            Store::open(inconsistent.path()).await,
+            Err(StoreError::InconsistentSchema(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_cache_root_that_is_not_a_writable_directory() {
+        let root = tempdir().unwrap();
+        let regular_file = root.path().join("cache-root");
+        tokio::fs::write(&regular_file, b"occupied").await.unwrap();
+        assert!(matches!(
+            Store::open(&regular_file).await,
+            Err(StoreError::Io(_))
+        ));
+        assert_eq!(tokio::fs::read(&regular_file).await.unwrap(), b"occupied");
+    }
+
+    #[tokio::test]
+    async fn retention_never_evicts_a_long_running_invocation_to_meet_quota() {
+        let root = tempdir().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let mut request = InvocationRequest::new(
+            PathBuf::from("/tmp/workspace"),
+            BazelCommand::Build,
+            vec!["//:long-running".into()],
+        );
+        request.requested_at_ms = request.requested_at_ms.saturating_sub(8 * 60 * 60 * 1000);
+        let id = request.id;
+        store
+            .create_invocation(&InvocationRecord::queued(request))
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .enforce_retention(Duration::from_secs(60), 1)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store.get_invocation(id).await.unwrap().state,
+            InvocationState::Running
+        );
     }
 
     #[tokio::test]

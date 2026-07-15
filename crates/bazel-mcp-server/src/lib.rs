@@ -32,7 +32,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         bazel_executable: config.bazel_executable.clone(),
     };
     let runner = InvocationService::new(
-        store,
+        store.clone(),
         RunnerConfig {
             policy,
             default_timeout: std::time::Duration::from_secs(config.default_timeout_seconds),
@@ -45,18 +45,105 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
             ),
             global_concurrency: config.global_concurrency,
             output_user_root: config.output_user_root.clone(),
+            isolated_bazel_server_idle_timeout: std::time::Duration::from_secs(
+                config.isolated_bazel_server_idle_seconds,
+            ),
+            supported_bazel_major_versions: config.supported_bazel_major_versions.clone(),
+            allow_unsupported_bazel_versions: config.allow_unsupported_bazel_versions,
+            version_check_timeout: std::time::Duration::from_secs(
+                config.version_check_timeout_seconds,
+            ),
+            maximum_pending_invocations: config.maximum_pending_invocations,
         },
     )?;
+    let shutdown_runner = runner.clone();
     let server = BazelMcpServer::new(runner, config.result_encoding).with_progress_timing(
         std::time::Duration::from_secs(config.progress_initial_seconds),
         std::time::Duration::from_secs(config.progress_interval_seconds),
     );
-    server
+    let cleanup_store = store;
+    let cleanup_age =
+        std::time::Duration::from_secs(config.retention_days.saturating_mul(24 * 60 * 60));
+    let cleanup_bytes = config.maximum_storage_bytes;
+    let cleanup_interval =
+        std::time::Duration::from_secs(config.retention_cleanup_interval_seconds);
+    let cleanup_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(cleanup_interval);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match cleanup_store
+                .enforce_retention(cleanup_age, cleanup_bytes)
+                .await
+            {
+                Ok(deleted) if deleted > 0 => {
+                    tracing::info!(deleted, "removed expired Bazel invocation evidence");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "periodic invocation retention failed");
+                }
+            }
+        }
+    });
+    let running = server
         .serve(rmcp::transport::stdio())
         .await
-        .context("start stdio MCP transport")?
-        .waiting()
-        .await
-        .context("run stdio MCP server")?;
-    Ok(())
+        .context("start stdio MCP transport")?;
+    let service_cancellation = running.cancellation_token();
+    let shutdown_wait = config
+        .cancellation_interrupt_grace_seconds
+        .saturating_add(config.cancellation_terminate_grace_seconds)
+        .saturating_add(5);
+    let waiting = running.waiting();
+    tokio::pin!(waiting);
+    let result = tokio::select! {
+        result = &mut waiting => result.context("run stdio MCP server").map(|_| ()),
+        () = shutdown_signal() => {
+            let active = shutdown_runner.cancel_all_active().await;
+            tracing::info!(
+                active,
+                "received shutdown signal; cancelling active Bazel invocations"
+            );
+            service_cancellation.cancel();
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(shutdown_wait);
+            while shutdown_runner.active_invocation_count().await > 0
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            tracing::info!(
+                active = shutdown_runner.active_invocation_count().await,
+                "finished Bazel invocation shutdown wait"
+            );
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                &mut waiting,
+            )
+            .await;
+            Ok(())
+        }
+    };
+    cleanup_task.abort();
+    result
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => { let _ = result; }
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }

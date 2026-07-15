@@ -100,4 +100,20 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[tokio::test]
+    async fn bounded_tail_handles_sparse_multi_gigabyte_logs_without_scaling_memory() {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+        let root = tempdir().unwrap();
+        let path = root.path().join("multi-gigabyte.log");
+        let mut file = fs::File::create(&path).await.unwrap();
+        file.seek(io::SeekFrom::Start(4 * 1024 * 1024 * 1024))
+            .await
+            .unwrap();
+        file.write_all(b"useful-tail").await.unwrap();
+        file.flush().await.unwrap();
+
+        assert_eq!(read_bounded_tail(&path, 11).await.unwrap(), b"useful-tail");
+    }
 }

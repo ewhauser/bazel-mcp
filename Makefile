@@ -1,6 +1,7 @@
 .PHONY: setup-hooks build test test-unit test-integration test-bazel-matrix \
 	setup-oss-corpus test-token-integration run check bench bench-save \
-	bench-compare bench-token bench-token-live fuzz-setup fuzz-list fuzz-smoke \
+	bench-compare bench-token bench-token-live publish-token-benchmark \
+	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
 	fuzz-run harden-release check-release-security \
 	mcp-conformance generate-sbom
 
@@ -11,6 +12,9 @@ NIX_DEVELOP ?= nix --extra-experimental-features 'nix-command flakes' develop --
 OSS_PROJECT ?= abseil-cpp
 TOKEN_ENCODING ?= o200k_base
 TOKEN_SAMPLES ?= 5
+LIVE_AGENT_ARGS ?=
+BENCHMARK_RUN ?= $(shell cat .cache/benchmarks/$(OSS_PROJECT)/LATEST)
+BENCHMARK_ARTIFACT_DIR ?= .cache/published-benchmarks/$(OSS_PROJECT)/$(BENCHMARK_RUN)
 
 setup-hooks:
 	git config core.hooksPath .githooks
@@ -59,7 +63,17 @@ bench-token: test-token-integration
 
 bench-token-live:
 	$(NIX_DEVELOP) ./scripts/benchmarks/run-token-integration.sh \
-		--project $(OSS_PROJECT) --encoding $(TOKEN_ENCODING) --live-agent
+		--project $(OSS_PROJECT) --encoding $(TOKEN_ENCODING) \
+		--samples $(TOKEN_SAMPLES) --live-agent $(LIVE_AGENT_ARGS)
+
+publish-token-benchmark:
+	python3 ./scripts/benchmarks/publish-token-report.py \
+		.cache/benchmarks/$(OSS_PROJECT)/$(BENCHMARK_RUN) \
+		$(BENCHMARK_ARTIFACT_DIR) --replace
+
+generate-bep-goldens:
+	./scripts/fixtures/generate-bep-goldens.sh
+	UPDATE_GOLDENS=1 cargo test -p bazel-mcp-reducer --test golden
 
 fuzz-setup:
 	./scripts/fuzz-init.sh

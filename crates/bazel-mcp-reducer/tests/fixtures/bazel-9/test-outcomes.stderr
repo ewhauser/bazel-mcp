@@ -1,0 +1,41 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.1.0) and connecting to it...
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: 5 targets (5 packages loaded, 6 targets configured)
+Analyzing: 5 targets (5 packages loaded, 6 targets configured)
+
+Analyzing: 5 targets (9 packages loaded, 7 targets configured)
+
+Analyzing: 5 targets (78 packages loaded, 834 targets configured)
+[1 / 1] no actions running
+INFO: Analyzed 5 targets (78 packages loaded, 834 targets configured).
+FAIL: //:fail (Exit 1) (see <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.log)
+FAIL: //:flaky (Exit 1) (see <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log)
+FAIL: //:fail (Exit 1) (see <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log)
+
+FAILED: //:fail (Summary)
+      <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log
+      <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.log
+
+FLAKY: //:flaky (Summary)
+      <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+INFO: From Testing //:flaky:
+INFO: From Testing //:fail:
+[31 / 32] 4 / 5 tests, 1 failed; Testing //:timeout; 1s darwin-sandbox
+[31 / 32] 4 / 5 tests, 1 failed; Testing //:timeout; 2s darwin-sandbox
+
+TIMEOUT: //:timeout (Summary)
+      <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.log
+      <OUTPUT_ROOT>/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test_attempts/attempt_1.log
+INFO: From Testing //:timeout:
+INFO: Found 5 test targets...
+INFO: Elapsed time: 9.051s, Critical Path: 2.14s
+INFO: 32 processes: 26 internal, 18 darwin-sandbox.
+INFO: Build completed, 2 tests FAILED, 32 total actions
+INFO:
+INFO: Build Event Protocol files produced successfully.

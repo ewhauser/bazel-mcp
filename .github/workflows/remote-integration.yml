@@ -1,0 +1,52 @@
+name: Remote Bazel integration
+on:
+  workflow_dispatch:
+    inputs:
+      remote_executor:
+        description: gRPC remote-execution endpoint accepted by Bazel
+        required: true
+        type: string
+      bes_backend:
+        description: BES or BuildBuddy endpoint accepted by Bazel
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: remote-bazel-integration
+  cancel-in-progress: false
+jobs:
+  remote-execution-and-bes:
+    runs-on: ubuntu-24.04
+    environment: remote-integration
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
+      - run: go install github.com/bazelbuild/bazelisk@v1.26.0
+      - name: Exercise remote execution and BES coexistence through MCP
+        env:
+          USE_BAZEL_VERSION: 9.1.0
+          BAZEL_MCP_REMOTE_EXECUTOR: ${{ inputs.remote_executor }}
+          BAZEL_MCP_BES_BACKEND: ${{ inputs.bes_backend }}
+          BAZEL_MCP_REMOTE_HEADER: ${{ secrets.BAZEL_MCP_REMOTE_HEADER }}
+          BAZEL_MCP_BES_HEADER: ${{ secrets.BAZEL_MCP_BES_HEADER }}
+        run: |
+          args=(
+            --workspace "$PWD/.cache/remote-integration/workspace"
+            --server "$PWD/target/debug/bazel-mcp"
+            --bazel "$HOME/go/bin/bazelisk"
+            --root "$PWD/.cache/remote-integration/runtime"
+            --remote-executor "$BAZEL_MCP_REMOTE_EXECUTOR"
+            --bes-backend "$BAZEL_MCP_BES_BACKEND"
+          )
+          mkdir -p .cache/remote-integration/workspace
+          cp -R crates/bazel-mcp-runner/tests/workspaces/basic/. .cache/remote-integration/workspace/
+          if [[ -n "$BAZEL_MCP_REMOTE_HEADER" ]]; then
+            args+=(--remote-header "$BAZEL_MCP_REMOTE_HEADER")
+          fi
+          if [[ -n "$BAZEL_MCP_BES_HEADER" ]]; then
+            args+=(--bes-header "$BAZEL_MCP_BES_HEADER")
+          fi
+          cargo build -p bazel-mcp-server --bin bazel-mcp
+          python3 scripts/test-mcp-smoke.py "${args[@]}"

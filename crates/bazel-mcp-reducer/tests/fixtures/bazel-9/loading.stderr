@@ -1,0 +1,18 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.1.0) and connecting to it...
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//missing:target': no such package 'missing': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - missing
+ERROR: no such package 'missing': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - missing
+INFO: Elapsed time: 4.974s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully
+FAILED:
+INFO: Build Event Protocol files produced successfully.

@@ -1,0 +1,269 @@
+{
+  "event_count": 111,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: FAILED: //:fail (Summary)",
+    "targets": [
+      {
+        "label": "//:fail",
+        "success": true
+      },
+      {
+        "label": "//:flaky",
+        "success": true
+      },
+      {
+        "label": "//:pass",
+        "success": true
+      },
+      {
+        "label": "//:sharded",
+        "success": true
+      },
+      {
+        "label": "//:timeout",
+        "success": true
+      }
+    ],
+    "target_counts": {
+      "requested": 5,
+      "succeeded": 5,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "unknown",
+        "message": "FAILED: //:fail (Summary)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [
+      {
+        "label": "//:fail",
+        "status": "failed",
+        "duration_ms": 34,
+        "attempts": 2,
+        "shard": null,
+        "cases": [],
+        "log_uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log"
+      },
+      {
+        "label": "//:flaky",
+        "status": "flaky",
+        "duration_ms": 34,
+        "attempts": 2,
+        "shard": null,
+        "cases": [],
+        "log_uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log"
+      },
+      {
+        "label": "//:pass",
+        "status": "passed",
+        "duration_ms": 43,
+        "attempts": 1,
+        "shard": null,
+        "cases": [],
+        "log_uri": null
+      },
+      {
+        "label": "//:sharded",
+        "status": "passed",
+        "duration_ms": 94,
+        "attempts": 1,
+        "shard": 2,
+        "cases": [],
+        "log_uri": null
+      },
+      {
+        "label": "//:timeout",
+        "status": "timed_out",
+        "duration_ms": 1024,
+        "attempts": 2,
+        "shard": null,
+        "cases": [],
+        "log_uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.log"
+      }
+    ],
+    "test_counts": {
+      "passed": 2,
+      "failed": 1,
+      "flaky": 1,
+      "skipped": 0,
+      "incomplete": 1
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": [
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/timeout.sh",
+      "kind": "file",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/timeout.sh",
+      "size_bytes": 56,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/flaky.sh",
+      "kind": "file",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/flaky.sh",
+      "size_bytes": 173,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/pass.sh",
+      "kind": "file",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/pass.sh",
+      "size_bytes": 132,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/sharded.sh",
+      "kind": "file",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/sharded.sh",
+      "size_bytes": 101,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/fail.sh",
+      "kind": "file",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/fail.sh",
+      "size_bytes": 52,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/sharded/shard_1_of_2/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/sharded/shard_1_of_2/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/sharded/shard_2_of_2/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/sharded/shard_2_of_2/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/pass/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/pass/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test_attempts/attempt_1.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test_attempts/attempt_1.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    }
+  ]
+}

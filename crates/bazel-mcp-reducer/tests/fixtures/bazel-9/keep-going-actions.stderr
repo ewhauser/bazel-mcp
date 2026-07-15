@@ -1,0 +1,31 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.1.0) and connecting to it...
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: 3 targets (5 packages loaded, 6 targets configured)
+Analyzing: 3 targets (5 packages loaded, 6 targets configured)
+
+INFO: Analyzed 3 targets (5 packages loaded, 9 targets configured).
+ERROR: <WORKSPACE>/BUILD.bazel:3:15: Running fixture action //:compile_failure failed: (Exit 1): bash failed: error executing FixtureAction command (from fixture_action rule target //:compile_failure) /bin/bash -c 'echo '\''fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE
+ERROR: <WORKSPACE>/BUILD.bazel:8:15: Running fixture action //:custom_failure_one failed: (Exit 1): bash failed: error executing FixtureAction command (from fixture_action rule target //:custom_failure_one) /bin/bash -c 'echo '\''ERROR: CUSTOM_ACTION_ROOT_CAUSE_ONE'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ERROR: CUSTOM_ACTION_ROOT_CAUSE_ONE
+ERROR: <WORKSPACE>/BUILD.bazel:13:15: Running fixture action //:custom_failure_two failed: (Exit 1): bash failed: error executing FixtureAction command (from fixture_action rule target //:custom_failure_two) /bin/bash -c 'echo '\''ERROR: CUSTOM_ACTION_ROOT_CAUSE_TWO'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ERROR: CUSTOM_ACTION_ROOT_CAUSE_TWO
+INFO: Found 3 targets...
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 5.014s, Critical Path: 0.02s
+INFO: 4 processes: 4 internal.
+ERROR: Build did NOT complete successfully
+FAILED:
+INFO: Build Event Protocol files produced successfully.

@@ -1,0 +1,143 @@
+{
+  "event_count": 37,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: FixtureAction action failed with exit code 1",
+    "targets": [
+      {
+        "label": "//:compile_failure",
+        "success": false
+      },
+      {
+        "label": "//:custom_failure_one",
+        "success": false
+      },
+      {
+        "label": "//:custom_failure_two",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 3,
+      "succeeded": 0,
+      "failed": 3
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "FixtureAction action failed with exit code 1",
+        "location": null,
+        "target": "//:compile_failure",
+        "action": "FixtureAction",
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "FixtureAction action failed with exit code 1",
+        "location": null,
+        "target": "//:custom_failure_one",
+        "action": "FixtureAction",
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "FixtureAction action failed with exit code 1",
+        "location": null,
+        "target": "//:custom_failure_two",
+        "action": "FixtureAction",
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/BUILD.bazel:13:15: Running fixture action //:custom_failure_two failed: (Exit 1): bash failed: error executing FixtureAction command (from target //:custom_failure_two) /bin/bash -c 'echo '\\''ERROR: CUSTOM_ACTION_ROOT_CAUSE_TWO'\\'' >&2; exit 1'",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: CUSTOM_ACTION_ROOT_CAUSE_TWO",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/BUILD.bazel:3:15: Running fixture action //:compile_failure failed: (Exit 1): bash failed: error executing FixtureAction command (from target //:compile_failure) /bin/bash -c 'echo '\\''fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE'\\'' >&2; exit 1'",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/BUILD.bazel:8:15: Running fixture action //:custom_failure_one failed: (Exit 1): bash failed: error executing FixtureAction command (from target //:custom_failure_one) /bin/bash -c 'echo '\\''ERROR: CUSTOM_ACTION_ROOT_CAUSE_ONE'\\'' >&2; exit 1'",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: CUSTOM_ACTION_ROOT_CAUSE_ONE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "unknown",
+        "message": "FAILED:",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

@@ -1,0 +1,34 @@
+==================== Test output for //:flaky:
+FLAKY_ROOT_CAUSE
+================================================================================
+==================== Test output for //:fail:
+TEST_ROOT_CAUSE
+================================================================================
+==================== Test output for //:fail:
+TEST_ROOT_CAUSE
+================================================================================
+==================== Test output for //:timeout:
+TIMEOUT_ROOT_CAUSE
+-- Test timed out at 2026-07-15 10:40:17 UTC --
+================================================================================
+==================== Test output for //:timeout:
+TIMEOUT_ROOT_CAUSE
+-- Test timed out at 2026-07-15 10:40:18 UTC --
+================================================================================
+//:pass                                                                  PASSED in 0.0s
+//:sharded                                                               PASSED in 0.0s
+  Stats over 2 runs: max = 0.0s, min = 0.0s, avg = 0.0s, dev = 0.0s
+//:flaky                                                                  FLAKY, failed in 1 out of 2 in 0.0s
+  Stats over 2 runs: max = 0.0s, min = 0.0s, avg = 0.0s, dev = 0.0s
+  <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+//:timeout                                                              TIMEOUT in 2 out of 2 in 1.0s
+  Stats over 2 runs: max = 1.0s, min = 1.0s, avg = 1.0s, dev = 0.0s
+  <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.log
+  <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test_attempts/attempt_1.log
+//:fail                                                                  FAILED in 2 out of 2 in 0.0s
+  Stats over 2 runs: max = 0.0s, min = 0.0s, avg = 0.0s, dev = 0.0s
+  <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log
+  <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.log
+
+Executed 5 out of 5 tests: 3 tests pass and 2 fail locally.
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.

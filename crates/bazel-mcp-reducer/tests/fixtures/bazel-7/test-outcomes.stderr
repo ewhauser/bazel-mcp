@@ -1,0 +1,35 @@
+Extracting Bazel installation...
+Starting local Bazel server and connecting to it...
+Computing main repo mapping:
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: 5 targets (1 packages loaded, 0 targets configured)
+Analyzing: 5 targets (1 packages loaded, 0 targets configured)
+
+INFO: Analyzed 5 targets (7 packages loaded, 26 targets configured).
+FAIL: //:fail (see <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.log)
+FAIL: //:flaky (see <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log)
+FAIL: //:fail (see <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log)
+
+FLAKY: //:flaky (Summary)
+      <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log
+
+FAILED: //:fail (Summary)
+      <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log
+      <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test_attempts/attempt_1.log
+INFO: From Testing //:flaky:
+INFO: From Testing //:fail:
+[26 / 27] 4 / 5 tests, 1 failed; Testing //:timeout; 0s darwin-sandbox
+[26 / 27] 4 / 5 tests, 1 failed; Testing //:timeout; 1s darwin-sandbox
+
+TIMEOUT: //:timeout (Summary)
+      <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.log
+      <OUTPUT_ROOT>/fc08b3732d5c62d9023f537c006f2d55/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test_attempts/attempt_1.log
+INFO: From Testing //:timeout:
+INFO: Found 5 test targets...
+INFO: Elapsed time: 5.234s, Critical Path: 2.14s
+INFO: 27 processes: 9 internal, 18 darwin-sandbox.
+INFO: Build completed, 2 tests FAILED, 27 total actions
+INFO:
+INFO: Build Event Protocol files produced successfully.

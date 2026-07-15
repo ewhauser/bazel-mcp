@@ -1,0 +1,6 @@
+load("//:fixture_rules.bzl", "fixture_consumer")
+
+fixture_consumer(
+    name = "uses_private",
+    dep = "//private:private",
+)
