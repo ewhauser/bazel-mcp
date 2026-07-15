@@ -627,6 +627,45 @@ impl InvocationService {
                 self.config.cancellation_terminate_grace,
             )
             .await;
+            let workspace = queued.request.workspace.to_string_lossy();
+            let message = self.redactor.redact_bounded(
+                &error.to_string().replace(workspace.as_ref(), "<workspace>"),
+                1_000,
+            );
+            tracing::warn!(
+                invocation_id = %queued.request.id,
+                error = %message,
+                "could not record running Bazel invocation"
+            );
+            if self
+                .store
+                .get_invocation(queued.request.id)
+                .await
+                .is_ok_and(|record| !record.state.is_terminal())
+            {
+                let summary = bazel_mcp_types::InvocationSummary {
+                    success: false,
+                    headline: format!("Could not record Bazel execution state: {message}"),
+                    truncated: true,
+                    inspect_hint: Some("log".to_owned()),
+                    ..Default::default()
+                };
+                let _ = self
+                    .store
+                    .transition(
+                        queued.request.id,
+                        InvocationState::Failed,
+                        Some(Termination::Interrupted),
+                        Some(summary),
+                    )
+                    .await;
+            }
+            if let Ok(record) = self.store.get_invocation(queued.request.id).await
+                && record.state.is_terminal()
+                && record.summary.is_some()
+            {
+                return Ok(record);
+            }
             return Err(error.into());
         }
         let started = Instant::now();
