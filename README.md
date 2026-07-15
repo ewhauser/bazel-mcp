@@ -39,6 +39,11 @@ All invocation data remains in the configured local cache. `clean`, `run`, and
 `shutdown` are denied by default, shell evaluation is never used, and server-
 owned BEP/output-root flags cannot be overridden by a request.
 
+Tool-result encoding is configured with `result_encoding`. The default, `text`,
+returns compact JSON in one MCP text block. Set it to `toon` for a token-oriented
+TOON text block, `structured` for MCP structured content, or `both` for
+structured content plus backwards-compatible JSON text.
+
 ## Development
 
 ```sh

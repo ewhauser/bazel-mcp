@@ -9,4 +9,5 @@ progress_interval_seconds = 60
 redaction_patterns = ["(?i)token=[^\\s]+"]
 retention_days = 7
 maximum_storage_bytes = 10737418240
+# Model-visible tool results: "text" (compact JSON), "toon", "structured", or "both".
 result_encoding = "text"

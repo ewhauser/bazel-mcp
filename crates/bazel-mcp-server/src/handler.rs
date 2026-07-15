@@ -283,33 +283,53 @@ impl BazelMcpServer {
             "query_results" => InspectView::QueryResults,
             other => return Err(format!("unsupported inspection view: {other}")),
         };
-        let result = self
-            .runner
-            .inspect(InspectRequest {
-                invocation_id: Some(id),
-                workspace: None,
-                view,
-                cursor: params.cursor,
-                filter: params.filter,
-                limit: params.limit.unwrap_or(20).clamp(1, 100),
-                max_bytes: self.single_representation_budget(8 * 1024),
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-        let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-        let bytes = self.model_visible_bytes(&value)?;
-        if let Err(error) = self
-            .runner
-            .record_model_visible_result(id, bytes, true)
-            .await
-        {
-            tracing::warn!(
-                invocation_id = %id,
-                %error,
-                "could not persist model-visible inspection metrics"
-            );
+        let visible_budget = 8 * 1024;
+        let mut representation_budget = self.single_representation_budget(visible_budget);
+        loop {
+            let result = self
+                .runner
+                .inspect(InspectRequest {
+                    invocation_id: Some(id),
+                    workspace: None,
+                    view,
+                    cursor: params.cursor.clone(),
+                    filter: params.filter.clone(),
+                    limit: params.limit.unwrap_or(20).clamp(1, 100),
+                    max_bytes: representation_budget,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
+            let bytes = self.model_visible_bytes(&value)?;
+            if bytes > visible_budget {
+                let proportional_budget = representation_budget
+                    .saturating_mul(visible_budget)
+                    .checked_div(bytes)
+                    .unwrap_or_default();
+                let headroom = (proportional_budget / 20).max(1);
+                representation_budget = proportional_budget
+                    .saturating_sub(headroom)
+                    .min(representation_budget.saturating_sub(1));
+                if representation_budget == 0 {
+                    return Err(
+                        "bounded bazel.inspect response could not fit its hard byte limit".into(),
+                    );
+                }
+                continue;
+            }
+            if let Err(error) = self
+                .runner
+                .record_model_visible_result(id, bytes, true)
+                .await
+            {
+                tracing::warn!(
+                    invocation_id = %id,
+                    %error,
+                    "could not persist model-visible inspection metrics"
+                );
+            }
+            return self.encode(value);
         }
-        self.encode(value)
     }
 
     #[tool(
@@ -333,25 +353,32 @@ impl BazelMcpServer {
 impl BazelMcpServer {
     fn single_representation_budget(&self, visible_budget: usize) -> usize {
         match self.result_encoding {
-            ResultEncoding::Text | ResultEncoding::Structured => visible_budget,
+            ResultEncoding::Text | ResultEncoding::Toon | ResultEncoding::Structured => {
+                visible_budget
+            }
             ResultEncoding::Both => visible_budget / 2,
         }
     }
 
     fn model_visible_bytes(&self, value: &serde_json::Value) -> Result<usize, String> {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|error| error.to_string())?
-            .len();
-        Ok(match self.result_encoding {
-            ResultEncoding::Text | ResultEncoding::Structured => bytes,
-            ResultEncoding::Both => bytes.saturating_mul(2),
-        })
+        match self.result_encoding {
+            ResultEncoding::Text | ResultEncoding::Structured => serde_json::to_vec(value)
+                .map(|bytes| bytes.len())
+                .map_err(|error| error.to_string()),
+            ResultEncoding::Toon => Self::encode_toon(value).map(|text| text.len()),
+            ResultEncoding::Both => serde_json::to_vec(value)
+                .map(|bytes| bytes.len().saturating_mul(2))
+                .map_err(|error| error.to_string()),
+        }
     }
 
     fn encode(&self, value: serde_json::Value) -> Result<CallToolResult, String> {
         Ok(match self.result_encoding {
             ResultEncoding::Text => {
                 CallToolResult::success(vec![ContentBlock::text(value.to_string())])
+            }
+            ResultEncoding::Toon => {
+                CallToolResult::success(vec![ContentBlock::text(Self::encode_toon(&value)?)])
             }
             ResultEncoding::Structured => {
                 let mut result = CallToolResult::default();
@@ -361,6 +388,10 @@ impl BazelMcpServer {
             }
             ResultEncoding::Both => CallToolResult::structured(value),
         })
+    }
+
+    fn encode_toon(value: &serde_json::Value) -> Result<String, String> {
+        toon_format::encode_default(value).map_err(|error| format!("encode TOON result: {error}"))
     }
 }
 
@@ -386,7 +417,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn both_encoding_charges_and_budgets_both_visible_representations() {
+    async fn result_encodings_charge_their_model_visible_representations() {
         let root = tempdir().unwrap();
         let runner = InvocationService::new(
             Store::open(root.path()).await.unwrap(),
@@ -399,6 +430,20 @@ mod tests {
         let text = BazelMcpServer::new(runner.clone(), ResultEncoding::Text);
         assert_eq!(text.model_visible_bytes(&value).unwrap(), one);
         assert_eq!(text.single_representation_budget(8_192), 8_192);
+
+        let toon = BazelMcpServer::new(runner.clone(), ResultEncoding::Toon);
+        let toon_text = BazelMcpServer::encode_toon(&value).unwrap();
+        assert_eq!(toon.model_visible_bytes(&value).unwrap(), toon_text.len());
+        assert_eq!(toon.single_representation_budget(8_192), 8_192);
+        let decoded: serde_json::Value = toon_format::decode_default(&toon_text).unwrap();
+        assert_eq!(decoded, value);
+        let result = toon.encode(value.clone()).unwrap();
+        assert_eq!(result.structured_content, None);
+        assert_eq!(result.content.len(), 1);
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("TOON result did not contain one text block");
+        };
+        assert_eq!(content.text, toon_text);
 
         let both = BazelMcpServer::new(runner, ResultEncoding::Both);
         assert_eq!(both.model_visible_bytes(&value).unwrap(), one * 2);
