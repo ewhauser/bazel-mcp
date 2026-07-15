@@ -1,0 +1,1200 @@
+# 002: Project Architecture and Repository Setup
+
+## Status
+
+Proposed
+
+## Summary
+
+Set up `bazel-mcp` as a Rust 2024 virtual Cargo workspace with a thin executable,
+narrow library crates, one-way dependency flow, a pinned stable toolchain,
+centralized dependency metadata, committed lockfiles, and explicit developer,
+test, benchmark, fuzz, CI, security, and release surfaces.
+
+The setup follows the conventions used by Shuck:
+
+- `crates/*` workspace membership with shared package metadata and dependencies.
+- A checked-in stable `rust-toolchain.toml` containing `rustfmt` and `clippy`.
+- A root `Makefile` as the supported developer interface.
+- Nix for reproducible auxiliary tools rather than as a replacement for Cargo.
+- `cargo fmt`, strict workspace Clippy, `cargo-shear`, `cargo-deny`, and
+  `cargo-audit` as separate quality gates.
+- Dedicated benchmark and `cargo-fuzz` workspaces.
+- Root and targeted nested `AGENTS.md` files, with `CLAUDE.md` symlinked to the
+  root instructions.
+- Conventional Commits, release-please, cargo-dist, pinned GitHub Action
+  digests, and SBOM generation.
+
+This specification makes the conceptual crate list from
+`001-product-requirements.md` concrete. It is authoritative for package names,
+dependency direction, repository layout, and project tooling. Product behavior
+and acceptance requirements remain defined by specification 001.
+
+## Motivation
+
+The product spans several failure and performance domains:
+
+- MCP framing and host compatibility
+- asynchronous process execution and cancellation
+- Bazel workspace, wrapper, command, and flag policy
+- versioned protobuf generation and BEP graph reconstruction
+- deterministic build, test, coverage, query, and text reduction
+- durable embedded Turso and filesystem storage
+- benchmarking of both system overhead and model-visible output
+
+Putting all of this in one crate would couple protocol code to subprocess and
+database details, make reducer tests require an async runtime, and make it easy for
+MCP handlers to bypass token and safety boundaries. The workspace needs small
+crates with explicit ownership and a single application service that composes
+them.
+
+At the same time, the initial repository should not reproduce Shuck-specific
+surface area that does not serve this product. There is no Python, WASM, website,
+clean-room, or crates.io publishing setup in the initial architecture.
+
+## Design
+
+### Goals
+
+- Make each major subsystem independently testable.
+- Keep MCP out of leaf crates and restrict Tokio to async I/O boundaries.
+- Keep storage and process side effects out of reducers.
+- Prevent circular dependencies through a documented crate DAG.
+- Provide one supported command for each common developer operation.
+- Make the Bazel-version matrix, BEP fixtures, token benchmark, and MCP
+  conformance suite first-class repository assets.
+- Produce reproducible macOS and Linux release binaries with an SBOM.
+- Preserve the ability to add HTTP transport and remote artifact adapters
+  without restructuring the core.
+
+### Non-Goals
+
+- A reusable public SDK in the first release.
+- Publishing internal crates to crates.io.
+- A Bazel build definition for building `bazel-mcp` itself. Cargo is the source
+  of truth for this repository.
+- A plugin system for reducers or storage backends.
+- A second async runtime.
+- Windows runtime support in the MVP. Windows compilation remains a useful CI
+  guard, but process cancellation is implemented later.
+- Copying Shuck's Python, npm, website, oracle, or large shell-corpus workflows.
+
+## Repository layout
+
+The initial repository is laid out as follows:
+
+```text
+.
+├── .gitattributes
+├── .githooks/
+│   └── pre-commit
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   ├── pull_request_template.md
+│   └── workflows/
+│       ├── ci.yml
+│       ├── fuzz.yml
+│       ├── release-please.yml
+│       └── release.yml
+├── .gitignore
+├── .pre-commit-config-agent.yaml
+├── .pre-commit-config.yaml
+├── .release-please-config.json
+├── .release-please-manifest.json
+├── .renovaterc.json5
+├── AGENTS.md
+├── CHANGELOG.md
+├── CLAUDE.md -> AGENTS.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── Cargo.lock
+├── Cargo.toml
+├── LICENSE
+├── Makefile
+├── README.md
+├── SECURITY.md
+├── deny.toml
+├── flake.lock
+├── flake.nix
+├── rust-toolchain.toml
+├── rustfmt.toml
+├── crates/
+│   ├── bazel-mcp-benchmark/
+│   ├── bazel-mcp-bep/
+│   ├── bazel-mcp-policy/
+│   ├── bazel-mcp-reducer/
+│   ├── bazel-mcp-runner/
+│   ├── bazel-mcp-server/
+│   ├── bazel-mcp-store/
+│   └── bazel-mcp-types/
+├── fuzz/
+│   ├── Cargo.lock
+│   ├── Cargo.toml
+│   └── fuzz_targets/
+├── scripts/
+│   ├── benchmarks/
+│   │   ├── setup-oss-corpus.sh
+│   │   └── run-token-integration.sh
+│   ├── check-release-please-config.py
+│   ├── check-release-security.py
+│   ├── fuzz-init.sh
+│   ├── generate-release-sbom.sh
+│   └── test-bazel-matrix.sh
+└── specs/
+    ├── 001-product-requirements.md
+    └── 002-project-architecture.md
+```
+
+`target/`, `.cache/`, generated fuzz corpora, fuzz artifacts, benchmark output,
+local MCP configuration, and invocation data are ignored. BEP and diagnostic
+fixtures intentionally checked into a crate's `tests/fixtures/` directory are
+not ignored.
+
+## Workspace crates
+
+### `bazel-mcp-types`
+
+Leaf crate containing domain types shared across subsystems. It has no filesystem,
+process, database, Tokio, or MCP dependencies.
+
+Responsibilities:
+
+- Invocation UUID, state, timestamps, command metadata, and state transitions.
+- Target, diagnostic, test, coverage, artifact, query, and summary types.
+- Pagination request/result types and stable sort keys.
+- Error categories that cross crate boundaries.
+- Serialization of durable and model-independent domain records.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-types/
+├── Cargo.toml
+└── src/
+    ├── artifact.rs
+    ├── command.rs
+    ├── coverage.rs
+    ├── diagnostic.rs
+    ├── invocation.rs
+    ├── lib.rs
+    ├── pagination.rs
+    ├── query.rs
+    ├── result.rs
+    └── test.rs
+```
+
+The crate uses `thiserror`, `serde`, and `uuid`. It does not derive MCP schemas;
+MCP-specific parameter types belong to `bazel-mcp-server`.
+
+### `bazel-mcp-bep`
+
+Owns Bazel protobuf generation, length-delimited framing, and BEP graph
+reconstruction. It is runtime-agnostic and reads from ordinary `Read` values or
+byte slices.
+
+Responsibilities:
+
+- Generated `prost` types for the pinned Bazel BEP schema.
+- Varint frame decoding with explicit incomplete-frame outcomes.
+- Event identity, announcement, and reference tracking.
+- `NamedSetOfFiles` graph resolution without quadratic expansion.
+- Compatibility metadata for the Bazel version used to vendor the protos.
+- Conversion from generated protobufs into small BEP-oriented Rust views used by
+  reducers.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-bep/
+├── AGENTS.md
+├── Cargo.toml
+├── build.rs
+├── proto/
+│   ├── LICENSE.bazel
+│   ├── README.md
+│   └── bazel/...
+├── src/
+│   ├── event.rs
+│   ├── framing.rs
+│   ├── generated.rs
+│   ├── graph.rs
+│   ├── lib.rs
+│   └── named_files.rs
+└── tests/
+    ├── compatibility.rs
+    ├── framing.rs
+    └── fixtures/
+        ├── bazel-7/
+        ├── bazel-8/
+        └── bazel-9/
+```
+
+`build.rs` uses `prost-build` and a vendored `protoc` binary so ordinary Cargo
+builds do not depend on a system protobuf installation. It declares
+`rerun-if-changed` for the vendored proto tree. Generated Rust is written to
+`OUT_DIR` and included from `generated.rs`; generated files are not committed.
+
+The proto `README.md` records the upstream Bazel tag, source paths, update
+procedure, and checksums. The Apache-2.0 license accompanying vendored Bazel
+files is retained.
+
+### `bazel-mcp-policy`
+
+Owns configuration and validation that determines where and how Bazel may run.
+It depends only on `bazel-mcp-types` among internal crates.
+
+Responsibilities:
+
+- Load, validate, and merge server configuration.
+- Canonicalize and allowlist workspace roots.
+- Resolve a configured Bazel wrapper, `tools/bazel`, Bazelisk, or Bazel.
+- Classify allowed, opt-in, and denied commands.
+- Validate startup arguments, command arguments, and reserved flags.
+- Build the minimal child environment.
+- Compile and apply secret-redaction rules.
+- Calculate the known scheduling key from workspace and output-base policy.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-policy/src/
+├── command.rs
+├── config.rs
+├── environment.rs
+├── executable.rs
+├── flags.rs
+├── lib.rs
+├── redaction.rs
+└── workspace.rs
+```
+
+Policy returns typed decisions. It does not spawn Bazel or write invocation
+records.
+
+### `bazel-mcp-store`
+
+Owns durable invocation files, embedded Turso indexes, migrations, cursors,
+retention, and crash recovery. It is an async library because Turso's local Rust
+API is async; it does not hide database calls behind `spawn_blocking`.
+
+Responsibilities:
+
+- Create private cache and invocation directories.
+- Persist requests before process launch.
+- Open stdout, stderr, and BEP capture files safely.
+- Store normalized invocation, target, diagnostic, test, coverage, artifact,
+  query, and metric records.
+- Commit monotonic lifecycle transitions atomically.
+- Provide filtered, stable pagination for every inspect view.
+- Recover orphaned invocations as `interrupted`.
+- Apply age and size retention without deleting live invocations.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-store/
+├── Cargo.toml
+├── migrations/
+│   └── 0001_initial.sql
+├── src/
+│   ├── cursor.rs
+│   ├── files.rs
+│   ├── lib.rs
+│   ├── migration.rs
+│   ├── reader.rs
+│   ├── recovery.rs
+│   ├── retention.rs
+│   ├── database.rs
+│   └── writer.rs
+└── tests/
+    ├── migrations.rs
+    ├── pagination.rs
+    └── recovery.rs
+```
+
+Use the `turso` crate with `turso::Builder::new_local` and a database file under
+the configured cache root. Do not use `rusqlite` in production. `Store` owns the
+Turso database handle, serializes migrations and lifecycle writes with a short
+async write coordinator, and uses separate connections for bounded reads where
+the pinned Turso version permits. Store methods are async, accept and return
+`bazel-mcp-types`, and do not mention MCP or BEP protobufs. Migrations are
+append-only, recorded in `schema_migrations`, and run in a transaction. A
+migration already included in a release is never edited.
+
+Turso is pre-1.0 and does not claim complete SQLite compatibility. Pin its exact
+release through `Cargo.lock`, use only the SQL exercised by store integration
+tests, and treat migration plus crash-recovery tests as upgrade gates. Complete
+stdout, stderr, BEP, and artifact data remain ordinary files, so a damaged index
+does not erase the underlying diagnostic evidence.
+
+### `bazel-mcp-reducer`
+
+Pure, deterministic conversion of BEP views and bounded evidence into domain
+results. It depends on `bazel-mcp-bep` and `bazel-mcp-types`, but not on the store,
+runner, Tokio, or MCP.
+
+Responsibilities:
+
+- Reduce loading, analysis, target, action, build-finished, and metric events.
+- Reduce test attempts, shards, summaries, XML, and log excerpts.
+- Discover and parse local LCOV data.
+- Parse and page query output adapters.
+- Normalize terminal text, strip ANSI/progress output, redact, and deduplicate.
+- Apply diagnostic selection and response byte budgets.
+- Return explicit fallback reasons when structured evidence is incomplete.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-reducer/
+├── AGENTS.md
+├── Cargo.toml
+├── src/
+│   ├── budget.rs
+│   ├── build.rs
+│   ├── coverage.rs
+│   ├── diagnostics/
+│   │   ├── generic.rs
+│   │   ├── java.rs
+│   │   ├── mod.rs
+│   │   └── rust.rs
+│   ├── lib.rs
+│   ├── query.rs
+│   ├── test.rs
+│   └── text.rs
+└── tests/
+    ├── snapshots.rs
+    └── fixtures/
+        ├── coverage/
+        ├── logs/
+        └── test-results/
+```
+
+Reducers receive already bounded evidence inputs. If a reducer needs a file, the
+runner reads the permitted file and supplies a bounded reader or buffer. This
+keeps filesystem authorization in the runner/policy boundary.
+
+Snapshot tests use `insta` with redactions for UUIDs, timestamps, absolute paths,
+and platform-dependent details. Snapshot changes require review; tests must not
+blindly accept changed diagnostics.
+
+### `bazel-mcp-runner`
+
+The application core. It owns the async runtime-facing invocation lifecycle and
+is the only crate that composes policy, storage, BEP, reducers, and child
+processes.
+
+Responsibilities:
+
+- Expose `InvocationService` with `run`, `inspect`, and `cancel` operations.
+- Queue work by known effective output-base key and enforce the global limit.
+- Generate UUIDv7 invocation IDs.
+- Assemble validated Bazel argv without a shell.
+- Spawn the wrapper/Bazel client in a process group.
+- Capture stdout, stderr, and BEP without returning them to the caller.
+- Enforce timeout and graceful cancellation escalation.
+- Await async store operations directly; run CPU-heavy BEP/reducer work and
+  blocking filesystem work via bounded `spawn_blocking` tasks.
+- Produce concise progress snapshots.
+- Recover stored state during application startup.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-runner/
+├── AGENTS.md
+├── Cargo.toml
+├── src/
+│   ├── cancel.rs
+│   ├── capture.rs
+│   ├── inspect.rs
+│   ├── lib.rs
+│   ├── process.rs
+│   ├── progress.rs
+│   ├── recovery.rs
+│   ├── scheduler.rs
+│   └── service.rs
+└── tests/
+    ├── cancellation.rs
+    ├── concurrency.rs
+    ├── lifecycle.rs
+    └── workspaces/
+        ├── analysis-failure/
+        ├── build-failure/
+        ├── coverage/
+        ├── large-output/
+        ├── query/
+        ├── success/
+        └── test-failure/
+```
+
+`InvocationService` is the single application boundary presented to MCP. MCP
+handlers do not receive raw store or child-process handles.
+
+The runner uses Tokio for processes, signals, time, synchronization, and
+blocking-task coordination. `tokio_util::sync::CancellationToken` is the common
+cancellation primitive. Unix process-group details are behind a small
+platform-specific module with a compile-time Windows stub until runtime support
+is implemented.
+
+### `bazel-mcp-server`
+
+Ships the `bazel-mcp` executable and the MCP server library. It is deliberately
+thin.
+
+Responsibilities:
+
+- Parse CLI options and locate server configuration.
+- Initialize tracing without writing application logs to MCP stdout.
+- Construct `InvocationService` and run startup recovery.
+- Serve MCP over stdio.
+- Define and route exactly `bazel.run`, `bazel.inspect`, and `bazel.cancel`.
+- Map MCP progress and cancellation to `InvocationService`.
+- Encode tool results according to the configured result encoding.
+- Report tool-execution errors separately from failed Bazel invocations.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-server/
+├── Cargo.toml
+├── README.md
+├── src/
+│   ├── args.rs
+│   ├── lib.rs
+│   ├── logging.rs
+│   ├── main.rs
+│   ├── server.rs
+│   └── tools/
+│       ├── cancel.rs
+│       ├── inspect.rs
+│       ├── mod.rs
+│       └── run.rs
+└── tests/
+    ├── mcp_stdio.rs
+    ├── schema_snapshots.rs
+    └── tool_contracts.rs
+```
+
+The package is named `bazel-mcp-server`, its library target is
+`bazel_mcp_server`, and its binary target is `bazel-mcp`.
+
+`main.rs` only parses arguments, initializes logging, calls the library
+entrypoint, renders a startup error to stderr, and chooses the process exit code.
+The reusable entrypoint is conceptually:
+
+```rust
+pub async fn serve(config: ServerConfig) -> anyhow::Result<()>;
+```
+
+Only this crate depends on `rmcp` and `schemars`. MCP parameter types map into
+domain requests at the handler boundary.
+
+### `bazel-mcp-benchmark`
+
+Non-published benchmark crate modeled after Shuck's dedicated benchmark crate.
+It contains Criterion microbenchmarks and shared generated fixtures.
+
+Responsibilities:
+
+- BEP frame and graph throughput.
+- Reduction throughput for representative successful, failed, and noisy builds.
+- `NamedSetOfFiles` scaling.
+- Turso ingest and inspection pagination throughput.
+- Query streaming throughput and peak-memory cases.
+- Response byte accounting for golden results.
+
+Suggested layout:
+
+```text
+crates/bazel-mcp-benchmark/
+├── Cargo.toml
+├── benches/
+│   ├── bep.rs
+│   ├── named_files.rs
+│   ├── query.rs
+│   ├── reducer.rs
+│   └── store.rs
+├── resources/
+│   ├── README.md
+│   ├── fixtures/...
+│   ├── projects/
+│   │   └── abseil-cpp.toml
+│   └── scenarios/
+│       └── abseil-cpp/...
+└── src/
+    ├── bin/
+    │   └── token-integration.rs
+    ├── corpus.rs
+    ├── lib.rs
+    ├── report.rs
+    ├── transcript.rs
+    └── token_count.rs
+```
+
+The crate sets `publish = false`. Large fixtures are generated or produced from
+repository-owned test workspaces. Any third-party fixture must include source,
+commit, and license metadata. `tiktoken-rs` is a benchmark-crate dependency only;
+production request handling does not tokenize responses.
+
+## Dependency direction
+
+The internal dependency graph is acyclic:
+
+```text
+bazel-mcp-server
+├── bazel-mcp-runner
+│   ├── bazel-mcp-policy
+│   │   └── bazel-mcp-types
+│   ├── bazel-mcp-store
+│   │   └── bazel-mcp-types
+│   ├── bazel-mcp-reducer
+│   │   ├── bazel-mcp-bep
+│   │   └── bazel-mcp-types
+│   ├── bazel-mcp-bep
+│   └── bazel-mcp-types
+└── bazel-mcp-types
+
+bazel-mcp-benchmark
+└── may depend on any library crate, but never the reverse
+```
+
+Rules:
+
+- `bazel-mcp-types` has no internal dependencies.
+- `bazel-mcp-bep` does not depend on application crates.
+- `bazel-mcp-policy`, `bazel-mcp-store`, and `bazel-mcp-reducer` are siblings and
+  do not depend on each other.
+- `bazel-mcp-runner` is the only composition layer below the server.
+- `bazel-mcp-server` does not call SQLite, parse BEP, read diagnostic files, or
+  spawn Bazel directly.
+- No library crate depends on `bazel-mcp-server` or `bazel-mcp-benchmark`.
+- A new cross-cutting type moves downward into `bazel-mcp-types`; it is not
+  duplicated to avoid a dependency rule.
+- Test-only cycles are also avoided. Shared fixture helpers stay local until at
+  least three crates need them; only then may a non-published
+  `bazel-mcp-test-support` crate be proposed.
+
+## Runtime architecture
+
+```text
+MCP stdin/stdout
+      │
+      ▼
+bazel-mcp-server
+  - protocol framing
+  - tool schemas
+  - progress/cancel mapping
+      │ InvocationService API
+      ▼
+bazel-mcp-runner
+  - scheduler and live invocation registry
+  - Tokio process tasks
+  - cancellation tokens
+      ├────────────► bazel-mcp-policy
+      │               validated workspace, argv, environment, redaction
+      ├────────────► Bazel/Bazelisk/repo wrapper
+      │               stdout.log + stderr.log + events.bep
+      ├─ spawn_blocking ─► bazel-mcp-bep + bazel-mcp-reducer
+      └────── await ─────► bazel-mcp-store
+                              Turso + invocation files
+```
+
+The live registry stores only running/queued control state and cancellation
+handles. Durable invocation facts live in `bazel-mcp-store`. The registry is not
+the source of truth for completed results.
+
+MCP request tasks never hold a global lock while awaiting a child process. The
+scheduler owns short critical sections around queue transitions. Each invocation
+runs in its own Tokio task. Turso database work is awaited; blocking parsing and
+filesystem work runs outside Tokio core workers.
+
+## Cargo workspace configuration
+
+### Root manifest
+
+The repository is a virtual workspace with no root package:
+
+```toml
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+license = "MIT"
+authors = ["Eric Hauser"]
+repository = "https://github.com/ewhauser/bazel-mcp"
+
+[workspace.metadata.cargo-shear]
+ignored = ["bazel-mcp-benchmark"]
+```
+
+The initial Rust version matches the stable toolchain currently used by Shuck.
+The `rust-toolchain.toml`, `workspace.package.rust-version`, and CI environment
+are updated together in one change.
+
+All external and internal dependencies are declared under
+`[workspace.dependencies]`. Crate manifests use `{ workspace = true }`. Internal
+dependencies use workspace-relative paths and no crates.io version while every
+crate remains private:
+
+```toml
+[workspace.dependencies]
+bazel-mcp-bep = { path = "crates/bazel-mcp-bep" }
+bazel-mcp-policy = { path = "crates/bazel-mcp-policy" }
+bazel-mcp-reducer = { path = "crates/bazel-mcp-reducer" }
+bazel-mcp-runner = { path = "crates/bazel-mcp-runner" }
+bazel-mcp-store = { path = "crates/bazel-mcp-store" }
+bazel-mcp-types = { path = "crates/bazel-mcp-types" }
+```
+
+External dependencies are grouped by purpose in the root manifest. The initial
+set includes:
+
+| Area | Dependencies |
+| --- | --- |
+| MCP and async | `rmcp`, `tokio`, `tokio-util`, `futures` |
+| Serialization and schemas | `serde`, `serde_json`, `schemars`, `uuid` |
+| BEP | `prost`, `prost-types`, `prost-build`, vendored `protoc` support |
+| Storage | `rusqlite`, `tempfile` |
+| Parsing | a bounded XML parser, LCOV parser or internal LCOV reader, `memchr`, ANSI stripping |
+| Errors and logging | `thiserror`, `anyhow`, `tracing`, `tracing-subscriber` |
+| CLI and platform | `clap`, user-directory resolution, Unix signal/process support |
+| Tests | `assert_cmd`, `predicates`, `insta`, `test-case`, `proptest` |
+| Benchmarks | `criterion` |
+
+Dependency versions are selected and tested during scaffolding, declared once in
+the workspace manifest, and committed through `Cargo.lock`. The official Rust
+MCP SDK is pinned to a released version rather than a Git branch.
+
+### Package manifests
+
+Every crate inherits common metadata:
+
+```toml
+[package]
+name = "bazel-mcp-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+```
+
+All crates are private in the first release. Removing `publish = false` requires
+a separate proposal covering public API stability, internal path-plus-version
+dependencies, crates.io trusted publishing, and release ordering.
+
+### Profiles
+
+Follow the Shuck profile shape:
+
+```toml
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "full"
+lto = false
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+```
+
+Tests and development builds retain unwinding so failures remain diagnosable.
+
+## Toolchain and formatting
+
+`rust-toolchain.toml` pins a stable compiler and required components:
+
+```toml
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+```
+
+The main workspace MUST compile on stable Rust. Nightly is isolated to the
+`cargo-fuzz` commands and CI job.
+
+`rustfmt.toml` follows the Shuck defaults:
+
+```toml
+edition = "2024"
+style_edition = "2024"
+newline_style = "Unix"
+```
+
+Use default rustfmt layout beyond those settings. Avoid a large collection of
+subjective formatting overrides.
+
+`Cargo.lock` is committed because the repository ships an application. The fuzz
+workspace has its own committed `fuzz/Cargo.lock`.
+
+## Rust code conventions
+
+- Prefer explicit domain types over JSON values below the MCP boundary.
+- `serde_json::Value` is permitted only where the external MCP or Bazel schema is
+  genuinely dynamic.
+- Library crates define typed errors with `thiserror`. `anyhow` is used at
+  executable and orchestration boundaries where context is more valuable than
+  enum matching.
+- Leaf crates remain synchronous. Tokio belongs in runner and server code.
+- Production code does not use `unwrap` or `expect` for recoverable input,
+  process, storage, protobuf, or protocol failures.
+- Public APIs are narrow and re-exported intentionally from each `lib.rs`.
+- Platform code is contained under `cfg` modules rather than scattered through
+  the runner.
+- New dependencies are added at the root and justified in the PR description.
+- Unsafe code is forbidden in workspace-owned source unless a separate design
+  documents why a safe dependency cannot provide the required process behavior.
+- MCP stdout is protocol-only. Diagnostics and tracing go to stderr or a
+  configured file.
+
+## Server configuration
+
+Configuration is user-level and MUST NOT require modifying a target Bazel
+repository.
+
+Resolution order:
+
+1. `--config <path>`
+2. `BAZEL_MCP_CONFIG`
+3. The OS user config directory, such as
+   `~/.config/bazel-mcp/config.toml` or the platform equivalent
+4. Built-in secure defaults
+
+Configuration covers:
+
+- allowed workspace roots and per-workspace Bazel wrappers
+- allowed and denied commands
+- child environment allow/deny rules
+- cache directory and retention
+- global concurrency and timeouts
+- response encoding and byte budgets
+- redaction rules
+- logging destination and level
+
+The repository contains an `examples/config.toml` once configuration is
+implemented. It contains no machine-specific absolute paths or credentials.
+
+The binary starts a stdio MCP server by default. Initial CLI options are limited
+to configuration, logging, and version information. Administrative subcommands
+such as `doctor` or `gc` may be added later without adding MCP tools.
+
+## Developer interface
+
+The root `Makefile` is the documented interface. It wraps Cargo and scripts; it
+does not hide important compiler flags in opaque tooling.
+
+Required targets:
+
+```make
+.PHONY: setup-hooks build test test-unit test-integration test-bazel-matrix \
+        run check bench bench-save bench-compare bench-token \
+        fuzz-setup fuzz-list fuzz-smoke fuzz-run \
+        harden-release check-release-security
+
+ARGS ?=
+FUZZ_TARGET ?= bep_framing
+FUZZ_ARGS ?= -max_total_time=60
+NIX_DEVELOP ?= nix --extra-experimental-features 'nix-command flakes' develop --command
+
+setup-hooks:
+	git config core.hooksPath .githooks
+
+build:
+	cargo build
+
+test:
+	cargo test --workspace --all-features
+
+test-unit:
+	cargo test --workspace --all-features --lib
+
+test-integration:
+	cargo test --workspace --all-features --tests
+
+test-bazel-matrix:
+	$(NIX_DEVELOP) ./scripts/test-bazel-matrix.sh
+
+run:
+	cargo run -p bazel-mcp-server -- $(ARGS)
+
+check:
+	cargo fmt -- --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	$(NIX_DEVELOP) cargo shear
+
+bench:
+	cargo bench -p bazel-mcp-benchmark
+```
+
+Additional targets wrap Criterion baseline save/compare, the agent token
+benchmark, fuzz initialization and smoke tests, release-workflow hardening, and
+MCP conformance. Commands printed in `README.md`, `CONTRIBUTING.md`, and
+`AGENTS.md` use these targets wherever one exists.
+
+`make check` remains fast enough for normal iteration. Actual tests are a
+separate target so an agent can choose focused tests while working and run the
+full suite before handoff.
+
+## Nix development shell
+
+`flake.nix` provides reproducible auxiliary tools for macOS and Linux. It does
+not provide the Rust compiler; `rust-toolchain.toml` remains authoritative.
+
+The default shell includes:
+
+- Bazelisk
+- `cargo-shear`
+- `cargo-fuzz`
+- `hyperfine`
+- SQLite CLI
+- `jq`
+- Python 3 for benchmark and release-security scripts
+- Node.js only if required by the pinned MCP conformance suite
+
+`flake.lock` is committed. `nix flake check` validates the development shell in
+CI. Bazel versions used by compatibility tests are pinned by the test script and
+cached; they are not implicitly taken from an arbitrary developer `PATH`.
+
+## Tests and fixtures
+
+### Unit tests
+
+Unit tests live beside their owning code or under the owning crate's `tests/`
+directory. Tests do not need a Bazel installation unless they are explicitly
+marked as integration tests.
+
+Ownership:
+
+- BEP framing, graph, and cross-version fixtures belong to `bazel-mcp-bep`.
+- Reduction input/output fixtures and snapshots belong to
+  `bazel-mcp-reducer`.
+- SQLite migration, retention, recovery, and cursor tests belong to
+  `bazel-mcp-store`.
+- Policy and argument injection tests belong to `bazel-mcp-policy`.
+- Process, cancellation, concurrency, and real workspace tests belong to
+  `bazel-mcp-runner`.
+- MCP schema and stdio black-box tests belong to `bazel-mcp-server`.
+
+### Fixture rules
+
+- Fixtures are generated from repository-owned miniature Bazel workspaces where
+  possible.
+- BEP fixtures include the producing Bazel version and exact command in adjacent
+  metadata.
+- Absolute paths, usernames, hostnames, timestamps, UUIDs, and credentials are
+  removed before commit.
+- Binary BEP fixtures use a `.bep` extension and are marked binary in
+  `.gitattributes`.
+- Golden result snapshots use stable ordering and explicit redactions.
+- Large generated artifacts stay in `.cache`; only minimal deterministic inputs
+  and expected results are committed.
+
+### Bazel compatibility matrix
+
+`scripts/test-bazel-matrix.sh` runs the runner integration workspaces with the
+supported Bazel majors from specification 001. It:
+
+1. Resolves a pinned patch version for each supported major.
+2. Uses an isolated temporary Bazel user root per version.
+3. Runs success, loading failure, analysis failure, action failure, test failure,
+   coverage, query, timeout, and cancellation cases.
+4. Regenerates no committed fixtures unless an explicit update flag is supplied.
+5. Prints a compact version/case table and stores full logs under `.cache`.
+
+Normal unit tests remain fast. The complete matrix runs in CI and before a
+release; developers can target one version or case through Make variables.
+
+### MCP conformance
+
+The official MCP conformance suite is pinned and invoked by a script or Make
+target. It runs against a built `bazel-mcp` stdio server using a temporary config
+and workspace. Upgrading `rmcp` includes a conformance run and tool-schema
+snapshot review.
+
+## Fuzzing
+
+Fuzzing follows Shuck's separate root `fuzz/` workspace pattern so nightly and
+sanitizer requirements do not affect the stable main workspace.
+
+Initial targets:
+
+- `bep_framing`: arbitrary and truncated varint-delimited inputs
+- `bep_event_stream`: arbitrary framed protobuf streams
+- `named_file_sets`: nested, repeated, and adversarial file-set graphs
+- `diagnostic_reducer`: arbitrary terminal bytes and ANSI sequences
+- `redaction`: arbitrary text and configured secret patterns
+- `cursor_decode`: arbitrary inspection cursors
+- `lifecycle_sequence`: generated state and cancellation sequences
+
+`make fuzz-smoke` initializes deterministic corpora and runs every blocking target
+with a fixed, short execution count. Mutation-heavy fuzzing runs on a scheduled
+GitHub workflow and uploads minimized artifacts on failure.
+
+Fuzz corpora and artifacts are generated and ignored. Durable seeds are small,
+reviewed, and sourced from repository fixtures.
+
+## Benchmarks
+
+There are three benchmark levels.
+
+### Microbenchmarks
+
+Criterion benchmarks in `bazel-mcp-benchmark` measure framing, graph building,
+reduction, storage, and query processing. They report bytes or events per second
+and include scaling cases, not only fixed examples.
+
+### Process macrobenchmarks
+
+Scripts under `scripts/benchmarks/` use `hyperfine` or a purpose-built driver to
+compare direct Bazel execution with `bazel-mcp` over the same generated
+workspaces. They measure Bazel wall time, server overhead, raw output bytes, BEP
+bytes, peak RSS, and model-visible result bytes.
+
+### Agent token benchmark
+
+`make bench-token` implements the three-way comparison required by specification
+001:
+
+1. Normal terminal tool baseline
+2. Optimized terminal orchestration baseline
+3. `bazel-mcp`
+
+The harness stores raw platform measurements under `.cache/benchmarks` and
+generates a compact Markdown/JSON report. It does not commit prompts, source,
+logs, or credentials from proprietary repositories. Runs that consume paid model
+tokens are manual or scheduled with explicit credentials, not blocking on every
+pull request.
+
+Criterion baseline save/compare commands are exposed through `make bench-save`
+and `make bench-compare` and write to a configurable scratch target directory.
+
+## Pre-commit hooks and agent instructions
+
+`make setup-hooks` configures `core.hooksPath=.githooks`. The hook uses `prek`
+when available and falls back to `PATH`, matching the Shuck setup. Human and
+non-interactive sessions may select separate pre-commit configuration files, but
+both run at least formatting and Clippy. Long Bazel matrix and token benchmarks
+do not run in pre-commit.
+
+The root `AGENTS.md` contains:
+
+- Project purpose and product invariants
+- Supported build, test, lint, benchmark, and fuzz commands
+- Crate dependency direction
+- MCP stdout/logging rule
+- Bazel command execution guidance for working on this repository
+- Fixture redaction and update procedures
+- Conventional Commit and release policy
+
+`CLAUDE.md` is a symlink to `AGENTS.md` so instructions have one source of truth.
+
+Nested instructions are added only where local guardrails materially differ:
+
+- `bazel-mcp-bep/AGENTS.md`: protobuf provenance, generated code, compatibility,
+  and adversarial parser rules.
+- `bazel-mcp-reducer/AGENTS.md`: deterministic ordering, byte budgets,
+  diagnostic fidelity, and snapshot review rules.
+- `bazel-mcp-runner/AGENTS.md`: process groups, cancellation, blocking-task,
+  locking, and no-shell rules.
+
+The root instructions apply first. Nested files do not repeat the entire root
+document.
+
+## Continuous integration
+
+GitHub Actions follow these repository-wide rules:
+
+- Actions are pinned by full commit digest with a version comment.
+- Checkout uses `persist-credentials: false` except an explicitly justified
+  release write job.
+- Each workflow and job has minimal permissions and a timeout.
+- Pull-request CI uses concurrency groups with `cancel-in-progress: true`.
+- Release workflows do not cancel in progress.
+- Cargo incremental compilation is disabled in CI; dependency caching is enabled.
+
+### `ci.yml`
+
+Required jobs:
+
+| Job | Purpose |
+| --- | --- |
+| `nix-flake-check` | Validate the locked development environment. |
+| `zizmor` | Audit GitHub Actions and release hardening. |
+| `lint` | Run `make check`. |
+| `cargo-deny` | Check licenses, bans, and dependency sources. |
+| `cargo-audit` | Check the committed lockfile for advisories. |
+| `cargo-test-linux` | Full workspace tests and doc tests on Linux. |
+| `cargo-test-macos` | Full workspace tests on macOS. |
+| `cargo-check-windows` | Compile all targets/features; runtime tests remain deferred. |
+| `bazel-matrix` | Run real-workspace integration cases across Bazel majors. |
+| `mcp-conformance` | Run the pinned MCP conformance suite and schema snapshots. |
+| `fuzz-smoke` | Run deterministic smoke iterations for blocking fuzz targets. |
+
+Performance comparison may post a non-blocking PR report once stable. Paid agent
+token benchmarks are not part of normal pull-request CI.
+
+### `fuzz.yml`
+
+Runs on a schedule and manual dispatch with one target per matrix entry. It uses
+nightly only inside the fuzz workspace and uploads artifacts on failure. A final
+job may create or update an issue when scheduled fuzzing fails.
+
+### Supply-chain checks
+
+`deny.toml` starts from the same posture as Shuck:
+
+- Allow a reviewed set of permissive licenses.
+- Deny unknown registries and unknown Git sources.
+- Warn on duplicate dependency versions.
+- Keep advisory ignores empty unless an entry documents owner, reason, and
+  removal condition.
+
+Renovate is security-oriented, pins GitHub Action digests, groups action updates,
+and waits three days before adopting newly released Cargo dependencies unless a
+security fix requires faster action.
+
+## Release architecture
+
+The project uses Conventional Commits. Pull requests are squash-merged, so the
+PR title becomes the release-driving commit on `main`.
+
+Common scopes are crate or area names:
+
+```text
+feat(server): add MCP task execution
+fix(runner): reap cancelled Bazel clients
+perf(reducer): avoid duplicate diagnostic buffers
+docs(specs): define remote artifact adapter boundary
+chore(deps): update prost
+```
+
+release-please maintains a draft release PR, updates
+`workspace.package.version` and `CHANGELOG.md`, and creates a `vX.Y.Z` tag after
+merge. Versions and the changelog are not edited manually.
+
+cargo-dist builds the `bazel-mcp` binary for:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `aarch64-unknown-linux-musl`
+- `x86_64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
+
+Initial installers are shell and Homebrew. Windows targets and PowerShell are
+added when Windows runtime support meets specification 001.
+
+The release includes:
+
+- Platform archives and checksums
+- Shell installer
+- Homebrew formula update
+- CycloneDX SBOM generated from the locked workspace
+- Release notes produced from Conventional Commit history
+
+The cargo-dist workflow is generated, then checked for pinned action digests and
+least-privilege permissions by `scripts/check-release-security.py`. The generated
+workflow is committed.
+
+There is no crates.io publish workflow initially because all crates are private.
+
+## Documentation and governance files
+
+- `README.md`: outcome-first overview, install instructions, MCP host examples,
+  minimal configuration, three-tool summary, and development quick start.
+- `CONTRIBUTING.md`: prerequisites, `make` workflow, tests, fixtures, fuzzing,
+  Conventional Commits, and release flow.
+- `SECURITY.md`: supported versions, vulnerability reporting, local execution
+  threat model, and secret/log handling.
+- `CODE_OF_CONDUCT.md`: contributor expectations.
+- `CHANGELOG.md`: release-please owned.
+- `LICENSE`: MIT for workspace-owned source.
+- `.github/pull_request_template.md`: summary, changes, test plan, risk notes,
+  and checkboxes for `make check`, focused/full tests, Bazel matrix, fixture
+  updates, and manual MCP exercise where applicable.
+
+## Setup sequence
+
+Scaffolding proceeds in dependency order:
+
+1. Add governance, toolchain, workspace manifest, lockfile, formatting, deny,
+   ignore, Nix, hooks, and Makefile files.
+2. Create `bazel-mcp-types` and freeze lifecycle/domain terminology.
+3. Create `bazel-mcp-bep`, vendor the pinned proto set, and land cross-version
+   framing fixtures.
+4. Create policy, store, and reducer sibling crates with no cross-dependencies.
+5. Create the runner and wire process capture to durable storage and reduction.
+6. Create the thin server with the three tool schema snapshots and stdio
+   black-box test.
+7. Add real Bazel workspaces, the version-matrix script, and MCP conformance.
+8. Add benchmark and fuzz workspaces.
+9. Add CI, release-please, cargo-dist, security checks, and SBOM generation.
+10. Run `make check`, `make test`, `make test-bazel-matrix`, MCP conformance, and
+    the baseline byte/overhead benchmark before declaring the scaffold complete.
+
+Each step lands a compiling workspace. Placeholder crates expose only the types
+needed by the next layer rather than speculative APIs.
+
+## Architecture acceptance criteria
+
+- `cargo metadata` reports exactly the eight initial workspace packages and no
+  dependency cycles.
+- Only `bazel-mcp-server` depends on `rmcp`.
+- Among production library and binary dependencies, only `bazel-mcp-runner` and
+  `bazel-mcp-server` depend directly on Tokio. Benchmark and test-only targets
+  may use Tokio to drive the runner API.
+- `bazel-mcp-reducer` and `bazel-mcp-store` do not depend on each other.
+- All packages inherit version, edition, Rust version, license, authors, and
+  repository metadata from the workspace.
+- Main workspace and fuzz lockfiles are committed.
+- `make check` runs format checking, strict all-target/all-feature Clippy, and
+  unused-dependency checking.
+- `make test` runs all workspace features successfully on Linux and macOS.
+- Windows all-feature compilation succeeds even though runtime support is
+  deferred.
+- Real Bazel integration tests do not run as ordinary unit tests and are
+  available through one documented Make target.
+- MCP stdout contains no tracing or application text.
+- BEP generated Rust is not committed; proto source, provenance, and license are.
+- All raw/golden fixtures are redacted and owned by a specific crate.
+- Fuzz and benchmark outputs remain ignored.
+- GitHub Actions use pinned digests, least privilege, timeouts, and safe checkout
+  credential settings.
+- release-please owns versions/changelog, cargo-dist owns binary artifacts, and
+  release output includes an SBOM.
+- `AGENTS.md` is the instruction source of truth and `CLAUDE.md` resolves to it.
+
+## Deferred decisions
+
+- Whether an HTTP transport should be a feature of `bazel-mcp-server` or a
+  separate binary package after stdio is stable.
+- Whether a remote artifact abstraction belongs in a new
+  `bazel-mcp-artifacts` crate once the first CAS/BuildBuddy adapter is designed.
+- Whether any internal crate has a public API worth publishing independently.
+- Whether Windows runtime support belongs inside `bazel-mcp-runner` or a small
+  platform process crate.
+- Whether the token benchmark should become a scheduled, non-blocking workflow
+  after credential and cost controls are established.
+
+## References
+
+- [Product requirements](001-product-requirements.md)
+- [Cargo workspaces](https://doc.rust-lang.org/book/ch14-03-cargo-workspaces.html)
+- [Official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
+- [Bazel Build Event Protocol](https://bazel.build/remote/bep)
+- [cargo-dist](https://opensource.axo.dev/cargo-dist/)
+- [release-please](https://github.com/googleapis/release-please)
