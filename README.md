@@ -1,107 +1,200 @@
 # bazel-mcp
 
-`bazel-mcp` is a local, token-efficient Model Context Protocol server for Bazel.
-It runs real Bazel commands, persists the raw evidence locally, and returns a
-small actionable result instead of streaming progress, repeated warnings, and
-complete test logs into an LLM context.
+[![CI](https://github.com/ewhauser/bazel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ewhauser/bazel-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The server exposes exactly three tools:
+Run Bazel from MCP-compatible coding agents without filling their context
+windows with build logs.
 
-- `bazel.run` executes `build`, `test`, `coverage`, `query`, `cquery`, `aquery`,
-  and explicitly allowed informational commands.
-- `bazel.inspect` reads a bounded, filtered, paginated retained view.
-- `bazel.cancel` cancels a known queued or running invocation.
+`bazel-mcp` is a local [Model Context Protocol](https://modelcontextprotocol.io/)
+server. It runs Bazel in your workspace, returns a compact actionable result,
+and keeps the complete invocation evidence available for inspection when an
+agent needs more detail.
 
-## Install
+## Why bazel-mcp?
 
-Build from source with Rust 1.94.1:
+Bazel output can be enormous. Sending complete progress output, repeated
+warnings, and test logs to a coding agent wastes context and can hide the error
+that matters.
+
+`bazel-mcp` gives agents:
+
+- concise summaries of successful and failed invocations;
+- structured diagnostics, test results, coverage, artifacts, and query output;
+- filtered, paginated access to retained evidence;
+- cancellation of queued or running commands.
+
+Bazel still runs locally with your workspace, configured credentials,
+toolchains, and remote execution settings.
+
+## Quick start
+
+### Requirements
+
+- macOS or Linux
+- Bazel 7, 8, or 9, Bazelisk, or an executable workspace-local `tools/bazel`
+- an MCP-compatible client
+- Rust 1.94.1 when building from source
+
+### Install with Homebrew
 
 ```sh
+brew install ewhauser/tap/bazel-mcp
+```
+
+### Install from a release
+
+Download a prebuilt archive from the
+[latest GitHub release](https://github.com/ewhauser/bazel-mcp/releases/latest),
+or run the shell installer on macOS or Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ewhauser/bazel-mcp/releases/latest/download/bazel-mcp-installer.sh | sh
+```
+
+### Build from source
+
+Clone the repository and build the server with the pinned Rust toolchain:
+
+```sh
+git clone https://github.com/ewhauser/bazel-mcp.git
+cd bazel-mcp
 cargo build --release -p bazel-mcp-server
 ```
 
-Register the binary as a stdio MCP server in the host. No configuration file is
-required. Standard output is reserved for MCP protocol frames; logs always go
-to standard error.
+The binary is written to `target/release/bazel-mcp`.
+
+### Connect your MCP client
+
+Register the binary as a stdio MCP server. The exact settings location depends
+on your client.
 
 ```json
 {
   "mcpServers": {
     "bazel": {
-      "command": "/absolute/path/to/bazel-mcp"
+      "command": "bazel-mcp"
     }
   }
 }
 ```
 
-Built-in defaults allow any Bazel workspace while retaining command,
-environment, timeout, storage, and output limits. To restrict workspace paths or
-customize other settings, copy `examples/config.toml` and pass it with
-`--config`, set `BAZEL_MCP_CONFIG`, or place it in the OS user configuration
-directory.
+If you built from source without installing the binary, use the absolute path
+to `target/release/bazel-mcp` instead.
 
-All invocation data remains in the configured local cache. `clean`, `run`, and
-`shutdown` are denied by default, shell evaluation is never used, and server-
-owned BEP/output-root flags cannot be overridden by a request.
+Restart the client, open a Bazel workspace, and try prompts such as:
 
-Tool-result encoding is configured with `result_encoding`. The default, `text`,
-returns compact JSON in one MCP text block. Set it to `toon` for a token-oriented
-TOON text block, `structured` for MCP structured content, or `both` for
-structured content plus backwards-compatible JSON text.
+- “Build `//app:server`.”
+- “Run the tests under `//services/...` and explain any failures.”
+- “Which targets depend on `//lib:core`?”
 
-Bazel 7, 8, and 9 are accepted and exercised in the integration matrix.
-Untested major versions fail before an invocation is created unless
-`allow_unsupported_bazel_versions` is explicitly enabled. Workspace-local
-`tools/bazel` wrappers and Bazelisk are supported.
+No configuration file is required. By default, the server can run Bazel in any
+workspace accessible to the current user. See [Security and local data](#security-and-local-data)
+to restrict it to specific roots.
 
-## Benchmarks
+## Tools
 
-Three independent five-sample runs against a pinned Abseil commit show an
-89.73–90.69% reduction in cumulative model context versus a default shell
-agent. The latest run measured 89.73% (95% CI 87.28–91.38%). It reduced
-model-visible bytes by 96.43% (95% CI 95.40–97.09%) while median paired Bazel
-wall-time overhead was 0.00%.
+The server exposes three tools:
 
-| Baseline in latest run | Context reduction | Visible-byte reduction | Median Bazel overhead |
-| --- | ---: | ---: | ---: |
-| Default shell | 89.73% (87.28–91.38%) | 96.43% (95.40–97.09%) | 0.00% |
-| Optimized shell instructions | 94.46% (91.90–95.89%) | 97.54% (96.53–98.15%) | -0.33% |
+| Tool | Purpose |
+| --- | --- |
+| `bazel.run` | Run an allowed Bazel command and return a bounded summary. |
+| `bazel.inspect` | Read filtered diagnostics, tests, coverage, artifacts, query results, or logs from an invocation. |
+| `bazel.cancel` | Cancel a queued or running invocation. |
 
-The corpus is Abseil at commit
-`5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a`, using Bazel 9.1.0 and
-`tiktoken-rs` with `o200k_base`. Every run covers six real build, test, query,
-and failure scenarios under cold and warm cache conditions: 180 paired adapter
-observations per run. Adapter order rotates, every observation gets an isolated
-output root, and confidence intervals use deterministic paired bootstrap
-resampling. The reports retain environment metadata, raw evidence, and
-checksummed transcripts.
+`bazel.run` supports `build`, `test`, `coverage`, `query`, `cquery`, `aquery`,
+and selected informational commands. Successful results are limited to 2 KiB
+and unsuccessful results to 8 KiB. Follow-up `bazel.inspect` calls are also
+bounded and paginated, so an agent only retrieves the evidence it needs.
 
-These are deterministic tokenizer estimates, not provider billing. The
-scheduled token workflow repeats the acceptance run on Linux and macOS and
-uploads the same reviewable artifact format for 30 days. Benchmark reports,
-transcripts, and evidence are intentionally excluded from source control. Run
-`make publish-token-benchmark` to package the latest local run under
-`.cache/published-benchmarks`, or download a bundle from the
-[token integration workflow](https://github.com/ewhauser/bazel-mcp/actions/workflows/token-integration.yml).
-`make bench-token-live` uses the Codex CLI JSON event stream to compare
-provider-reported input, cached-input, output, and total tokens for the same
-three adapters.
+## Security and local data
 
-## Development
+`bazel-mcp` executes Bazel with the permissions of the user who started the MCP
+client. It does not make untrusted repositories safe; use a sandbox or isolated
+account for untrusted source.
+
+The server:
+
+- invokes Bazel directly without shell evaluation or concatenated arguments;
+- denies `clean`, `fetch`, `mobile-install`, `run`, `shutdown`, and `sync` by
+  default;
+- prevents requests from overriding server-owned BEP and output-root flags;
+- filters the child-process environment and supports configurable regex
+  redaction;
+- stores raw output and BEP evidence only in the local cache, using private file
+  permissions.
+
+To restrict the server to one or more workspace roots, add a repeated
+`--allow-root` argument to the MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "bazel": {
+      "command": "bazel-mcp",
+      "args": ["--allow-root", "/absolute/path/to/workspaces"]
+    }
+  }
+}
+```
+
+See [SECURITY.md](SECURITY.md) for the security policy and threat-model
+guidance.
+
+## Configuration
+
+The built-in defaults cover personal local use. For workspace restrictions,
+retention limits, timeouts, command policy, result encoding, or custom
+redaction, start with [`examples/config.toml`](examples/config.toml).
+
+Pass a configuration explicitly with `--config`, set `BAZEL_MCP_CONFIG`, or
+place it at `$XDG_CONFIG_HOME/bazel-mcp/config.toml` (normally
+`~/.config/bazel-mcp/config.toml`). Command-line options can also add allowed
+roots or override the cache directory.
+
+See the [configuration reference](docs/configuration.md) for all settings and
+their defaults.
+
+## Compatibility
+
+| Component | Supported |
+| --- | --- |
+| Bazel | Major versions 7, 8, and 9 |
+| Platforms | macOS and Linux |
+| Transport | Local MCP over stdio |
+| Bazel discovery | `tools/bazel`, then Bazelisk, then Bazel on `PATH` |
+
+Other Bazel major versions are rejected before an invocation is created unless
+they are explicitly enabled in the configuration.
+
+## Performance
+
+Across three independent five-sample runs against a pinned Abseil corpus,
+`bazel-mcp` reduced cumulative model context by 89.73–90.69% compared with a
+default shell agent. The latest run measured an 89.73% reduction, with 0.00%
+median paired Bazel wall-time overhead.
+
+These results are deterministic tokenizer estimates, not provider billing. See
+the [benchmark methodology](docs/benchmarks.md) for the complete results,
+corpus, acceptance gates, and reproduction commands.
+
+## Contributing
+
+Contributions are welcome. The usual local checks are:
 
 ```sh
 make build
 make test
 make check
-make test-bazel-matrix
-make setup-oss-corpus
-make test-token-integration
 ```
 
-The last command runs the credential-free, commit-pinned Abseil comparison and
-enforces the 75% context/byte savings (including the lower 95% confidence
-bound) and 3% median Bazel overhead gates against both shell baselines. See
-[`specs/001-product-requirements.md`](specs/001-product-requirements.md) and
-[`specs/002-project-architecture.md`](specs/002-project-architecture.md). The
-configurable synchronous and task protocol shapes are specified in
-[`specs/003-configurable-mcp-task-execution.md`](specs/003-configurable-mcp-task-execution.md).
+Runner, BEP, policy, or reducer changes should also run
+`make test-bazel-matrix`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening
+a pull request.
+
+Architecture and protocol decisions are recorded under [`specs/`](specs/).
+
+## License
+
+`bazel-mcp` is available under the [MIT License](LICENSE).
