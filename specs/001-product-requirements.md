@@ -366,8 +366,8 @@ MUST use the encoding intended for the production MCP host.
 
 ### 9.1 Workspace validation
 
-- `workspace` MUST be absolute, canonicalized, and contained by a configured
-  allowed root.
+- `workspace` MUST be absolute and canonicalized. When allowed roots are
+  configured, it MUST be contained by one of them.
 - The canonical directory MUST contain `MODULE.bazel`, `WORKSPACE.bazel`, or
   `WORKSPACE`.
 - Symlink traversal MUST NOT escape the allowed root.
