@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub enum ResultEncoding {
     #[default]
     Text,
+    Toon,
     Structured,
     Both,
 }
@@ -310,5 +311,27 @@ mod tests {
         .unwrap();
 
         assert!(ServerConfig::load(&cli(path)).is_err());
+    }
+
+    #[test]
+    fn loads_each_configured_result_encoding() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+
+        for (name, expected) in [
+            ("text", ResultEncoding::Text),
+            ("toon", ResultEncoding::Toon),
+            ("structured", ResultEncoding::Structured),
+            ("both", ResultEncoding::Both),
+        ] {
+            let path = write_config(
+                root.path(),
+                &workspace,
+                &format!("result_encoding = {name:?}\n"),
+            );
+            let config = ServerConfig::load(&cli(path)).unwrap();
+            assert_eq!(config.result_encoding, expected);
+        }
     }
 }

@@ -295,6 +295,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "toon-format",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2417,6 +2418,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -2805,6 +2807,18 @@ name = "toml_writer"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+
+[[package]]
+name = "toon-format"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f89570c1a68d73941f728cca32a4345b2ffca36667ad921af336c60309a3e7e"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "tracing"

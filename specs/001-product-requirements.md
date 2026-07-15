@@ -349,17 +349,18 @@ workspace or the invocation store.
 
 ### 8.5 Result encoding
 
-The server supports three deployment-level result encodings:
+The server supports four deployment-level result encodings:
 
 - `text`: one compact JSON `TextContent` block and no duplicate
   `structuredContent`; this is the default.
+- `toon`: one TOON-encoded `TextContent` block and no duplicate
+  `structuredContent`.
 - `structured`: structured content for hosts proven to handle it without placing
   a duplicate representation in model context.
 - `both`: structured content plus the backwards-compatible text representation.
 
 The encoding is server configuration, not a per-call argument. The benchmark
-MUST use the encoding intended for the production MCP host. TOON is not included
-in the MVP.
+MUST use the encoding intended for the production MCP host.
 
 ## 9. Workspace and Bazel discovery
 
