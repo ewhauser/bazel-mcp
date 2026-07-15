@@ -1,0 +1,17 @@
+/target/
+/.cache/
+/.codex/
+/.env
+/.env.*
+/.DS_Store
+/.vscode/
+*.swp
+coverage/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/target/
+/bazel-mcp.cdx.xml
+*.cdx.json
+*.db
+*.db-shm
+*.db-wal

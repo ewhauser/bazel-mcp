@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if command -v prek >/dev/null 2>&1; then
+  exec prek run --config .pre-commit-config.yaml
+fi
+exec pre-commit run --config .pre-commit-config.yaml

@@ -1,0 +1,27 @@
+[package]
+name = "bazel-mcp-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bazel-mcp-bep.workspace = true
+bazel-mcp-policy.workspace = true
+bazel-mcp-reducer.workspace = true
+bazel-mcp-store.workspace = true
+bazel-mcp-types.workspace = true
+base64.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

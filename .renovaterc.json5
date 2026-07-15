@@ -1,0 +1,9 @@
+{
+  extends: ["config:recommended", "helpers:pinGitHubActionDigests"],
+  minimumReleaseAge: "3 days",
+  vulnerabilityAlerts: { enabled: true },
+  packageRules: [
+    { matchManagers: ["github-actions"], groupName: "github actions" },
+    { matchManagers: ["cargo"], matchUpdateTypes: ["patch", "minor"], groupName: "cargo dependencies" }
+  ]
+}

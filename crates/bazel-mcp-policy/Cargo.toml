@@ -1,0 +1,20 @@
+[package]
+name = "bazel-mcp-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bazel-mcp-types.workspace = true
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

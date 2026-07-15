@@ -1,0 +1,51 @@
+name = "abseil-cpp"
+url = "https://github.com/abseil/abseil-cpp.git"
+release_tag = "20260526.0"
+commit = "5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a"
+license = "Apache-2.0"
+bazel_version = "9.1.0"
+
+[[scenarios]]
+name = "build_success"
+command = "build"
+args = ["--features=-module_maps", "--macos_minimum_os=14.0", "//absl/strings/...", "//bazel_mcp_token_bench:success"]
+expected_exit = 0
+cache_condition = "cold_and_warm"
+
+[[scenarios]]
+name = "build_compile_failure"
+command = "build"
+args = ["--features=-module_maps", "--macos_minimum_os=14.0", "//bazel_mcp_token_bench:compile_failure"]
+expected_exit = 1
+expected_cause = "BAZEL_MCP_COMPILE_ROOT_CAUSE"
+cache_condition = "cold_and_warm"
+
+[[scenarios]]
+name = "build_noisy_failure"
+command = "build"
+args = ["--features=-module_maps", "--macos_minimum_os=14.0", "//bazel_mcp_token_bench:noisy_failure"]
+expected_exit = 1
+expected_cause = "BAZEL_MCP_NOISY_ROOT_CAUSE"
+cache_condition = "cold_and_warm"
+
+[[scenarios]]
+name = "test_success"
+command = "test"
+args = ["--features=-module_maps", "--macos_minimum_os=14.0", "//bazel_mcp_token_bench:success"]
+expected_exit = 0
+cache_condition = "cold_and_warm"
+
+[[scenarios]]
+name = "test_failure"
+command = "test"
+args = ["--features=-module_maps", "--macos_minimum_os=14.0", "//bazel_mcp_token_bench:test_failure"]
+expected_exit = 3
+expected_cause = "BAZEL_MCP_TEST_ROOT_CAUSE"
+cache_condition = "cold_and_warm"
+
+[[scenarios]]
+name = "query"
+command = "query"
+args = ["deps(//bazel_mcp_token_bench:success)"]
+expected_exit = 0
+cache_condition = "warm"

@@ -1,0 +1,17 @@
+[package]
+name = "bazel-mcp-reducer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bazel-mcp-bep.workspace = true
+bazel-mcp-types.workspace = true
+prost.workspace = true
+quick-xml.workspace = true
+serde.workspace = true
+thiserror.workspace = true

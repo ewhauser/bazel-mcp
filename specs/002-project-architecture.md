@@ -43,8 +43,8 @@ The product spans several failure and performance domains:
 - benchmarking of both system overhead and model-visible output
 
 Putting all of this in one crate would couple protocol code to subprocess and
-database details, make reducer tests require an async runtime, and make it easy for
-MCP handlers to bypass token and safety boundaries. The workspace needs small
+database details, make reducer tests require an async runtime, and make it easy
+for MCP handlers to bypass token and safety boundaries. The workspace needs small
 crates with explicit ownership and a single application service that composes
 them.
 
@@ -95,7 +95,8 @@ The initial repository is laid out as follows:
 │       ├── ci.yml
 │       ├── fuzz.yml
 │       ├── release-please.yml
-│       └── release.yml
+│       ├── release.yml
+│       └── token-integration.yml
 ├── .gitignore
 ├── .pre-commit-config-agent.yaml
 ├── .pre-commit-config.yaml
@@ -503,6 +504,9 @@ Responsibilities:
 - Turso ingest and inspection pagination throughput.
 - Query streaming throughput and peak-memory cases.
 - Response byte accounting for golden results.
+- Commit-pinned Abseil integration scenarios and three execution adapters.
+- Canonical model-visible transcript capture and `tiktoken-rs` accounting.
+- JSON and Markdown token-savings reports with enforceable acceptance gates.
 
 Suggested layout:
 
@@ -566,7 +570,7 @@ Rules:
 - `bazel-mcp-policy`, `bazel-mcp-store`, and `bazel-mcp-reducer` are siblings and
   do not depend on each other.
 - `bazel-mcp-runner` is the only composition layer below the server.
-- `bazel-mcp-server` does not call SQLite, parse BEP, read diagnostic files, or
+- `bazel-mcp-server` does not call Turso, parse BEP, read diagnostic files, or
   spawn Bazel directly.
 - No library crate depends on `bazel-mcp-server` or `bazel-mcp-benchmark`.
 - A new cross-cutting type moves downward into `bazel-mcp-types`; it is not
@@ -659,16 +663,17 @@ set includes:
 | MCP and async | `rmcp`, `tokio`, `tokio-util`, `futures` |
 | Serialization and schemas | `serde`, `serde_json`, `schemars`, `uuid` |
 | BEP | `prost`, `prost-types`, `prost-build`, vendored `protoc` support |
-| Storage | `rusqlite`, `tempfile` |
+| Storage | `turso`, `tempfile` |
 | Parsing | a bounded XML parser, LCOV parser or internal LCOV reader, `memchr`, ANSI stripping |
 | Errors and logging | `thiserror`, `anyhow`, `tracing`, `tracing-subscriber` |
 | CLI and platform | `clap`, user-directory resolution, Unix signal/process support |
 | Tests | `assert_cmd`, `predicates`, `insta`, `test-case`, `proptest` |
-| Benchmarks | `criterion` |
+| Benchmarks | `criterion`, `tiktoken-rs` |
 
 Dependency versions are selected and tested during scaffolding, declared once in
-the workspace manifest, and committed through `Cargo.lock`. The official Rust
-MCP SDK is pinned to a released version rather than a Git branch.
+the workspace manifest, and committed through `Cargo.lock`. The pre-1.0 `turso`
+dependency uses an exact workspace-manifest version as well as the lockfile. The
+official Rust MCP SDK is pinned to a released version rather than a Git branch.
 
 ### Package manifests
 
@@ -749,7 +754,8 @@ workspace has its own committed `fuzz/Cargo.lock`.
 - Library crates define typed errors with `thiserror`. `anyhow` is used at
   executable and orchestration boundaries where context is more valuable than
   enum matching.
-- Leaf crates remain synchronous. Tokio belongs in runner and server code.
+- Pure leaf crates remain synchronous. Tokio belongs only in runner, server, and
+  store code; the store needs it for Turso's async local API.
 - Production code does not use `unwrap` or `expect` for recoverable input,
   process, storage, protobuf, or protocol failures.
 - Public APIs are narrow and re-exported intentionally from each `lib.rs`.
@@ -801,7 +807,8 @@ Required targets:
 
 ```make
 .PHONY: setup-hooks build test test-unit test-integration test-bazel-matrix \
-        run check bench bench-save bench-compare bench-token \
+        setup-oss-corpus test-token-integration run check \
+        bench bench-save bench-compare bench-token bench-token-live \
         fuzz-setup fuzz-list fuzz-smoke fuzz-run \
         harden-release check-release-security
 
@@ -809,6 +816,9 @@ ARGS ?=
 FUZZ_TARGET ?= bep_framing
 FUZZ_ARGS ?= -max_total_time=60
 NIX_DEVELOP ?= nix --extra-experimental-features 'nix-command flakes' develop --command
+OSS_PROJECT ?= abseil-cpp
+TOKEN_ENCODING ?= o200k_base
+TOKEN_SAMPLES ?= 5
 
 setup-hooks:
 	git config core.hooksPath .githooks
@@ -828,6 +838,14 @@ test-integration:
 test-bazel-matrix:
 	$(NIX_DEVELOP) ./scripts/test-bazel-matrix.sh
 
+setup-oss-corpus:
+	$(NIX_DEVELOP) ./scripts/benchmarks/setup-oss-corpus.sh $(OSS_PROJECT)
+
+test-token-integration:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-token-integration.sh \
+		--project $(OSS_PROJECT) --encoding $(TOKEN_ENCODING) \
+		--samples $(TOKEN_SAMPLES) --assert-gates
+
 run:
 	cargo run -p bazel-mcp-server -- $(ARGS)
 
@@ -838,12 +856,20 @@ check:
 
 bench:
 	cargo bench -p bazel-mcp-benchmark
+
+bench-token: test-token-integration
+
+bench-token-live:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-token-integration.sh \
+		--project $(OSS_PROJECT) --encoding $(TOKEN_ENCODING) --live-agent
 ```
 
-Additional targets wrap Criterion baseline save/compare, the agent token
-benchmark, fuzz initialization and smoke tests, release-workflow hardening, and
-MCP conformance. Commands printed in `README.md`, `CONTRIBUTING.md`, and
-`AGENTS.md` use these targets wherever one exists.
+Additional targets wrap Criterion baseline save/compare, fuzz initialization
+and smoke tests, release-workflow hardening, and MCP conformance. `bench-token`
+is the credential-free deterministic integration benchmark;
+`bench-token-live` is its opt-in provider-backed corroboration. Commands printed
+in `README.md`, `CONTRIBUTING.md`, and `AGENTS.md` use these targets wherever one
+exists.
 
 `make check` remains fast enough for normal iteration. Actual tests are a
 separate target so an agent can choose focused tests while working and run the
@@ -857,10 +883,12 @@ not provide the Rust compiler; `rust-toolchain.toml` remains authoritative.
 The default shell includes:
 
 - Bazelisk
+- Git and a C++17 compiler/toolchain suitable for Abseil
 - `cargo-shear`
 - `cargo-fuzz`
 - `hyperfine`
-- SQLite CLI
+- SQLite CLI for compatibility-level inspection of the local Turso file, not as
+  the production database driver
 - `jq`
 - Python 3 for benchmark and release-security scripts
 - Node.js only if required by the pinned MCP conformance suite
@@ -882,7 +910,7 @@ Ownership:
 - BEP framing, graph, and cross-version fixtures belong to `bazel-mcp-bep`.
 - Reduction input/output fixtures and snapshots belong to
   `bazel-mcp-reducer`.
-- SQLite migration, retention, recovery, and cursor tests belong to
+- Turso migration, retention, recovery, and cursor tests belong to
   `bazel-mcp-store`.
 - Policy and argument injection tests belong to `bazel-mcp-policy`.
 - Process, cancellation, concurrency, and real workspace tests belong to
@@ -917,6 +945,108 @@ supported Bazel majors from specification 001. It:
 
 Normal unit tests remain fast. The complete matrix runs in CI and before a
 release; developers can target one version or case through Make variables.
+
+### Open-source token integration harness
+
+The real-world corpus is Abseil C++, which officially supports Bazel and is
+large enough to exercise meaningful loading, analysis, C++ compilation, test,
+and query behavior without the infrastructure required by a project such as
+Envoy. The initial `resources/projects/abseil-cpp.toml` manifest is conceptually:
+
+```toml
+name = "abseil-cpp"
+url = "https://github.com/abseil/abseil-cpp.git"
+release_tag = "20260526.0"
+commit = "5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a"
+license = "Apache-2.0"
+bazel_version = "9.1.0"
+```
+
+The commit, not the tag, is the checkout authority. The tag is human-readable
+provenance. `setup-oss-corpus.sh` performs a shallow fetch of that exact commit
+into `.cache/corpora/abseil-cpp/<commit>/`, verifies `git rev-parse HEAD`, and
+records the checkout metadata. It never runs from an unverified moving branch.
+Network access occurs only during this explicit setup step. Normal unit tests
+and transcript/tokenizer tests are offline.
+
+Each measured sample gets a clean disposable worktree or copy under
+`.cache/benchmarks/work/`. The runner copies a small repository-owned overlay
+into that checkout rather than editing Abseil sources. The overlay contains a
+separate Bazel package with targets that depend on real Abseil libraries:
+
+- `success`: builds and tests a valid C++ target.
+- `compile_failure`: contains one stable, unmistakable C++ type error.
+- `test_failure`: builds successfully and fails with a stable assertion message.
+- `noisy_failure`: a custom action emits a fixed large set of duplicate warning
+  lines followed by one root cause and a nonzero exit.
+- `query`: emits a representative dependency or target query result.
+
+The scenario manifest owns exact targets, flags, expected status, and expected
+root-cause matchers. A change to the Abseil commit or scenario evidence is a
+reviewed fixture update, never an automatic refresh.
+
+The Rust `token-integration` binary implements three adapters behind one trait:
+
+```rust
+trait ExecutionAdapter {
+    async fn run(&self, scenario: &Scenario, sample: &Sample) -> Result<RunEvidence>;
+}
+```
+
+- `shell-default` exposes direct terminal output using a recorded host profile:
+  10-second initial yield, then 5-second long-process polls.
+- `shell-optimized` applies the source discussion's agent instructions and
+  Bazel output configuration: 30-second initial yield, a 30-second first poll,
+  60-second subsequent polls, `--color=no`, `--curses=no`, a 60-second progress
+  rate limit, and test output only on errors.
+- `bazel-mcp` invokes the built stdio server through the MCP client boundary,
+  waits for completion, and uses at most one narrow `bazel.inspect` call when
+  the default result does not contain the expected cause.
+
+Adapter-specific presentation flags are allowed, but semantic Bazel inputs are
+identical. Each adapter uses the manifest's Bazel version, target, environment,
+task text, and cache condition. It receives an isolated `--output_user_root` to
+prevent one adapter from warming another. The harness runs cold and warm suites
+separately, randomizes adapter order from a recorded seed, performs one warm-up,
+then collects at least five measured samples. It reports medians and p95s and
+keeps raw observations so results can be re-aggregated.
+
+Every adapter writes the same JSONL transcript schema. Events contain a sequence
+number, adapter, scenario, event kind, role, visibility flag, and content. Rust
+struct serialization fixes field order; UTF-8, LF line endings, stable JSON
+escaping, normalized workspace paths, and normalized volatile IDs make the
+model-visible representation reproducible. Raw logs, BEP, timing, and hashes are
+separate evidence fields and are not counted unless an adapter actually exposed
+their contents to the simulated model.
+
+`token_count.rs` uses the `tiktoken-rs` singleton for the selected encoding. The
+default is `o200k_base`, which covers current GPT and Codex model families. It
+computes:
+
+```text
+visible_tool_tokens = sum(tokens(tool result content exposed to the model))
+
+cumulative_context_tokens = sum(
+  tokens(common prompt + adapter instructions + tool schemas + prior transcript)
+  immediately before each simulated model event
+)
+
+reduction_percent = 100 * (1 - bazel_mcp / shell_default)
+```
+
+The common task prompt is byte-identical across adapters. Adapter-specific tool
+schemas and the optimized instruction block are included, so neither MCP nor
+prompt overhead is hidden. The report includes the tokenizer crate version,
+encoding, canonicalization version, full corpus commit, Bazel version, platform,
+compiler, cache condition, sample seed, absolute counts, and ratios.
+
+`--assert-gates` fails unless the aggregate suite meets specification 001's
+token, byte, diagnostic-fidelity, and wall-time requirements. It also fails on
+an absent scenario, wrong expected exit status, missing root cause, malformed
+transcript, unknown tokenizer encoding, or corpus mismatch. This is a
+deterministic OpenAI-tokenizer estimate, not provider billing. `--live-agent`
+uses the same scenario/task manifests and records provider-reported tokens when
+credentials are explicitly supplied.
 
 ### MCP conformance
 
@@ -973,11 +1103,17 @@ bytes, peak RSS, and model-visible result bytes.
 2. Optimized terminal orchestration baseline
 3. `bazel-mcp`
 
-The harness stores raw platform measurements under `.cache/benchmarks` and
-generates a compact Markdown/JSON report. It does not commit prompts, source,
-logs, or credentials from proprietary repositories. Runs that consume paid model
-tokens are manual or scheduled with explicit credentials, not blocking on every
-pull request.
+This command is the credential-free Abseil integration run described in the
+test-harness section. The Rust driver executes all adapters, writes canonical
+transcripts under `.cache/benchmarks/<run-id>/transcripts/`, and generates
+`report.json` plus `report.md`. With `--assert-gates`, it verifies token savings,
+model-visible byte savings, diagnostic fidelity, and Bazel wall-time overhead.
+
+`make bench-token-live` runs the same tasks through a configured agent platform
+and appends actual input, cached, uncached, and output token metrics where the
+platform exposes them. It does not commit prompts, source, logs, credentials, or
+provider responses from proprietary repositories. Paid runs require explicit
+credentials and are never a blocking pull-request check.
 
 Criterion baseline save/compare commands are exposed through `make bench-save`
 and `make bench-compare` and write to a configurable scratch target directory.
@@ -1046,6 +1182,18 @@ Required jobs:
 
 Performance comparison may post a non-blocking PR report once stable. Paid agent
 token benchmarks are not part of normal pull-request CI.
+
+### `token-integration.yml`
+
+Runs on a weekly schedule and manual dispatch. It restores or creates the
+commit-pinned Abseil cache, verifies the checkout, runs
+`make test-token-integration`, and uploads the JSON report, Markdown report,
+canonical transcripts, and bounded failure evidence. It has no provider
+credentials. The job is non-blocking for pull requests because the cold C++
+build is comparatively expensive; transcript canonicalization, tokenizer
+snapshots, scenario-manifest validation, and report arithmetic remain covered by
+ordinary workspace tests. A release candidate MUST have a passing integration
+report for the exact code being released.
 
 ### `fuzz.yml`
 
@@ -1136,15 +1284,17 @@ Scaffolding proceeds in dependency order:
 2. Create `bazel-mcp-types` and freeze lifecycle/domain terminology.
 3. Create `bazel-mcp-bep`, vendor the pinned proto set, and land cross-version
    framing fixtures.
-4. Create policy, store, and reducer sibling crates with no cross-dependencies.
+4. Create policy, async Turso store, and reducer sibling crates with no
+   cross-dependencies.
 5. Create the runner and wire process capture to durable storage and reduction.
 6. Create the thin server with the three tool schema snapshots and stdio
    black-box test.
 7. Add real Bazel workspaces, the version-matrix script, and MCP conformance.
-8. Add benchmark and fuzz workspaces.
+8. Add benchmark and fuzz workspaces, pin Abseil, and land the offline
+   `tiktoken-rs` integration harness.
 9. Add CI, release-please, cargo-dist, security checks, and SBOM generation.
 10. Run `make check`, `make test`, `make test-bazel-matrix`, MCP conformance, and
-    the baseline byte/overhead benchmark before declaring the scaffold complete.
+    `make test-token-integration` before declaring the scaffold complete.
 
 Each step lands a compiling workspace. Placeholder crates expose only the types
 needed by the next layer rather than speculative APIs.
@@ -1154,9 +1304,12 @@ needed by the next layer rather than speculative APIs.
 - `cargo metadata` reports exactly the eight initial workspace packages and no
   dependency cycles.
 - Only `bazel-mcp-server` depends on `rmcp`.
-- Among production library and binary dependencies, only `bazel-mcp-runner` and
-  `bazel-mcp-server` depend directly on Tokio. Benchmark and test-only targets
-  may use Tokio to drive the runner API.
+- Among production library and binary dependencies, only `bazel-mcp-runner`,
+  `bazel-mcp-server`, and `bazel-mcp-store` depend directly on Tokio. Benchmark
+  and test-only targets may use Tokio to drive the runner API.
+- Production storage uses the local `turso` crate and contains no `rusqlite`
+  dependency. Store APIs are async and migration/crash-recovery tests pass
+  against the pinned Turso version.
 - `bazel-mcp-reducer` and `bazel-mcp-store` do not depend on each other.
 - All packages inherit version, edition, Rust version, license, authors, and
   repository metadata from the workspace.
@@ -1168,6 +1321,12 @@ needed by the next layer rather than speculative APIs.
   deferred.
 - Real Bazel integration tests do not run as ordinary unit tests and are
   available through one documented Make target.
+- The Abseil manifest pins tag `20260526.0`, full commit
+  `5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a`, Bazel `9.1.0`, and Apache-2.0
+  provenance; setup refuses a mismatched checkout.
+- `make test-token-integration` runs without model credentials, emits canonical
+  JSONL plus JSON/Markdown reports, records `tiktoken-rs` and encoding versions,
+  and enforces specification 001's release gates.
 - MCP stdout contains no tracing or application text.
 - BEP generated Rust is not committed; proto source, provenance, and license are.
 - All raw/golden fixtures are redacted and owned by a specific crate.
@@ -1187,8 +1346,8 @@ needed by the next layer rather than speculative APIs.
 - Whether any internal crate has a public API worth publishing independently.
 - Whether Windows runtime support belongs inside `bazel-mcp-runner` or a small
   platform process crate.
-- Whether the token benchmark should become a scheduled, non-blocking workflow
-  after credential and cost controls are established.
+- Which agent platform should be the first live provider-metrics corroboration
+  target; this does not affect the offline release gate.
 
 ## References
 
@@ -1196,5 +1355,8 @@ needed by the next layer rather than speculative APIs.
 - [Cargo workspaces](https://doc.rust-lang.org/book/ch14-03-cargo-workspaces.html)
 - [Official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
 - [Bazel Build Event Protocol](https://bazel.build/remote/bep)
+- [Turso](https://github.com/tursodatabase/turso)
+- [`tiktoken-rs`](https://github.com/zurawiki/tiktoken-rs)
+- [Abseil C++](https://github.com/abseil/abseil-cpp)
 - [cargo-dist](https://opensource.axo.dev/cargo-dist/)
 - [release-please](https://github.com/googleapis/release-please)

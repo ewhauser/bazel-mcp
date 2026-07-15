@@ -771,7 +771,7 @@ code-execution service even though it does not expose a shell.
 
 ### 17.3 Secret handling
 
-- Redaction is applied before text enters SQLite summaries or MCP results.
+- Redaction is applied before text enters Turso summaries or MCP results.
 - Known credential-bearing flags and environment variables store a redacted
   placeholder in request and canonical-command metadata.
 - Raw logs remain protected by filesystem permissions and retention policy but

@@ -1,0 +1,11 @@
+load(":rules.bzl", "failing_action", "matrix_test", "slow_action", "write_file")
+
+write_file(name = "ok")
+failing_action(name = "action_failure")
+slow_action(name = "slow")
+matrix_test(name = "test_success")
+matrix_test(
+    name = "test_failure",
+    exit_code = 1,
+    message = "MATRIX_TEST_ROOT_CAUSE",
+)

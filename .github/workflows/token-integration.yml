@@ -1,0 +1,25 @@
+name: Token integration
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+permissions:
+  contents: read
+concurrency:
+  group: token-integration
+  cancel-in-progress: false
+jobs:
+  abseil:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
+      - run: brew install bazelisk
+      - run: ./scripts/benchmarks/setup-oss-corpus.sh abseil-cpp
+      - run: ./scripts/benchmarks/run-token-integration.sh --project abseil-cpp --encoding o200k_base --samples 5 --assert-gates
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: abseil-token-report
+          path: .cache/benchmarks/abseil-cpp/
+          retention-days: 30

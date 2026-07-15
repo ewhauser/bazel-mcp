@@ -1,0 +1,203 @@
+// Wire-compatible subset of Bazel 9.1.0 build_event_stream.proto.
+// Licensed under Apache-2.0 by the Bazel authors.
+syntax = "proto3";
+
+package bazel_mcp.bep;
+
+message BuildEventId {
+  message UnknownBuildEventId { string details = 1; }
+  message ProgressId { int32 opaque_count = 1; }
+  message EmptyId {}
+  message StructuredCommandLineId { string command_line_label = 1; }
+  message FetchId { string url = 1; int32 downloader = 2; }
+  message PatternExpandedId { repeated string pattern = 1; }
+  message TargetConfiguredId { string label = 1; string aspect = 2; }
+  message NamedSetOfFilesId { string id = 1; }
+  message ConfigurationId { string id = 1; }
+  message TargetCompletedId {
+    string label = 1;
+    string aspect = 2;
+    ConfigurationId configuration = 3;
+  }
+  message ActionCompletedId {
+    string primary_output = 1;
+    string label = 2;
+    ConfigurationId configuration = 3;
+  }
+  message UnconfiguredLabelId { string label = 1; }
+  message ConfiguredLabelId { string label = 1; ConfigurationId configuration = 2; }
+  message TestResultId {
+    string label = 1;
+    int32 run = 2;
+    int32 shard = 3;
+    int32 attempt = 4;
+    ConfigurationId configuration = 5;
+  }
+  message TestSummaryId { string label = 1; ConfigurationId configuration = 2; }
+  message TargetSummaryId { string label = 1; ConfigurationId configuration = 2; }
+
+  oneof id {
+    UnknownBuildEventId unknown = 1;
+    ProgressId progress = 2;
+    EmptyId started = 3;
+    PatternExpandedId pattern = 4;
+    TargetCompletedId target_completed = 5;
+    ActionCompletedId action_completed = 6;
+    TestSummaryId test_summary = 7;
+    TestResultId test_result = 8;
+    EmptyId build_finished = 9;
+    PatternExpandedId pattern_skipped = 10;
+    EmptyId unstructured_command_line = 11;
+    EmptyId options_parsed = 12;
+    NamedSetOfFilesId named_set = 13;
+    EmptyId workspace_status = 14;
+    ConfigurationId configuration = 15;
+    TargetConfiguredId target_configured = 16;
+    FetchId fetch = 17;
+    StructuredCommandLineId structured_command_line = 18;
+    UnconfiguredLabelId unconfigured_label = 19;
+    EmptyId build_tool_logs = 20;
+    ConfiguredLabelId configured_label = 21;
+    EmptyId build_metrics = 22;
+    EmptyId workspace = 23;
+    EmptyId build_metadata = 24;
+    EmptyId convenience_symlinks_identified = 25;
+    TargetSummaryId target_summary = 26;
+    EmptyId exec_request = 28;
+    bytes test_progress = 29;
+  }
+}
+
+message File {
+  repeated string path_prefix = 4;
+  string name = 1;
+  oneof file {
+    string uri = 2;
+    bytes contents = 3;
+    string symlink_target_path = 7;
+  }
+  string digest = 5;
+  int64 length = 6;
+}
+
+message Progress {
+  string stdout = 1;
+  string stderr = 2;
+}
+
+message Aborted {
+  int32 reason = 1;
+  string description = 2;
+}
+
+message ActionExecuted {
+  bool success = 1;
+  int32 exit_code = 2;
+  File stdout = 3;
+  File stderr = 4;
+  string label = 5;
+  File primary_output = 6;
+  string type = 8;
+  repeated string command_line = 9;
+  bytes failure_detail = 11;
+}
+
+message NamedSetOfFiles {
+  repeated File files = 1;
+  repeated BuildEventId.NamedSetOfFilesId file_sets = 2;
+}
+
+message OutputGroup {
+  string name = 1;
+  repeated BuildEventId.NamedSetOfFilesId file_sets = 3;
+  bool incomplete = 4;
+  repeated File inline_files = 5;
+}
+
+message OptionsParsed {
+  repeated string startup_options = 1;
+  repeated string explicit_startup_options = 2;
+  repeated string cmd_line = 3;
+  repeated string explicit_cmd_line = 4;
+  bytes invocation_policy = 5;
+  string tool_tag = 6;
+}
+
+message TargetComplete {
+  bool success = 1;
+  repeated OutputGroup output_group = 2;
+  repeated string tag = 3;
+  repeated File important_output = 4;
+  string target_kind = 5;
+  repeated File directory_output = 8;
+  bytes failure_detail = 9;
+}
+
+message TestResult {
+  repeated File test_action_output = 2;
+  int64 test_attempt_duration_millis = 3;
+  bool cached_locally = 4;
+  int32 status = 5;
+  int64 test_attempt_start_millis_epoch = 6;
+  repeated string warning = 7;
+  bytes execution_info = 8;
+  string status_details = 9;
+}
+
+message TestSummary {
+  int32 total_run_count = 1;
+  repeated File passed = 3;
+  repeated File failed = 4;
+  int32 overall_status = 5;
+  int32 total_num_cached = 6;
+  int64 first_start_time_millis = 7;
+  int64 last_stop_time_millis = 8;
+  int64 total_run_duration_millis = 9;
+  int32 run_count = 10;
+  int32 shard_count = 11;
+  int32 attempt_count = 15;
+}
+
+message BuildFinished {
+  message ExitCode {
+    string name = 1;
+    int32 code = 2;
+  }
+  bool overall_success = 1;
+  int64 finish_time_millis = 2;
+  ExitCode exit_code = 3;
+  bytes failure_detail = 6;
+}
+
+message BuildEvent {
+  bytes id = 1;
+  repeated bytes children = 2;
+  bool last_message = 20;
+  oneof payload {
+    Progress progress = 3;
+    Aborted aborted = 4;
+    bytes started = 5;
+    bytes expanded = 6;
+    ActionExecuted action = 7;
+    TargetComplete completed = 8;
+    TestSummary test_summary = 9;
+    TestResult test_result = 10;
+    bytes unstructured_command_line = 12;
+    OptionsParsed options_parsed = 13;
+    BuildFinished finished = 14;
+    NamedSetOfFiles named_set_of_files = 15;
+    bytes workspace_status = 16;
+    bytes configuration = 17;
+    bytes configured = 18;
+    bytes fetch = 21;
+    bytes structured_command_line = 22;
+    bytes build_tool_logs = 23;
+    bytes build_metrics = 24;
+    bytes workspace_info = 25;
+    bytes build_metadata = 26;
+    bytes convenience_symlinks_identified = 27;
+    bytes target_summary = 28;
+    bytes exec_request = 29;
+    bytes test_progress = 30;
+  }
+}

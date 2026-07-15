@@ -1,0 +1,62 @@
+[package]
+name = "bazel-mcp-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+prost = "0.14"
+bazel-mcp-bep = { path = "../crates/bazel-mcp-bep" }
+bazel-mcp-policy = { path = "../crates/bazel-mcp-policy" }
+bazel-mcp-reducer = { path = "../crates/bazel-mcp-reducer" }
+bazel-mcp-store = { path = "../crates/bazel-mcp-store" }
+bazel-mcp-types = { path = "../crates/bazel-mcp-types" }
+
+[[bin]]
+name = "bep_framing"
+path = "fuzz_targets/bep_framing.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bep_event_stream"
+path = "fuzz_targets/bep_event_stream.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "named_file_sets"
+path = "fuzz_targets/named_file_sets.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "diagnostic_reducer"
+path = "fuzz_targets/diagnostic_reducer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "redaction"
+path = "fuzz_targets/redaction.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cursor_decode"
+path = "fuzz_targets/cursor_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "lifecycle_sequence"
+path = "fuzz_targets/lifecycle_sequence.rs"
+test = false
+doc = false

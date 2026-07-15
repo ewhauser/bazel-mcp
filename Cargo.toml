@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+license = "MIT"
+authors = ["Eric Hauser"]
+repository = "https://github.com/ewhauser/bazel-mcp"
+homepage = "https://github.com/ewhauser/bazel-mcp"
+description = "A token-efficient MCP server for Bazel invocations"
+keywords = ["bazel", "mcp", "llm", "build"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+# Internal crates
+bazel-mcp-bep = { path = "crates/bazel-mcp-bep" }
+bazel-mcp-policy = { path = "crates/bazel-mcp-policy" }
+bazel-mcp-reducer = { path = "crates/bazel-mcp-reducer" }
+bazel-mcp-runner = { path = "crates/bazel-mcp-runner" }
+bazel-mcp-store = { path = "crates/bazel-mcp-store" }
+bazel-mcp-types = { path = "crates/bazel-mcp-types" }
+
+# Error handling and logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
+
+# Async and protocol
+rmcp = { version = "=2.2.0", features = ["client", "server", "transport-child-process", "transport-io"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Serialization and domain data
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+regex = "1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.9"
+uuid = { version = "1", features = ["serde", "v7"] }
+
+# BEP and reduction
+prost = "0.14"
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+quick-xml = { version = "0.41", features = ["serialize"] }
+
+# Storage and platform
+nix = { version = "0.30", features = ["process", "signal"] }
+tempfile = "3"
+turso = { version = "=0.7.0", default-features = false }
+which = "8"
+
+# Testing and benchmarks
+criterion = "0.7"
+proptest = "1"
+tiktoken-rs = "=0.12.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "full"
+lto = false
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+installers = ["shell", "homebrew"]
+tap = "ewhauser/homebrew-tap"
+publish-jobs = ["homebrew"]
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+]
+install-path = "CARGO_HOME"
+install-updater = false
+pr-run-mode = "skip"
+allow-dirty = ["ci"]

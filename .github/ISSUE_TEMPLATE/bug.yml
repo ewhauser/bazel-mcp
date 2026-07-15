@@ -1,0 +1,15 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Behavior
+      description: Include Bazel and bazel-mcp versions, platform, and redacted reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted evidence
+      description: Never include credentials or proprietary source/output.
