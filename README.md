@@ -58,4 +58,6 @@ make test-token-integration
 The last command runs the credential-free, commit-pinned Abseil comparison and
 enforces the 75% context/byte savings and 3% median Bazel overhead gates. See
 [`specs/001-product-requirements.md`](specs/001-product-requirements.md) and
-[`specs/002-project-architecture.md`](specs/002-project-architecture.md).
+[`specs/002-project-architecture.md`](specs/002-project-architecture.md). The
+configurable synchronous and task protocol shapes are specified in
+[`specs/003-configurable-mcp-task-execution.md`](specs/003-configurable-mcp-task-execution.md).
