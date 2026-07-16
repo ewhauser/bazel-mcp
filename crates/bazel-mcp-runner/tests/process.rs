@@ -398,6 +398,36 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
 }
 
 #[tokio::test]
+async fn starlark_source_locations_are_workspace_relative() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = service(
+        &root,
+        &workspace,
+        "#!/bin/sh\necho \"ERROR: $PWD/pkg/defs.bzl:4:2: name 'missing_rule' is not defined\" >&2\nexit 1\n",
+    )
+    .await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//pkg:broken".into()],
+        ))
+        .await
+        .unwrap();
+    let summary = failed.summary.as_ref().unwrap();
+    assert!(summary.headline.contains("missing_rule"));
+    let diagnostic = &summary.diagnostics[0];
+    assert_eq!(diagnostic.category, DiagnosticCategory::Loading);
+    assert_eq!(diagnostic.message, "name 'missing_rule' is not defined");
+    assert_eq!(diagnostic.location.as_ref().unwrap().path, "pkg/defs.bzl");
+    assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(4));
+    assert_eq!(diagnostic.location.as_ref().unwrap().column, Some(2));
+}
+
+#[tokio::test]
 async fn log_inspection_uses_bounded_opaque_cursors() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

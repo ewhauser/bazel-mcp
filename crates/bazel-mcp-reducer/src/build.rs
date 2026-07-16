@@ -820,6 +820,12 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 
 fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
+    let mut starlark_parser = StarlarkDiagnosticParser::default();
+    for line in normalized.lines() {
+        if let Some(diagnostic) = starlark_parser.observe_line(line) {
+            diagnostics.push(diagnostic);
+        }
+    }
     let mut python_parser = PythonDiagnosticParser::default();
     for line in normalized.lines() {
         if let Some(diagnostic) = python_parser.observe_line(line) {
@@ -847,6 +853,13 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
         if let Some(mut diagnostic) = parse_go_diagnostic(&line) {
             diagnostic.repetition_count = count;
             diagnostics.push(diagnostic);
+            continue;
+        }
+        if parse_starlark_inline_diagnostic(&line)
+            .is_some_and(|diagnostic| is_starlark_root_cause_message(&diagnostic.message))
+            || starlark_error_message(&line).is_some()
+            || is_starlark_traceback_header(&line)
+        {
             continue;
         }
         if parse_python_location(&line).is_some() || python_exception_message(&line).is_some() {
@@ -886,6 +899,188 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             repetition_count: count,
         });
     }
+}
+
+/// Stateful extractor for Bazel's Starlark source and traceback diagnostics.
+///
+/// Syntax diagnostics carry their location inline. Runtime Starlark failures
+/// instead print one or more `File "...", line N, column N` frames before a
+/// terminal `Error in ...` line, so only the latest frame must be retained.
+#[derive(Debug)]
+struct StarlarkDiagnosticParser {
+    location: Option<DiagnosticLocation>,
+    category: DiagnosticCategory,
+}
+
+impl Default for StarlarkDiagnosticParser {
+    fn default() -> Self {
+        Self {
+            location: None,
+            category: DiagnosticCategory::Loading,
+        }
+    }
+}
+
+impl StarlarkDiagnosticParser {
+    fn observe_line(&mut self, line: &str) -> Option<Diagnostic> {
+        if is_starlark_traceback_header(line) {
+            self.location = None;
+            if line.trim_start().starts_with("ERROR:") {
+                self.category = DiagnosticCategory::Loading;
+            }
+            return None;
+        }
+        if let Some(diagnostic) = parse_starlark_inline_diagnostic(line) {
+            self.location = diagnostic.location.clone();
+            self.category = diagnostic.category;
+            return is_starlark_root_cause_message(&diagnostic.message).then_some(diagnostic);
+        }
+        if let Some(location) = parse_starlark_traceback_location(line) {
+            self.location = Some(location);
+            return None;
+        }
+        let message = starlark_error_message(line)?;
+        Some(Diagnostic {
+            severity: Severity::Error,
+            category: self.category,
+            message: message.to_owned(),
+            location: self.location.take(),
+            target: None,
+            action: None,
+            repetition_count: 1,
+        })
+    }
+}
+
+fn parse_starlark_inline_diagnostic(line: &str) -> Option<Diagnostic> {
+    let line = line
+        .trim()
+        .strip_prefix("ERROR: ")
+        .unwrap_or_else(|| line.trim());
+    let path_end = starlark_path_end(line)?;
+    let path = &line[..path_end];
+    let (line_number, remainder) = split_u32_prefix(&line[path_end + 1..])?;
+    let (column, message) = split_u32_prefix(remainder)
+        .map_or((None, remainder), |(column, message)| {
+            (Some(column), message)
+        });
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let lower = message.to_ascii_lowercase();
+    let category = if (lower.starts_with("in ") && lower.contains(" rule //"))
+        || lower.contains("analysis of target")
+        || lower.contains("aspect on target")
+    {
+        DiagnosticCategory::Analysis
+    } else {
+        DiagnosticCategory::Loading
+    };
+    Some(Diagnostic {
+        severity: if lower.contains("warning:") {
+            Severity::Warning
+        } else {
+            Severity::Error
+        },
+        category,
+        message: message.to_owned(),
+        location: Some(DiagnosticLocation {
+            path: compact_starlark_path(path),
+            line: Some(line_number),
+            column,
+        }),
+        target: None,
+        action: None,
+        repetition_count: 1,
+    })
+}
+
+fn starlark_path_end(line: &str) -> Option<usize> {
+    const MARKERS: [&str; 6] = [
+        ".bzl:",
+        ".bazel:",
+        "/BUILD:",
+        "\\BUILD:",
+        "/WORKSPACE:",
+        "\\WORKSPACE:",
+    ];
+    MARKERS
+        .iter()
+        .filter_map(|marker| {
+            line.rfind(marker)
+                .map(|index| index + marker.len().saturating_sub(1))
+        })
+        .max()
+}
+
+fn parse_starlark_traceback_location(line: &str) -> Option<DiagnosticLocation> {
+    let marker = "File \"";
+    let start = line.find(marker)? + marker.len();
+    let remainder = &line[start..];
+    let (path, remainder) = remainder.split_once("\", line ")?;
+    if !is_starlark_path(path) {
+        return None;
+    }
+    let line_digits = remainder
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if line_digits == 0 {
+        return None;
+    }
+    let line_number = remainder[..line_digits].parse::<u32>().ok()?;
+    let column = remainder[line_digits..]
+        .strip_prefix(", column ")
+        .and_then(|remainder| {
+            let digits = remainder
+                .bytes()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            (digits > 0)
+                .then(|| remainder[..digits].parse::<u32>().ok())
+                .flatten()
+        });
+    Some(DiagnosticLocation {
+        path: compact_starlark_path(path),
+        line: Some(line_number),
+        column,
+    })
+}
+
+fn is_starlark_path(path: &str) -> bool {
+    path.ends_with(".bzl")
+        || path.ends_with(".bazel")
+        || matches!(path.rsplit(['/', '\\']).next(), Some("BUILD" | "WORKSPACE"))
+}
+
+fn is_starlark_traceback_header(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("ERROR: ")
+        .unwrap_or_else(|| line.trim())
+        == "Traceback (most recent call last):"
+}
+
+fn starlark_error_message(line: &str) -> Option<&str> {
+    let line = line.trim();
+    (line.starts_with("Error in ") || line.starts_with("Error: ")).then_some(line)
+}
+
+fn is_starlark_root_cause_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("syntax error")
+        || lower.contains("contains syntax errors")
+        || (lower.contains("name '") && lower.contains(" is not defined"))
+}
+
+fn compact_starlark_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
 }
 
 /// Stateful extractor for standard Python traceback and syntax-error output.
@@ -1378,6 +1573,102 @@ ERROR: Build did NOT complete successfully
                 .map(|location| location.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["first.go", "second.go"]
+        );
+    }
+
+    #[test]
+    fn ranks_starlark_syntax_errors_with_structured_locations() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"ERROR: /tmp/project/pkg/BUILD.bazel:5:1: syntax error at ')': expected ]
+ERROR: no such target '//pkg:broken': target 'broken' not declared in package 'pkg'
+ERROR: Build did NOT complete successfully
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.message, "syntax error at ')': expected ]");
+        assert_eq!(diagnostic.category, DiagnosticCategory::Loading);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "/tmp/project/pkg/BUILD.bazel".into(),
+                line: Some(5),
+                column: Some(1),
+            })
+        );
+        assert!(summary.headline.contains("syntax error"));
+    }
+
+    #[test]
+    fn extracts_starlark_macro_failure_from_the_innermost_frame() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"ERROR: Traceback (most recent call last):
+    File "/tmp/project/pkg/BUILD.bazel", line 3, column 20, in <toplevel>
+        validated_filegroup(
+    File "/tmp/project/pkg/defs.bzl", line 3, column 13, in validated_filegroup
+        fail("production targets must declare an owner")
+Error in fail: production targets must declare an owner
+ERROR: no such target '//pkg:broken': target 'broken' not declared in package 'pkg'
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(
+            diagnostic.message,
+            "Error in fail: production targets must declare an owner"
+        );
+        assert_eq!(diagnostic.category, DiagnosticCategory::Loading);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "/tmp/project/pkg/defs.bzl".into(),
+                line: Some(3),
+                column: Some(13),
+            })
+        );
+    }
+
+    #[test]
+    fn classifies_rule_implementation_tracebacks_as_analysis_failures() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr:
+                br#"ERROR: /tmp/project/pkg/BUILD.bazel:3:17: in validated_target rule //pkg:broken:
+Traceback (most recent call last):
+    File "/tmp/project/pkg/rule.bzl", line 3, column 13, in _validated_target_impl
+        fail("production target requires a release ticket")
+Error in fail: production target requires a release ticket
+ERROR: /tmp/project/pkg/BUILD.bazel:3:17: Analysis of target '//pkg:broken' failed
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(
+            diagnostic.message,
+            "Error in fail: production target requires a release ticket"
+        );
+        assert_eq!(diagnostic.category, DiagnosticCategory::Analysis);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "/tmp/project/pkg/rule.bzl".into(),
+                line: Some(3),
+                column: Some(13),
+            })
         );
     }
 
