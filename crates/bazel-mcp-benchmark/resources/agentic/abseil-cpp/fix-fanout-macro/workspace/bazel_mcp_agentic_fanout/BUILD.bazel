@@ -1,0 +1,8 @@
+load(":defs.bzl", "fanout_suite")
+
+package(default_visibility = ["//visibility:public"])
+
+fanout_suite(
+    name = "fanout_app",
+    count = 48,
+)
