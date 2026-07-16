@@ -1,0 +1,6 @@
+load("//bazel_mcp_agentic_fanout:defs.bzl", "fanout_suite")
+
+fanout_suite(
+    name = "hidden_fanout_app",
+    count = 3,
+)

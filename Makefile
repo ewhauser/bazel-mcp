@@ -1,6 +1,8 @@
 .PHONY: setup-hooks build test test-unit test-integration test-bazel-matrix \
 	setup-oss-corpus test-token-integration run check bench bench-save \
-	bench-compare bench-token bench-token-live publish-token-benchmark \
+	bench-compare bench-token bench-token-live bench-agentic \
+	bench-agentic-smoke bench-agentic-live bench-agentic-presentation \
+	bench-agentic-control-smoke publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
 	fuzz-run harden-release check-release-security \
 	mcp-conformance test-claude-code test-claude-code-live generate-sbom
@@ -13,6 +15,11 @@ OSS_PROJECT ?= abseil-cpp
 TOKEN_ENCODING ?= o200k_base
 TOKEN_SAMPLES ?= 5
 LIVE_AGENT_ARGS ?=
+AGENTIC_SAMPLES ?= 5
+AGENTIC_MODEL ?= gpt-5.6-luna
+AGENTIC_REASONING_EFFORT ?= xhigh
+AGENTIC_PRESENTATION_SAMPLES ?= 5
+AGENTIC_ARGS ?=
 BENCHMARK_RUN ?= $(shell cat .cache/benchmarks/$(OSS_PROJECT)/LATEST)
 BENCHMARK_ARTIFACT_DIR ?= .cache/published-benchmarks/$(OSS_PROJECT)/$(BENCHMARK_RUN)
 
@@ -65,6 +72,35 @@ bench-token-live:
 	$(NIX_DEVELOP) ./scripts/benchmarks/run-token-integration.sh \
 		--project $(OSS_PROJECT) --encoding $(TOKEN_ENCODING) \
 		--samples $(TOKEN_SAMPLES) --live-agent $(LIVE_AGENT_ARGS)
+
+bench-agentic: bench-agentic-live
+
+bench-agentic-smoke:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-agentic-benchmark.sh \
+		--project $(OSS_PROJECT) --samples 1 \
+		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
+		$(AGENTIC_ARGS)
+
+bench-agentic-live:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-agentic-benchmark.sh \
+		--project $(OSS_PROJECT) --samples $(AGENTIC_SAMPLES) \
+		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
+		$(AGENTIC_ARGS)
+
+bench-agentic-presentation:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-agentic-benchmark.sh \
+		--project $(OSS_PROJECT) --samples $(AGENTIC_PRESENTATION_SAMPLES) \
+		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
+		--task fix-noisy-normalizer --task fix-fanout-macro \
+		--adapter shell-default --adapter bazel-mcp $(AGENTIC_ARGS)
+
+bench-agentic-control-smoke:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-agentic-benchmark.sh \
+		--project $(OSS_PROJECT) --samples 1 \
+		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
+		--task fix-noisy-normalizer --task fix-fanout-macro \
+		--adapter shell-default --adapter shell-mcp-loaded \
+		--adapter bazel-mcp $(AGENTIC_ARGS)
 
 publish-token-benchmark:
 	python3 ./scripts/benchmarks/publish-token-report.py \

@@ -372,6 +372,8 @@ for TTL and polling settings.
 
 ## Performance
 
+### Deterministic invocation benchmark
+
 Across three independent five-sample runs against a pinned Abseil corpus,
 `bazel-mcp` reduced cumulative model context by 89.73–90.69% compared with a
 default shell agent. The latest run measured an 89.73% reduction, with 0.00%
@@ -380,6 +382,27 @@ median paired Bazel wall-time overhead.
 These results are deterministic tokenizer estimates, not provider billing. See
 the [benchmark methodology](docs/benchmarks.md) for the complete results,
 corpus, acceptance gates, and reproduction commands.
+
+### Agentic coding benchmark
+
+In a five-sample run over two high-output Abseil coding tasks,
+`gpt-5.6-luna` at `xhigh` reasoning solved all 10 attempts with both adapters.
+Compared with direct shell Bazel, `bazel-mcp` reduced provider-reported total
+tokens by **36.88%** and active tokens by **41.77%** when cached input was
+assigned zero weight.
+
+| Metric | Shell Bazel | `bazel-mcp` | Reduction |
+| --- | ---: | ---: | ---: |
+| Verified solves | 10/10 | 10/10 | parity |
+| Total tokens | 2,444,393 | 1,542,870 | 36.88% |
+| Active tokens, 0% cached-input weight | 479,593 | 279,254 | 41.77% |
+| Agent time | 653.2s | 637.1s | 2.46% |
+
+The comparison includes MCP schema and tool-call overhead. See the
+[checked-in agentic benchmark report](docs/agentic-benchmark-report.md) for
+task-level results, cache sensitivity, integrity checks, and limitations, or
+the [agentic benchmark methodology](docs/benchmarks.md#agentic-coding-benchmark)
+to reproduce it.
 
 ## Contributing
 

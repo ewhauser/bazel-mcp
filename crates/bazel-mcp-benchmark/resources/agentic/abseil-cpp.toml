@@ -1,0 +1,79 @@
+name = "abseil-cpp"
+url = "https://github.com/abseil/abseil-cpp.git"
+commit = "5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a"
+license = "Apache-2.0"
+bazel_version = "9.1.0"
+
+[[tasks]]
+name = "fix-greeting"
+prompt_file = "abseil-cpp/fix-greeting/prompt.md"
+workspace_overlay = "abseil-cpp/fix-greeting/workspace"
+verification_overlay = "abseil-cpp/fix-greeting/verification"
+verify_command = "test"
+verify_args = [
+  "--features=-module_maps",
+  "--macos_minimum_os=14.0",
+  "//bazel_mcp_agentic:greeting_test",
+  "//bazel_mcp_agentic_verifier:greeting_hidden_test",
+]
+protected_paths = ["bazel_mcp_agentic/greeting_test.cc"]
+timeout_seconds = 1800
+
+[[tasks]]
+name = "fix-noisy-normalizer"
+prompt_file = "abseil-cpp/fix-noisy-normalizer/prompt.md"
+workspace_overlay = "abseil-cpp/fix-noisy-normalizer/workspace"
+verification_overlay = "abseil-cpp/fix-noisy-normalizer/verification"
+verify_command = "test"
+verify_args = [
+  "--test_output=errors",
+  "--features=-module_maps",
+  "--macos_minimum_os=14.0",
+  "//bazel_mcp_agentic_noisy:normalizer_test",
+  "//bazel_mcp_agentic_noisy_verifier:normalizer_hidden_test",
+]
+protected_paths = [
+  "bazel_mcp_agentic_noisy/BUILD.bazel",
+  "bazel_mcp_agentic_noisy/normalizer.h",
+  "bazel_mcp_agentic_noisy/normalizer_test.cc",
+]
+timeout_seconds = 1800
+
+[[tasks]]
+name = "fix-fanout-macro"
+prompt_file = "abseil-cpp/fix-fanout-macro/prompt.md"
+workspace_overlay = "abseil-cpp/fix-fanout-macro/workspace"
+verification_overlay = "abseil-cpp/fix-fanout-macro/verification"
+verify_command = "build"
+verify_args = [
+  "--keep_going",
+  "--features=-module_maps",
+  "--macos_minimum_os=14.0",
+  "//bazel_mcp_agentic_fanout:fanout_app",
+  "//bazel_mcp_agentic_fanout_verifier:hidden_fanout_app",
+]
+protected_paths = [
+  "bazel_mcp_agentic_fanout/BUILD.bazel",
+  "bazel_mcp_agentic_fanout/main.cc",
+  "bazel_mcp_agentic_fanout/unit.cc",
+]
+timeout_seconds = 1800
+
+[[tasks]]
+name = "fix-build-dependency"
+prompt_file = "abseil-cpp/fix-build-dependency/prompt.md"
+workspace_overlay = "abseil-cpp/fix-build-dependency/workspace"
+verification_overlay = "abseil-cpp/fix-build-dependency/verification"
+verify_command = "test"
+verify_args = [
+  "--features=-module_maps",
+  "--macos_minimum_os=14.0",
+  "//bazel_mcp_agentic:label_test",
+  "//bazel_mcp_agentic_verifier:label_hidden_test",
+]
+protected_paths = [
+  "bazel_mcp_agentic/label.cc",
+  "bazel_mcp_agentic/label.h",
+  "bazel_mcp_agentic/label_test.cc",
+]
+timeout_seconds = 1800

@@ -1,0 +1,9 @@
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:private"])
+
+cc_test(
+    name = "label_hidden_test",
+    srcs = ["label_hidden_test.cc"],
+    deps = ["//bazel_mcp_agentic:label"],
+)
