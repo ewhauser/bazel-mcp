@@ -1,0 +1,10 @@
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+alias(
+    name = "bazel-mcp",
+    actual = "//crates/bazel-mcp-server:bazel-mcp",
+    visibility = ["//visibility:public"],
+)

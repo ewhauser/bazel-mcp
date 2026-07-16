@@ -1,4 +1,6 @@
 /target/
+/bazel-*
+/scripts/compat/node_modules/
 /.cache/
 /.codex/
 /.env

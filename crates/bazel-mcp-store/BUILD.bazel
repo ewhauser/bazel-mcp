@@ -1,0 +1,25 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "bazel_mcp_store",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = glob(["migrations/*.sql"]),
+    crate_name = "bazel_mcp_store",
+    deps = ["//crates/bazel-mcp-types:bazel_mcp_types"] + all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":bazel_mcp_store",
+    size = "small",
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ),
+)

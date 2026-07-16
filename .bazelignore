@@ -1,0 +1,4 @@
+scripts/compat/node_modules
+crates/bazel-mcp-benchmark/resources
+crates/bazel-mcp-reducer/tests/fixtures/workspace
+crates/bazel-mcp-runner/tests/workspaces/basic
