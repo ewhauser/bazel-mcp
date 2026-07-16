@@ -54,6 +54,9 @@ const BES_COMPLETION_GRACE: Duration = Duration::from_secs(2);
 pub enum BepTransport {
     #[default]
     Tail,
+    /// POSIX FIFO fast path. Falls back to regular-file tailing when FIFO
+    /// setup or Bazel server PID discovery is unavailable.
+    Fifo,
     Bes,
 }
 
@@ -1133,6 +1136,54 @@ impl InvocationService {
                     .map_err(Into::into);
             }
         };
+        #[cfg(unix)]
+        let mut prepared_fifo = if queued.request.command.class() == CommandClass::BuildLike
+            && self.config.bep_transport == BepTransport::Fifo
+        {
+            match capture::PreparedFifoBepCapture::prepare(&paths.bep) {
+                Ok(prepared) => match probe_bazel_server_pid(
+                    executable,
+                    &queued.request.workspace,
+                    &queued.request.startup_arguments,
+                    &self.config,
+                    cancellation.clone(),
+                )
+                .await
+                {
+                    Ok(server_pid) => Some((prepared, server_pid)),
+                    Err(error) => {
+                        tracing::warn!(
+                            invocation_id = %queued.request.id,
+                            %error,
+                            "could not discover Bazel server PID; falling back to BEP file tail"
+                        );
+                        None
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        invocation_id = %queued.request.id,
+                        %error,
+                        "could not prepare BEP FIFO; falling back to BEP file tail"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        if queued.request.command.class() == CommandClass::BuildLike
+            && self.config.bep_transport == BepTransport::Fifo
+        {
+            tracing::debug!(
+                invocation_id = %queued.request.id,
+                "BEP FIFO transport is unavailable on this platform; using file tail"
+            );
+        }
+        if cancellation.is_cancelled() {
+            return self.finish_cancelled(queued.request.id).await;
+        }
         let bes_capture = if queued.request.command.class() == CommandClass::BuildLike {
             match &self.bes {
                 Some(server) => Some(server.register(queued.request.id.to_string(), &paths.bep)?),
@@ -1163,6 +1214,17 @@ impl InvocationService {
                 BepTransport::Tail => {
                     command
                         .arg(format!("--build_event_binary_file={}", paths.bep.display()))
+                        .arg("--build_event_binary_file_path_conversion=false");
+                }
+                BepTransport::Fifo => {
+                    #[cfg(unix)]
+                    let output = prepared_fifo
+                        .as_ref()
+                        .map_or(paths.bep.as_path(), |(prepared, _)| prepared.path());
+                    #[cfg(not(unix))]
+                    let output = paths.bep.as_path();
+                    command
+                        .arg(format!("--build_event_binary_file={}", output.display()))
                         .arg("--build_event_binary_file_path_conversion=false");
                 }
                 BepTransport::Bes => {
@@ -1221,6 +1283,22 @@ impl InvocationService {
                     .map_err(Into::into);
             }
         };
+        let extension_limits = (!self.reducers.is_empty()).then_some({
+            (
+                self.config.starlark_reducers.limits.max_events,
+                self.config.starlark_reducers.limits.max_input_bytes,
+            )
+        });
+        #[cfg(unix)]
+        let fifo_bep = prepared_fifo.take().map(|(prepared, server_pid)| {
+            let client_pid = child.id().unwrap_or_default();
+            capture::LiveBepCapture::Fifo(prepared.start(
+                paths.bep.clone(),
+                server_pid,
+                client_pid,
+                extension_limits,
+            ))
+        });
         let mut process_group = ProcessGroupGuard::for_child(&child);
         if let Err(error) = self
             .store
@@ -1274,15 +1352,26 @@ impl InvocationService {
             }
             return Err(error.into());
         }
-        let extension_limits = (!self.reducers.is_empty()).then_some({
-            (
-                self.config.starlark_reducers.limits.max_events,
-                self.config.starlark_reducers.limits.max_input_bytes,
-            )
+        #[cfg(unix)]
+        let incremental_bep = fifo_bep.or_else(|| {
+            (queued.request.command.class() == CommandClass::BuildLike
+                && self.config.bep_transport != BepTransport::Bes)
+                .then(|| {
+                    capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
+                        paths.bep.clone(),
+                        extension_limits,
+                    ))
+                })
         });
+        #[cfg(not(unix))]
         let incremental_bep = (queued.request.command.class() == CommandClass::BuildLike
-            && self.config.bep_transport == BepTransport::Tail)
-            .then(|| capture::IncrementalBepCapture::start(paths.bep.clone(), extension_limits));
+            && self.config.bep_transport != BepTransport::Bes)
+            .then(|| {
+                capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
+                    paths.bep.clone(),
+                    extension_limits,
+                ))
+            });
         let started = Instant::now();
         let timeout = queued
             .request
@@ -2562,6 +2651,71 @@ fn artifact_matches_test(artifact: &bazel_mcp_types::Artifact, label: &str) -> b
         format!("/testlogs/{package}/{target}/")
     };
     artifact.uri.replace('\\', "/").contains(&fragment)
+}
+
+#[cfg(unix)]
+async fn probe_bazel_server_pid(
+    executable: &Path,
+    workspace: &Path,
+    startup_arguments: &[String],
+    config: &RunnerConfig,
+    cancellation: CancellationToken,
+) -> io::Result<u32> {
+    let mut command = Command::new(executable);
+    command
+        .current_dir(workspace)
+        .env_clear()
+        .envs(filtered_environment(&config.policy));
+    if let Some(output_user_root) = &config.output_user_root {
+        command
+            .arg(format!("--output_user_root={}", output_user_root.display()))
+            .arg(format!(
+                "--max_idle_secs={}",
+                config.isolated_bazel_server_idle_timeout.as_secs()
+            ));
+    }
+    command
+        .args(startup_arguments)
+        .arg("info")
+        .arg("server_pid")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+
+    let output = tokio::select! {
+        result = tokio::time::timeout(config.version_check_timeout, command.output()) => {
+            result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Bazel server PID probe timed out"))??
+        }
+        () = cancellation.cancelled() => {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Bazel server PID probe cancelled"));
+        }
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Bazel server PID probe exited with {:?}",
+            output.status.code()
+        )));
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Bazel server PID was not UTF-8")
+    })?;
+    stdout
+        .lines()
+        .find_map(|line| {
+            let value = line
+                .trim()
+                .strip_prefix("server_pid:")
+                .map_or_else(|| line.trim(), str::trim);
+            value.parse::<u32>().ok()
+        })
+        .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Bazel server PID probe returned no valid PID",
+            )
+        })
 }
 
 fn bazel_test_log_output_base(path: &Path) -> Option<PathBuf> {

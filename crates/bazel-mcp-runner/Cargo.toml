@@ -17,6 +17,7 @@ bazel-mcp-store.workspace = true
 bazel-mcp-types.workspace = true
 base64.workspace = true
 blake3.workspace = true
+libc.workspace = true
 nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,4 +27,5 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+buffa.workspace = true
 tempfile.workspace = true

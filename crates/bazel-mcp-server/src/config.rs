@@ -566,8 +566,12 @@ mod tests {
     }
 
     #[test]
-    fn bep_transport_defaults_to_tail_and_accepts_bes() {
+    fn bep_transport_defaults_to_tail_and_accepts_fifo_and_bes() {
         assert_eq!(ServerConfig::default().bep_transport, BepTransport::Tail);
+        assert_eq!(
+            serde_json::from_str::<BepTransport>("\"fifo\"").unwrap(),
+            BepTransport::Fifo
+        );
         assert_eq!(
             serde_json::from_str::<BepTransport>("\"bes\"").unwrap(),
             BepTransport::Bes

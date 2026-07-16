@@ -82,6 +82,18 @@ pub struct StreamOutcome {
     pub terminal_error: Option<FrameError>,
 }
 
+/// Controls how incremental stream accounting proceeds after a visited frame.
+///
+/// Bazel can close and reopen a BEP transport when it retries an invocation.
+/// Callers that recognize the terminal event for an abandoned attempt can
+/// reset the byte and event limits before the next frame without losing exact
+/// frame boundaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IncrementalStreamControl {
+    Continue,
+    ResetAfterFrame,
+}
+
 /// Incrementally decodes a varint-delimited BEP stream across arbitrary input
 /// chunk boundaries.
 ///
@@ -117,9 +129,25 @@ impl IncrementalStreamDecoder {
     /// Once a terminal framing, limit, or decode error is encountered, later
     /// chunks are ignored and the complete prefix remains available from
     /// [`Self::finish`].
-    pub fn push<F>(&mut self, mut input: &[u8], mut visitor: F)
+    pub fn push<F>(&mut self, input: &[u8], mut visitor: F)
     where
         F: FnMut(BepEvent),
+    {
+        self.push_framed(input, |event, _frame| {
+            visitor(event);
+            IncrementalStreamControl::Continue
+        });
+    }
+
+    /// Consume a stream chunk while exposing each exact length-delimited frame.
+    ///
+    /// The frame slice includes the original varint prefix. Returning
+    /// [`IncrementalStreamControl::ResetAfterFrame`] resets stream byte/event
+    /// accounting after that frame, which lets retry-aware transports retain
+    /// only the next attempt even when two writers' bytes arrive in one read.
+    pub fn push_framed<F>(&mut self, mut input: &[u8], mut visitor: F)
+    where
+        F: FnMut(BepEvent, &[u8]) -> IncrementalStreamControl,
     {
         if self.terminal_error.is_some() {
             return;
@@ -133,7 +161,11 @@ impl IncrementalStreamDecoder {
                         frame_bytes,
                     }) => {
                         let consumed = prefix_bytes.saturating_add(frame_bytes);
-                        self.decode_frame(&input[prefix_bytes..consumed], &mut visitor);
+                        self.decode_frame(
+                            &input[prefix_bytes..consumed],
+                            &input[..consumed],
+                            &mut visitor,
+                        );
                         if self.terminal_error.is_some() {
                             return;
                         }
@@ -176,9 +208,12 @@ impl IncrementalStreamDecoder {
                     frame_bytes,
                 }) => {
                     let consumed = prefix_bytes.saturating_add(frame_bytes);
-                    let frame = self.pending[prefix_bytes..consumed].to_vec();
-                    self.pending.clear();
-                    self.decode_frame(&frame, &mut visitor);
+                    let framed = std::mem::take(&mut self.pending);
+                    self.decode_frame(
+                        &framed[prefix_bytes..consumed],
+                        &framed[..consumed],
+                        &mut visitor,
+                    );
                     if self.terminal_error.is_some() {
                         return;
                     }
@@ -200,9 +235,12 @@ impl IncrementalStreamDecoder {
                     frame_bytes,
                 }) => {
                     let consumed = prefix_bytes.saturating_add(frame_bytes);
-                    let frame = self.pending[prefix_bytes..consumed].to_vec();
-                    self.pending.clear();
-                    self.decode_frame(&frame, &mut visitor);
+                    let framed = std::mem::take(&mut self.pending);
+                    self.decode_frame(
+                        &framed[prefix_bytes..consumed],
+                        &framed[..consumed],
+                        &mut visitor,
+                    );
                 }
                 Ok(FrameState::NeedPrefix | FrameState::NeedPayload { .. }) => {}
                 Err(error) => self.terminal_error = Some(error),
@@ -228,9 +266,9 @@ impl IncrementalStreamDecoder {
         }
     }
 
-    fn decode_frame<F>(&mut self, frame: &[u8], visitor: &mut F)
+    fn decode_frame<F>(&mut self, frame: &[u8], framed: &[u8], visitor: &mut F)
     where
-        F: FnMut(BepEvent),
+        F: FnMut(BepEvent, &[u8]) -> IncrementalStreamControl,
     {
         let next_bytes = self.decoded_bytes.saturating_add(frame.len());
         if next_bytes > self.max_stream_bytes {
@@ -249,10 +287,15 @@ impl IncrementalStreamDecoder {
         }
         self.decoded_bytes = next_bytes;
         match BepEvent::decode_slice(frame) {
-            Ok(event) => {
-                visitor(event);
-                self.event_count = self.event_count.saturating_add(1);
-            }
+            Ok(event) => match visitor(event, framed) {
+                IncrementalStreamControl::Continue => {
+                    self.event_count = self.event_count.saturating_add(1);
+                }
+                IncrementalStreamControl::ResetAfterFrame => {
+                    self.decoded_bytes = 0;
+                    self.event_count = 0;
+                }
+            },
             Err(error) => self.terminal_error = Some(FrameError::Decode(error)),
         }
     }
@@ -621,6 +664,62 @@ mod tests {
                 outcome.terminal_error
             );
             assert_eq!(events.len(), 2, "split at byte {split}");
+        }
+    }
+
+    #[test]
+    fn framed_incremental_decoder_preserves_bytes_and_resets_between_attempts() {
+        let first = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "abandoned".into(),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let second = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "retained".into(),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let first_frame = encode_frame(&first);
+        let second_frame = encode_frame(&second);
+        let mut input = first_frame.clone();
+        input.extend_from_slice(&second_frame);
+
+        for split in 0..=input.len() {
+            let mut decoder = IncrementalStreamDecoder::new(
+                DEFAULT_MAX_FRAME_BYTES,
+                DEFAULT_MAX_STREAM_BYTES,
+                DEFAULT_MAX_STREAM_EVENTS,
+            );
+            let mut frames = Vec::new();
+            let mut ordinal = 0;
+            for chunk in [&input[..split], &input[split..]] {
+                decoder.push_framed(chunk, |_event, framed| {
+                    frames.push(framed.to_vec());
+                    ordinal += 1;
+                    if ordinal == 1 {
+                        IncrementalStreamControl::ResetAfterFrame
+                    } else {
+                        IncrementalStreamControl::Continue
+                    }
+                });
+            }
+            let outcome = decoder.finish();
+            assert_eq!(frames, [first_frame.clone(), second_frame.clone()]);
+            assert_eq!(outcome.event_count, 1, "split at byte {split}");
+            assert_eq!(
+                outcome.decoded_bytes,
+                second.encoded_len() as usize,
+                "split at byte {split}"
+            );
+            assert!(outcome.terminal_error.is_none(), "split at byte {split}");
         }
     }
 

@@ -101,6 +101,14 @@ bep_transport = "tail"
 BEP file directly, so an existing remote `--bes_backend` or BuildBuddy setup
 continues to receive events.
 
+`fifo` is an opt-in POSIX optimization. bazel-mcp creates a private named pipe,
+streams and reduces events from it, and mirrors the exact bytes into the same
+retained `events.bep` evidence file. It probes the persistent Bazel server PID
+and separately tracks the spawned invocation-client PID so a writer may close
+and reconnect during a Bazel retry without EOF ending the capture. FIFO setup
+or PID-discovery failures fall back to `tail`; Windows always uses that portable
+fallback.
+
 `bes` starts a plaintext gRPC Build Event Service on an ephemeral loopback
 port and configures Bazel to publish to it with
 `--bes_upload_mode=wait_for_upload_complete`. The service validates the
@@ -178,7 +186,7 @@ the native result and add a bounded note. See the
 | --- | --- | --- |
 | `allowed_roots` | `[]` | Absolute roots containing workspaces the server may access. An empty list allows any workspace. |
 | `cache_root` | Platform user cache under `bazel-mcp` | Directory for metadata, logs, and BEP evidence. |
-| `bep_transport` | `tail` | BEP ingestion path: private binary file (`tail`) or loopback Build Event Service (`bes`). |
+| `bep_transport` | `tail` | BEP ingestion path: portable private binary file (`tail`), opt-in POSIX named pipe with file fallback (`fifo`), or loopback Build Event Service (`bes`). |
 | `bazel_executable` | unset | Explicit Bazel or Bazelisk executable. |
 | `output_user_root` | unset | Isolated Bazel output user root managed by the server. |
 | `allowed_commands` | build, test, coverage, query commands, and selected informational commands | Commands eligible to run. |
