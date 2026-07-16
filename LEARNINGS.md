@@ -101,3 +101,15 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   source headers and application stack frames stayed only in `test.log`; pair
   bounded Node frames and prefer the test-scoped diagnostic. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Clang C++ diagnostics were already selected as headlines, but their source
+  coordinates remained embedded in the message; structure common Clang/GCC
+  and MSVC forms so agents can edit the exact location directly. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- C++ link failures promoted `clang: linker command failed` while discarding
+  Apple ld's preceding undefined symbol; pair bounded platform-specific linker
+  evidence before ranking wrappers. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Gtest assertion details and C++ exception descriptions remained only in
+  `test.log`, leaving the initial response at the failed target or `unknown
+  file: Failure`; reduce the bounded gtest failure block into one test-scoped
+  diagnostic. Thread: `019f6b89-e945-78a0-9264-a6ad416905a1`.

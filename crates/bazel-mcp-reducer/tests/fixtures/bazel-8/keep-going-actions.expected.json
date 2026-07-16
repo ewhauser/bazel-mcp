@@ -3,7 +3,7 @@
   "terminal_error": null,
   "summary": {
     "success": false,
-    "headline": "Bazel failed: fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE",
+    "headline": "Bazel failed: BAZEL_MCP_CPP_ROOT_CAUSE",
     "targets": [
       {
         "label": "//:compile_failure",
@@ -27,8 +27,12 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE",
-        "location": null,
+        "message": "BAZEL_MCP_CPP_ROOT_CAUSE",
+        "location": {
+          "path": "fixture.cc",
+          "line": 7,
+          "column": null
+        },
         "target": null,
         "action": null,
         "repetition_count": 1

@@ -13,6 +13,7 @@ const MAX_LOG_FAILURES: usize = 20;
 const MAX_TEST_NAME_BYTES: usize = 512;
 const MAX_FAILURE_MESSAGE_BYTES: usize = 1_000;
 const MAX_FAILURE_DETAIL_BYTES: usize = 256;
+const MAX_GTEST_DETAILS: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestFailureEvidence {
@@ -31,6 +32,8 @@ pub struct TestFailureAccumulator {
     failed_names: Vec<String>,
     failures: Vec<TestFailureEvidence>,
     current: Option<RustFailureBlock>,
+    gtest_running_name: Option<String>,
+    gtest_current: Option<GtestFailureBlock>,
 }
 
 #[derive(Default)]
@@ -43,10 +46,57 @@ struct RustFailureBlock {
     saw_panic: bool,
 }
 
+#[derive(Default)]
+struct GtestFailureBlock {
+    name: String,
+    location: Option<DiagnosticLocation>,
+    details: Vec<String>,
+}
+
 impl TestFailureAccumulator {
     pub fn observe_line(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() {
+            return;
+        }
+
+        if let Some(name) = gtest_running_name(line) {
+            self.finish_gtest_current();
+            self.gtest_running_name = Some(bounded_text(name, MAX_TEST_NAME_BYTES));
+            return;
+        }
+
+        if let Some(location) = gtest_failure_location(line) {
+            self.finish_gtest_current();
+            self.gtest_current = Some(GtestFailureBlock {
+                name: self
+                    .gtest_running_name
+                    .clone()
+                    .unwrap_or_else(|| "<unknown gtest>".to_owned()),
+                location,
+                ..GtestFailureBlock::default()
+            });
+            return;
+        }
+
+        if let Some(name) = gtest_failed_name(line) {
+            if self
+                .gtest_running_name
+                .as_deref()
+                .is_some_and(|running| running == name)
+            {
+                self.finish_gtest_current();
+                self.gtest_running_name = None;
+            }
+            return;
+        }
+
+        if let Some(current) = self.gtest_current.as_mut() {
+            if current.details.len() < MAX_GTEST_DETAILS && !is_gtest_framework_status(line) {
+                current
+                    .details
+                    .push(bounded_text(line, MAX_FAILURE_DETAIL_BYTES));
+            }
             return;
         }
 
@@ -113,6 +163,7 @@ impl TestFailureAccumulator {
     #[must_use]
     pub fn finish(mut self) -> Vec<TestFailureEvidence> {
         self.finish_current();
+        self.finish_gtest_current();
         for name in self.failed_names {
             if self.failures.len() >= MAX_LOG_FAILURES {
                 break;
@@ -156,6 +207,34 @@ impl TestFailureAccumulator {
         for detail in current.details {
             message.push_str("; ");
             message.push_str(&detail);
+        }
+        self.failures.push(TestFailureEvidence {
+            name: current.name,
+            message: bounded_text(&message, MAX_FAILURE_MESSAGE_BYTES),
+            location: current.location,
+        });
+    }
+
+    fn finish_gtest_current(&mut self) {
+        let Some(current) = self.gtest_current.take() else {
+            return;
+        };
+        if current.name.is_empty() || self.failures.len() >= MAX_LOG_FAILURES {
+            return;
+        }
+        let mut message = format!("C++ test {} failed", current.name);
+        if !current.details.is_empty() {
+            message.push_str(": ");
+            for (index, detail) in current.details.iter().enumerate() {
+                if index > 0 {
+                    if message.ends_with(':') {
+                        message.push(' ');
+                    } else {
+                        message.push_str("; ");
+                    }
+                }
+                message.push_str(detail);
+            }
         }
         self.failures.push(TestFailureEvidence {
             name: current.name,
@@ -238,6 +317,64 @@ fn rust_failed_status_name(line: &str) -> Option<&str> {
     line.strip_prefix("test ")?
         .strip_suffix(" ... FAILED")
         .filter(|name| !name.is_empty())
+}
+
+fn gtest_running_name(line: &str) -> Option<&str> {
+    line.strip_prefix("[ RUN      ] ")
+        .filter(|name| !name.is_empty())
+}
+
+fn gtest_failed_name(line: &str) -> Option<&str> {
+    let name = line.strip_prefix("[  FAILED  ] ")?;
+    let name = name.rsplit_once(" (").map_or(name, |(name, duration)| {
+        duration
+            .strip_suffix(')')
+            .filter(|duration| duration.ends_with(" ms"))
+            .map_or(name, |_| name)
+    });
+    (!name.is_empty()).then_some(name)
+}
+
+fn gtest_failure_location(line: &str) -> Option<Option<DiagnosticLocation>> {
+    let location = line.strip_suffix(": Failure")?;
+    if location == "unknown file" {
+        return Some(None);
+    }
+    let (path, line_number) = location.rsplit_once(':')?;
+    let line_number = line_number.parse::<u32>().ok()?;
+    (!path.is_empty()).then(|| {
+        Some(DiagnosticLocation {
+            path: compact_test_path(path),
+            line: Some(line_number),
+            column: None,
+        })
+    })
+}
+
+fn compact_test_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
+        if let Some((_, relative)) = path.rsplit_once(marker) {
+            return relative.to_owned();
+        }
+    }
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
+}
+
+fn is_gtest_framework_status(line: &str) -> bool {
+    [
+        "[==========]",
+        "[----------]",
+        "[  PASSED  ]",
+        "[  SKIPPED ]",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
 }
 
 fn rust_failure_block_name(line: &str) -> Option<&str> {
@@ -406,5 +543,64 @@ mod tests {
             failures[0].message,
             "Rust test tests::failed_without_output failed"
         );
+    }
+
+    #[test]
+    fn extracts_gtest_assertion_details_and_locations() {
+        let mut accumulator = TestFailureAccumulator::default();
+        for line in [
+            "[ RUN      ] InvoiceTest.IncludesServiceFee",
+            "mcp/cpp_fixture/assertion_failure_test.cc:8: Failure",
+            "Expected equality of these values:",
+            "CalculateInvoiceTotal(40, 2)",
+            "Which is: 42",
+            "41",
+            "invoice total should include the service fee",
+            "[  FAILED  ] InvoiceTest.IncludesServiceFee (0 ms)",
+        ] {
+            accumulator.observe_line(line);
+        }
+
+        let failures = accumulator.finish();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "InvoiceTest.IncludesServiceFee");
+        assert!(failures[0].message.contains("Which is: 42"));
+        assert!(
+            failures[0]
+                .message
+                .contains("invoice total should include the service fee")
+        );
+        assert_eq!(
+            failures[0].location,
+            Some(DiagnosticLocation {
+                path: "mcp/cpp_fixture/assertion_failure_test.cc".into(),
+                line: Some(8),
+                column: None,
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_gtest_cpp_exceptions_without_unknown_file_noise() {
+        let mut accumulator = TestFailureAccumulator::default();
+        for line in [
+            "[ RUN      ] InvoiceTest.RejectsMissingCurrency",
+            "unknown file: Failure",
+            "C++ exception with description \"invoice currency was not configured\" thrown in the test body.",
+            "[  FAILED  ] InvoiceTest.RejectsMissingCurrency (0 ms)",
+        ] {
+            accumulator.observe_line(line);
+        }
+
+        let failures = accumulator.finish();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "InvoiceTest.RejectsMissingCurrency");
+        assert!(
+            failures[0]
+                .message
+                .contains("invoice currency was not configured")
+        );
+        assert_eq!(failures[0].location, None);
+        assert!(!failures[0].message.contains("unknown file"));
     }
 }
