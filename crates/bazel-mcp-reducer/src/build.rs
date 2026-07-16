@@ -8,7 +8,7 @@ use bazel_mcp_types::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Budget, deduplicate_lines, normalize_terminal_text};
+use crate::{Budget, ReducerEvent, ReducerEventKind, deduplicate_lines, normalize_terminal_text};
 
 pub struct ReductionInput<'a> {
     pub events: &'a [BepEvent],
@@ -38,6 +38,8 @@ pub struct BepAccumulator {
     retained_items: usize,
     retained_bytes: usize,
     truncated: bool,
+    extension: Option<ExtensionEventCollector>,
+    next_event_ordinal: u64,
 }
 
 #[derive(Default)]
@@ -50,12 +52,39 @@ pub struct StreamReductionOutput {
     pub summary: InvocationSummary,
     pub artifacts: Vec<Artifact>,
     pub canonical_arguments: Option<Vec<String>>,
+    pub reducer_events: Vec<ReducerEvent>,
+    pub reducer_input_truncated: bool,
+}
+
+struct ExtensionEventCollector {
+    events: Vec<ReducerEvent>,
+    retained_bytes: usize,
+    max_events: usize,
+    max_bytes: usize,
+    truncated: bool,
 }
 
 impl BepAccumulator {
+    #[must_use]
+    pub fn with_extension_events(max_events: usize, max_bytes: usize) -> Self {
+        Self {
+            extension: Some(ExtensionEventCollector {
+                events: Vec::new(),
+                retained_bytes: 0,
+                max_events,
+                max_bytes,
+                truncated: false,
+            }),
+            ..Self::default()
+        }
+    }
+
     pub fn observe(&mut self, event: BepEvent) {
         let event = event.view();
         let id = decode_event_id(event.id).ok();
+        let ordinal = self.next_event_ordinal;
+        self.next_event_ordinal = self.next_event_ordinal.saturating_add(1);
+        self.observe_extension_event(event, id.as_ref(), ordinal);
         match event.payload.as_ref() {
             Some(build_event::Payload::Aborted(aborted)) => {
                 let diagnostic = Diagnostic {
@@ -260,6 +289,10 @@ impl BepAccumulator {
         }
 
         let artifacts = self.resolve_artifacts();
+        let (reducer_events, reducer_input_truncated) = self.extension.take().map_or_else(
+            || (Vec::new(), false),
+            |collector| (collector.events, collector.truncated),
+        );
         let mut summary = InvocationSummary {
             success,
             headline: if success {
@@ -284,6 +317,68 @@ impl BepAccumulator {
             summary,
             artifacts,
             canonical_arguments: self.canonical_arguments,
+            reducer_events,
+            reducer_input_truncated,
+        }
+    }
+
+    fn observe_extension_event(
+        &mut self,
+        event: &bazel_mcp_bep::view::BuildEventView<'_>,
+        id: Option<&BuildEventIdView<'_>>,
+        ordinal: u64,
+    ) {
+        let Some(collector) = &mut self.extension else {
+            return;
+        };
+        let event = match event.payload.as_ref() {
+            Some(build_event::Payload::Aborted(aborted)) => Some(ReducerEvent {
+                ordinal,
+                kind: ReducerEventKind::Aborted,
+                label: label_from_id(id),
+                target_kind: None,
+                action_type: None,
+                success: Some(false),
+                exit_code: None,
+                message: Some(bounded_text(aborted.description, 64 * 1024)),
+            }),
+            Some(build_event::Payload::Action(action)) => Some(ReducerEvent {
+                ordinal,
+                kind: ReducerEventKind::Action,
+                label: label_from_id(id).or_else(|| nonempty(action.label)),
+                target_kind: None,
+                action_type: nonempty(action.r#type),
+                success: Some(action.success),
+                exit_code: Some(action.exit_code),
+                message: None,
+            }),
+            Some(build_event::Payload::Completed(completed)) => Some(ReducerEvent {
+                ordinal,
+                kind: ReducerEventKind::Target,
+                label: label_from_id(id),
+                target_kind: nonempty(completed.target_kind),
+                action_type: None,
+                success: Some(completed.success),
+                exit_code: None,
+                message: None,
+            }),
+            Some(build_event::Payload::TestSummary(summary)) => Some(ReducerEvent {
+                ordinal,
+                kind: ReducerEventKind::TestSummary,
+                label: label_from_id(id),
+                target_kind: None,
+                action_type: None,
+                success: Some(matches!(
+                    test_status(summary.overall_status),
+                    TestStatus::Passed
+                )),
+                exit_code: None,
+                message: None,
+            }),
+            _ => None,
+        };
+        if let Some(event) = event {
+            collector.push(event);
         }
     }
 
@@ -331,6 +426,23 @@ impl BepAccumulator {
             .into_iter()
             .filter(|artifact| seen.insert((artifact.name.clone(), artifact.uri.clone())))
             .collect()
+    }
+}
+
+impl ExtensionEventCollector {
+    fn push(&mut self, event: ReducerEvent) {
+        let bytes = event.label.as_ref().map_or(0, String::len)
+            + event.target_kind.as_ref().map_or(0, String::len)
+            + event.action_type.as_ref().map_or(0, String::len)
+            + event.message.as_ref().map_or(0, String::len);
+        if self.events.len() >= self.max_events
+            || self.retained_bytes.saturating_add(bytes) > self.max_bytes
+        {
+            self.truncated = true;
+            return;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        self.events.push(event);
     }
 }
 

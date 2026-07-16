@@ -6,6 +6,7 @@ export const prerender = true;
 const sources = [
   ['README', 'README.md'],
   ['Configuration', 'docs/configuration.md'],
+  ['Custom reducers', 'docs/custom-reducers.md'],
   ['Token benchmark', 'docs/benchmarks.md'],
   ['Security', 'SECURITY.md'],
   ['Contributing', 'CONTRIBUTING.md'],

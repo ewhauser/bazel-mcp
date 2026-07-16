@@ -74,7 +74,8 @@ clean-room, or crates.io publishing setup in the initial architecture.
 - Publishing internal crates to crates.io.
 - A Bazel build definition for building `bazel-mcp` itself. Cargo is the source
   of truth for this repository.
-- A plugin system for reducers or storage backends.
+- Dynamically loaded native plugins for reducers or storage backends. Custom
+  diagnostic reducers use the bounded Starlark adapter described below.
 - A second async runtime.
 - Full Windows process-tree cancellation in the MVP. A Windows x86_64 preview
   binary uses direct-child termination until job-object support is implemented.
@@ -354,6 +355,8 @@ Responsibilities:
 - Discover and parse local LCOV data.
 - Parse and page query output adapters.
 - Normalize terminal text, strip ANSI/progress output, redact, and deduplicate.
+- Run explicitly configured Starlark reducers against a bounded, normalized,
+  redacted projection after the built-in Rust reducers.
 - Apply diagnostic selection and response byte budgets.
 - Return explicit fallback reasons when structured evidence is incomplete.
 
@@ -387,6 +390,24 @@ crates/bazel-mcp-reducer/
 Reducers receive already bounded evidence inputs. If a reducer needs a file, the
 runner reads the permitted file and supplies a bounded reader or buffer. This
 keeps filesystem authorization in the runner/policy boundary.
+
+The reducer crate owns a language-neutral extension contract: immutable
+invocation context and normalized BEP events in, and a typed headline/diagnostic
+patch out. Starlark is an adapter for that contract rather than the core reducer
+model. Built-in Rust reducers always run first. An augmenting reducer may add a
+headline and diagnostics; an overriding reducer may suppress built-in
+diagnostics only for explicitly selected target or action evidence. It cannot
+change success, invocation identity, counts, tests, coverage, artifacts,
+termination, metrics, or durable raw evidence.
+
+Starlark modules are compiled and frozen at server startup, declare a versioned
+API and deterministic selectors, and are ordered by descending priority then
+name. The dialect disables `load` and `print` and exposes no filesystem,
+environment, network, process, clock, random, or storage functions. Evaluation
+has source, input, event, output, item, instruction, heap, call-stack, and
+best-effort wall-clock limits. The runner redacts the context before evaluation,
+reapplies redaction and the common output budget afterward, and retains the
+native result with a bounded note if a custom reducer fails.
 
 Snapshot tests use `insta` with redactions for UUIDs, timestamps, absolute paths,
 and platform-dependent details. Snapshot changes require review; tests must not
@@ -809,6 +830,7 @@ Configuration covers:
 - response encoding and byte budgets
 - BEP transport (`tail` by default, or explicit loopback `bes`)
 - redaction rules
+- explicit Starlark reducer files and resource limits
 - logging destination and level
 
 The repository contains an `examples/config.toml` once configuration is

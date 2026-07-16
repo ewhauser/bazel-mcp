@@ -853,6 +853,10 @@ code-execution service even though it does not expose a shell.
   server.
 - A reducer panic MUST NOT terminate the process; the invocation falls back to a
   bounded captured-text result where possible.
+- A custom reducer load error MUST prevent startup. A custom reducer evaluation
+  error MUST retain the built-in reducer result and add only a bounded, redacted
+  note. Custom reducers MUST receive redacted, bounded inputs and their patches
+  MUST pass through the common redaction and response budgets.
 - Failure to send progress does not cancel the build.
 - Failure to write required capture files prevents process launch rather than
   running without observability.

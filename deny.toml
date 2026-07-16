@@ -5,6 +5,7 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "BSL-1.0",
   "CC0-1.0",
   "ISC",
   "Unicode-3.0",
@@ -14,7 +15,15 @@ confidence-threshold = 0.8
 exceptions = []
 
 [advisories]
-ignore = []
+# starlark 0.14.2 depends on these unmaintained crates and has no newer release
+# or safe transitive upgrade. They are maintenance advisories, not known
+# vulnerabilities. Keep the exceptions scoped by advisory so new findings fail.
+ignore = [
+  "RUSTSEC-2023-0089", # atomic-polyfill via pagable
+  "RUSTSEC-2024-0388", # derivative via starlark/starlark_syntax
+  "RUSTSEC-2024-0436", # paste via starlark
+  "RUSTSEC-2025-0057", # fxhash via starlark_map
+]
 
 [bans]
 multiple-versions = "warn"
@@ -23,4 +32,3 @@ deny = []
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-

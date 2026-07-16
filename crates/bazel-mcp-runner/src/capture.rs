@@ -51,10 +51,13 @@ pub(crate) async fn read_bounded_tail(
 
 pub(crate) async fn reduce_bep(
     path: PathBuf,
+    extension_limits: Option<(usize, usize)>,
 ) -> Result<(BepAccumulator, StreamOutcome), RunnerError> {
     task::spawn_blocking(move || match std::fs::File::open(path) {
         Ok(file) => {
-            let mut accumulator = BepAccumulator::default();
+            let mut accumulator = extension_limits.map_or_else(BepAccumulator::default, |limits| {
+                BepAccumulator::with_extension_events(limits.0, limits.1)
+            });
             let outcome = visit_stream_partial_bounded(
                 file,
                 DEFAULT_MAX_FRAME_BYTES,

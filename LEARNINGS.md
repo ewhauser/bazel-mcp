@@ -47,3 +47,16 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
 - Gazelle self-bootstrap failures wrap Go errors in repository-loading output;
   ranking the parsed inner Go location kept the wrapper as supporting evidence
   while making the actionable compiler error the headline.
+- Keep custom-reducer BEP collection opt-in and project only normalized fields;
+  the no-reducer path can continue dropping raw frames without extension
+  allocation or model-visible evidence growth.
+- The Starlark diagnostic adapter measured 25.06x to 134.74x native reducer
+  latency, but stayed below 10.75 ms through 1,000 matches; retain Rust for
+  common reducers and use Starlark for explicitly configured rule-specific
+  logic where this post-Bazel latency is acceptable.
+- Starlark's in-process tick, heap, stack, and timeout limits isolate accidental
+  runaway reducers, not hostile code; keep workspace auto-discovery disabled
+  and require a separate OS-isolated server before accepting untrusted scripts.
+- `bazel.run mod deps` refreshed the rules_rs crate extension lock with a compact
+  success summary and no raw dependency output; use that informational command
+  plus a local lockfile diff for token-efficient Cargo dependency changes.

@@ -152,6 +152,26 @@ The TTL is the minimum time a terminal task result remains available. A task
 that is still queued or running never expires. The poll interval is advisory
 and must be between 100 and 60,000 milliseconds.
 
+### Load custom reducers
+
+Built-in Rust reducers remain active when custom reducers are configured.
+Starlark files must be listed explicitly:
+
+```toml
+[starlark]
+files = ["reducers/custom_compiler.star"]
+```
+
+Relative paths are resolved against the directory containing the configuration
+file and canonicalized at startup. Missing, duplicate, invalid, or incompatible
+reducers prevent startup. Bazel workspaces are never searched for reducer files,
+so merely checking out a repository cannot execute its code in the server.
+
+All Starlark limits are operator-configurable under `[starlark]`, although the
+defaults are intended for ordinary diagnostic reducers. Runtime failures keep
+the native result and add a bounded note. See the
+[custom reducer guide](custom-reducers.md) for the API and security model.
+
 ## Reference
 
 | Setting | Default | Description |
@@ -184,6 +204,16 @@ and must be between 100 and 60,000 milliseconds.
 | `allow_unsupported_bazel_versions` | `false` | Allow majors outside `supported_bazel_major_versions`. |
 | `version_check_timeout_seconds` | `30` | Timeout for the pre-invocation Bazel version check. |
 | `isolated_bazel_server_idle_seconds` | `60` | Bazel server idle timeout used with `output_user_root`. |
+| `starlark.files` | `[]` | Explicit custom reducer files. Relative paths are resolved from the configuration file. |
+| `starlark.max_source_bytes` | `262144` | Maximum UTF-8 source size per reducer. |
+| `starlark.max_input_bytes` | `1048576` | Maximum normalized stdout/stderr input and the basis for bounded baseline data. |
+| `starlark.max_events` | `10000` | Maximum normalized BEP events retained for custom reducers. |
+| `starlark.max_output_bytes` | `65536` | Maximum serialized patch size per reducer. |
+| `starlark.max_output_items` | `1000` | Maximum diagnostics returned per reducer. |
+| `starlark.max_ticks` | `1000000` | Starlark evaluator instruction budget. |
+| `starlark.max_heap_bytes` | `16777216` | Starlark evaluator heap budget. |
+| `starlark.max_callstack_size` | `100` | Maximum Starlark call-stack depth. |
+| `starlark.timeout_ms` | `100` | Best-effort wall-clock evaluation limit per reducer. |
 
 ## CLI options
 

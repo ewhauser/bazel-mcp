@@ -31,3 +31,17 @@ version_check_timeout_seconds = 30
 maximum_pending_invocations = 256
 # Applied only when output_user_root isolates the server from the user's daemon.
 isolated_bazel_server_idle_seconds = 60
+
+# Custom reducers are opt-in and are never loaded from a Bazel workspace
+# automatically. Relative paths are resolved from this configuration file.
+[starlark]
+files = []
+max_source_bytes = 262144
+max_input_bytes = 1048576
+max_events = 10000
+max_output_bytes = 65536
+max_output_items = 1000
+max_ticks = 1000000
+max_heap_bytes = 16777216
+max_callstack_size = 100
+timeout_ms = 100

@@ -14,6 +14,7 @@ use bazel_mcp_bep::{encode_event_id, encode_frame};
 use bazel_mcp_policy::PolicyConfig;
 use bazel_mcp_runner::{
     BepTransport, InspectRequest, InspectView, InvocationService, RunnerConfig,
+    StarlarkReducerConfig,
 };
 use bazel_mcp_store::Store;
 use bazel_mcp_types::{
@@ -166,6 +167,143 @@ async fn configured_service(
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn configured_starlark_reducer_augments_redacted_native_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let reducer = root.path().join("custom.star");
+    tokio::fs::write(
+        &reducer,
+        r#"
+API_VERSION = 1
+NAME = "custom-compiler"
+COMMANDS = ["build"]
+
+def reduce(ctx):
+    diagnostics = regex_diagnostics(
+        ctx["stderr"],
+        r"error: (?P<message>.+)",
+        category = "compilation",
+    )
+    return patch(diagnostics, headline = "Custom compiler failed")
+"#,
+    )
+    .await
+    .unwrap();
+    let service = configured_service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\necho 'error: token=SUPERSECRET custom root cause' >&2\nexit 1\n",
+        |config| {
+            config.policy.redaction_patterns = vec![r"token=[^\s]+".to_owned()];
+            config.starlark_reducers = StarlarkReducerConfig {
+                files: vec![reducer],
+                ..StarlarkReducerConfig::default()
+            };
+        },
+    )
+    .await;
+
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//custom:target".to_owned()],
+        ))
+        .await
+        .unwrap();
+
+    let summary = record.summary.unwrap();
+    let encoded = serde_json::to_string(&summary).unwrap();
+    assert!(!encoded.contains("SUPERSECRET"));
+    assert_eq!(summary.headline, "Custom compiler failed", "{encoded}");
+    assert!(
+        summary
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("[REDACTED] custom root cause"))
+    );
+}
+
+#[tokio::test]
+async fn redacts_starlark_load_failures_before_returning_configuration_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let reducer = root.path().join("invalid.star");
+    tokio::fs::write(&reducer, "fail(\"token=SUPERSECRET\")\n")
+        .await
+        .unwrap();
+    let store = Store::open(root.path().join("load-error-store"))
+        .await
+        .unwrap();
+    let error = InvocationService::new(
+        store,
+        RunnerConfig {
+            policy: PolicyConfig {
+                redaction_patterns: vec![r"token=[^\s]+".to_owned()],
+                ..PolicyConfig::default()
+            },
+            starlark_reducers: StarlarkReducerConfig {
+                files: vec![reducer],
+                ..StarlarkReducerConfig::default()
+            },
+            ..RunnerConfig::default()
+        },
+    )
+    .err()
+    .expect("invalid Starlark reducer must prevent startup")
+    .to_string();
+
+    assert!(!error.contains("SUPERSECRET"), "{error}");
+    assert!(error.contains("[REDACTED]"), "{error}");
+}
+
+#[tokio::test]
+async fn keeps_a_bounded_custom_reducer_failure_notice_when_native_diagnostics_are_full() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let reducer = root.path().join("runtime-failure.star");
+    tokio::fs::write(
+        &reducer,
+        "API_VERSION = 1\nNAME = \"runtime-failure\"\ndef reduce(ctx): return 1 // 0\n",
+    )
+    .await
+    .unwrap();
+    let errors = (0..30)
+        .map(|index| format!("echo 'file{index}.cc:1: error: failure {index}' >&2\n"))
+        .collect::<String>();
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n{errors}exit 1\n"
+    );
+    let service = configured_service(&root, &workspace, &script, |config| {
+        config.starlark_reducers = StarlarkReducerConfig {
+            files: vec![reducer],
+            ..StarlarkReducerConfig::default()
+        };
+    })
+    .await;
+
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//custom:target".to_owned()],
+        ))
+        .await
+        .unwrap();
+    let summary = record.summary.unwrap();
+
+    assert!(summary.truncated);
+    assert!(summary.diagnostics.len() <= 20);
+    assert!(summary.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Note
+            && diagnostic
+                .message
+                .contains("native reducer output was retained")
+    }));
 }
 
 #[tokio::test]

@@ -380,8 +380,9 @@ guidance.
 ## Configuration
 
 The built-in defaults cover personal local use. For workspace restrictions,
-retention limits, timeouts, command policy, result encoding, BEP transport, or
-custom redaction, start with [`examples/config.toml`](examples/config.toml).
+retention limits, timeouts, command policy, result encoding, BEP transport,
+custom redaction, or custom reducers, start with
+[`examples/config.toml`](examples/config.toml).
 
 BEP capture defaults to the private binary-file (`tail`) path so existing
 remote BES and BuildBuddy configurations keep working. Set
@@ -396,6 +397,23 @@ roots or override the cache directory.
 
 See the [configuration reference](docs/configuration.md) for all settings and
 their defaults.
+
+### Custom reducers
+
+Built-in Rust reducers remain enabled by default. Operators can explicitly load
+Starlark files to add diagnostics for custom Bazel rules or replace matching
+built-in diagnostics while preserving the native invocation outcome and local
+evidence:
+
+```toml
+[starlark]
+files = ["reducers/custom_compiler.star"]
+```
+
+Reducer paths are relative to the configuration file. No reducer is discovered
+from a Bazel workspace automatically. See the
+[custom reducer guide](docs/custom-reducers.md) for the versioned API, selector
+and override semantics, resource limits, trust model, and example.
 
 ### Result formats
 
@@ -495,6 +513,11 @@ make check
 Runner, BEP, policy, or reducer changes should also run
 `make test-bazel-matrix`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening
 a pull request.
+
+Use `make bench-reducers` to compare the same diagnostic reducer implemented in
+native Rust and Starlark. See the
+[Starlark reducer performance report](docs/starlark-reducer-performance.md) for
+the checked-in measurements and interpretation.
 
 Architecture and protocol decisions are recorded under [`specs/`](specs/).
 
