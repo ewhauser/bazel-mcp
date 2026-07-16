@@ -867,6 +867,11 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             diagnostics.push(diagnostic);
             continue;
         }
+        if let Some(mut diagnostic) = parse_protobuf_diagnostic(&line) {
+            diagnostic.repetition_count = count;
+            diagnostics.push(diagnostic);
+            continue;
+        }
         if let Some(mut diagnostic) = parse_go_diagnostic(&line) {
             diagnostic.repetition_count = count;
             diagnostics.push(diagnostic);
@@ -922,6 +927,54 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             repetition_count: count,
         });
     }
+}
+
+fn parse_protobuf_diagnostic(line: &str) -> Option<Diagnostic> {
+    let marker = line.rfind(".proto:")?;
+    let path_end = marker + ".proto".len();
+    let path = line[..path_end]
+        .trim()
+        .strip_prefix("ERROR: ")
+        .unwrap_or_else(|| line[..path_end].trim());
+    let (line_number, remainder) = split_u32_prefix(&line[path_end + 1..])?;
+    let (column, message) = split_u32_prefix(remainder)
+        .map_or((None, remainder), |(column, message)| {
+            (Some(column), message)
+        });
+    let message = message.trim();
+    let (severity, message) = if let Some(message) = message.strip_prefix("warning:") {
+        (Severity::Warning, message.trim())
+    } else if let Some(message) = message.strip_prefix("error:") {
+        (Severity::Error, message.trim())
+    } else {
+        (Severity::Error, message)
+    };
+    if message.is_empty() {
+        return None;
+    }
+    Some(Diagnostic {
+        severity,
+        category: DiagnosticCategory::Compilation,
+        message: message.to_owned(),
+        location: Some(DiagnosticLocation {
+            path: compact_protobuf_path(path),
+            line: Some(line_number),
+            column,
+        }),
+        target: None,
+        action: None,
+        repetition_count: 1,
+    })
+}
+
+fn compact_protobuf_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
 }
 
 fn parse_java_compiler_diagnostics(input: &str) -> Vec<Diagnostic> {
@@ -1814,6 +1867,70 @@ ERROR: Build did NOT complete successfully
                 .collect::<Vec<_>>(),
             vec!["first.go", "second.go"]
         );
+    }
+
+    #[test]
+    fn structures_protobuf_syntax_errors_without_error_markers() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"mcp/proto_fixture/syntax_failure.proto:7:1: Expected ";".
+ERROR: Build did NOT complete successfully
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.message, "Expected \";\".");
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "mcp/proto_fixture/syntax_failure.proto".into(),
+                line: Some(7),
+                column: Some(1),
+            })
+        );
+        assert!(summary.headline.contains("Expected"));
+    }
+
+    #[test]
+    fn ranks_the_located_protobuf_import_failure_ahead_of_missing_file_noise() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"mcp/proto_fixture/does_not_exist.proto: File not found.
+mcp/proto_fixture/missing_import.proto:5:1: Import "mcp/proto_fixture/does_not_exist.proto" was not found or had errors.
+mcp/proto_fixture/missing_import.proto:8:3: "MissingDependency" is not defined.
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 2);
+        assert_eq!(
+            summary.diagnostics[0].message,
+            "Import \"mcp/proto_fixture/does_not_exist.proto\" was not found or had errors."
+        );
+        assert_eq!(
+            summary.diagnostics[0].location.as_ref().unwrap().line,
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn parses_protobuf_warnings_and_compacts_execroot_paths() {
+        let diagnostic = parse_protobuf_diagnostic(
+            "/tmp/output/execroot/project/pkg/schema.proto:4:2: warning: Import common.proto is unused.",
+        )
+        .unwrap();
+
+        assert_eq!(diagnostic.severity, Severity::Warning);
+        assert_eq!(diagnostic.message, "Import common.proto is unused.");
+        assert_eq!(diagnostic.location.unwrap().path, "pkg/schema.proto");
     }
 
     #[test]

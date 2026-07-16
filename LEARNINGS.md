@@ -85,3 +85,11 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   while their application stack frames remained only in `test_log`; prefer the
   first non-framework JVM frame as located test evidence. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Protoc source diagnostics omit generic `error:` markers, so syntax, import,
+  and schema failures were discarded in favor of Bazel action wrappers; parse
+  the `.proto:line:column` form directly. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Missing protobuf imports emit an unlocated missing-file line before the
+  editable import declaration and dependent type errors; rank the located
+  declaration first and preserve the follow-on diagnostics. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.

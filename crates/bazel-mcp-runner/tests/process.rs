@@ -428,6 +428,39 @@ async fn starlark_source_locations_are_workspace_relative() {
 }
 
 #[tokio::test]
+async fn protobuf_source_locations_are_workspace_relative() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = service(
+        &root,
+        &workspace,
+        "#!/bin/sh\necho \"$PWD/proto/schema.proto:6:3: \\\"MissingMessage\\\" is not defined.\" >&2\nexit 1\n",
+    )
+    .await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//proto:schema".into()],
+        ))
+        .await
+        .unwrap();
+    let summary = failed.summary.as_ref().unwrap();
+    assert!(summary.headline.contains("MissingMessage"));
+    let diagnostic = &summary.diagnostics[0];
+    assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+    assert_eq!(diagnostic.message, "\"MissingMessage\" is not defined.");
+    assert_eq!(
+        diagnostic.location.as_ref().unwrap().path,
+        "proto/schema.proto"
+    );
+    assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(6));
+    assert_eq!(diagnostic.location.as_ref().unwrap().column, Some(3));
+}
+
+#[tokio::test]
 async fn log_inspection_uses_bounded_opaque_cursors() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
