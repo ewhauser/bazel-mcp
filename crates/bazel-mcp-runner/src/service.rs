@@ -16,9 +16,9 @@ use bazel_mcp_policy::{
     validate_workspace,
 };
 use bazel_mcp_reducer::{
-    Budget, REDUCER_API_VERSION, ReducerContext, ReducerPipeline, StarlarkReducerConfig,
-    StreamReductionOutput, finalize_diagnostics, load_starlark_reducers, normalize_terminal_text,
-    parse_go_diagnostic, parse_lcov_reader, parse_test_xml,
+    Budget, PythonDiagnosticParser, REDUCER_API_VERSION, ReducerContext, ReducerPipeline,
+    StarlarkReducerConfig, StreamReductionOutput, finalize_diagnostics, load_starlark_reducers,
+    normalize_terminal_text, parse_go_diagnostic, parse_lcov_reader, parse_test_xml,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
@@ -1901,6 +1901,7 @@ impl InvocationService {
                 let Ok(file) = tokio::fs::File::open(&path).await else {
                     continue;
                 };
+                let mut python_parser = PythonDiagnosticParser::default();
                 let marker = format!("\n===== {} :: {} =====\n", test.label, log.name);
                 if raw.write_all(marker.as_bytes()).await.is_err() {
                     continue;
@@ -1938,7 +1939,12 @@ impl InvocationService {
                             diagnostic.target = Some(test.label.clone());
                             diagnostic.message = bounded_text(&diagnostic.message, 1_000);
                             actionable_excerpt = Some(diagnostic);
-                        } else if is_actionable_evidence(&text) {
+                        } else if let Some(mut diagnostic) = python_parser.observe_line(&text) {
+                            diagnostic.category = DiagnosticCategory::Test;
+                            diagnostic.target = Some(test.label.clone());
+                            diagnostic.message = bounded_text(&diagnostic.message, 1_000);
+                            actionable_excerpt = Some(diagnostic);
+                        } else if actionable_excerpt.is_none() && is_actionable_evidence(&text) {
                             actionable_excerpt = Some(Diagnostic {
                                 severity: Severity::Error,
                                 category: DiagnosticCategory::Test,
@@ -2014,7 +2020,8 @@ impl InvocationService {
                 summary.diagnostics.retain(|existing| {
                     !(existing.category == DiagnosticCategory::Compilation
                         && existing.message == diagnostic.message
-                        && existing.location == diagnostic.location)
+                        && (existing.location == diagnostic.location
+                            || existing.location.is_none()))
                 });
             }
             summary.diagnostics.extend(diagnostics);
