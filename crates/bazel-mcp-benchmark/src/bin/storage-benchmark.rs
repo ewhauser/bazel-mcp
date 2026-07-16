@@ -1032,6 +1032,7 @@ fn micros(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000_000.0
 }
 
+#[cfg(unix)]
 fn peak_rss_bytes() -> Option<u64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: `usage` points to writable storage for `getrusage`, and is only
@@ -1046,4 +1047,9 @@ fn peak_rss_bytes() -> Option<u64> {
     return Some(raw);
     #[cfg(not(target_os = "macos"))]
     return Some(raw.saturating_mul(1024));
+}
+
+#[cfg(not(unix))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
 }
