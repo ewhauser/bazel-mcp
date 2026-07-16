@@ -35,3 +35,6 @@ efficiency. Do not include secrets or raw sensitive output.
 - The Cargo process integration test passed while its Bazel target lacked a
   direct BEP dependency; keep standalone `rust_test` deps aligned with imports
   and include repository-wide Bazel tests in pre-merge validation.
+- Release Please created the Bazel-strategy tag with `GITHUB_TOKEN`, so the
+  tag-push cargo-dist workflow never ran; call artifact publication directly
+  from the release output and retain a manual tag backfill path.
