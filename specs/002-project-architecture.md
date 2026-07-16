@@ -63,7 +63,8 @@ clean-room, or crates.io publishing setup in the initial architecture.
 - Provide one supported command for each common developer operation.
 - Make the Bazel-version matrix, BEP fixtures, token benchmark, and MCP
   conformance suite first-class repository assets.
-- Produce reproducible macOS and Linux release binaries with an SBOM.
+- Produce reproducible macOS, Linux, and Windows x86_64 release binaries with
+  an SBOM.
 - Preserve the ability to add HTTP transport and remote artifact adapters
   without restructuring the core.
 
@@ -75,8 +76,8 @@ clean-room, or crates.io publishing setup in the initial architecture.
   of truth for this repository.
 - A plugin system for reducers or storage backends.
 - A second async runtime.
-- Windows runtime support in the MVP. Windows compilation remains a useful CI
-  guard, but process cancellation is implemented later.
+- Full Windows process-tree cancellation in the MVP. A Windows x86_64 preview
+  binary uses direct-child termination until job-object support is implemented.
 - Copying Shuck's Python, npm, website, oracle, or large shell-corpus workflows.
 
 ## Repository layout
@@ -1241,13 +1242,14 @@ cargo-dist builds the `bazel-mcp` binary for:
 
 - `aarch64-apple-darwin`
 - `x86_64-apple-darwin`
+- `x86_64-pc-windows-msvc` (preview)
 - `aarch64-unknown-linux-gnu`
 - `aarch64-unknown-linux-musl`
 - `x86_64-unknown-linux-gnu`
 - `x86_64-unknown-linux-musl`
 
-Initial installers are shell and Homebrew. Windows targets and PowerShell are
-added when Windows runtime support meets specification 001.
+Installers are shell, PowerShell, and Homebrew. Windows process-tree
+cancellation remains a later compatibility milestone in specification 001.
 
 The release includes:
 

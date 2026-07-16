@@ -112,8 +112,9 @@ The first production release will not:
 - Implement a distributed scheduler across machines.
 - Use TOON or another non-standard serialization as a prerequisite for token
   savings.
-- Support Windows in the MVP. Windows process cancellation and job-object support
-  are a later compatibility milestone.
+- Provide full Windows runtime parity in the MVP. A Windows x86_64 preview
+  binary is released, while process-tree cancellation and job-object support
+  remain a later compatibility milestone.
 
 ## 6. Users and primary workflows
 
@@ -1105,7 +1106,8 @@ blocking BEP and filesystem work uses bounded blocking tasks.
 - Filesystem filtering, atomic-record recovery, and stable pagination.
 - Retention and crash recovery.
 - Token, diagnostic-fidelity, performance, and security acceptance gates.
-- macOS/Linux and Bazel-version compatibility matrix.
+- macOS/Linux and Bazel-version compatibility matrix, plus a Windows x86_64
+  release-binary smoke check.
 
 ### Phase 3: Hardening and integrations
 

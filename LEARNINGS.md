@@ -38,6 +38,9 @@ efficiency. Do not include secrets or raw sensitive output.
 - Release Please created the Bazel-strategy tag with `GITHUB_TOKEN`, so the
   tag-push cargo-dist workflow never ran; call artifact publication directly
   from the release output and retain a manual tag backfill path.
+- The Unix-only release matrix hid hard-coded shell assumptions; keep
+  platform-specific install/build steps explicit and smoke-test packaged
+  Windows executables before upload.
 - Add result encoding as an explicit agentic adapter dimension so JSON and TOON runs share identical MCP tools, prompts, task snapshots, and verifier controls.
 - TOON reduced retained MCP result bytes by 35.69% and total provider tokens by 11.99% with 20/20 verified solves; keep encoding comparisons end-to-end because payload savings do not translate directly to provider-token savings.
 - Report command-output outliers separately from MCP result bytes; one unbounded source search added 472,157 bytes and materially inflated the active-token comparison despite leaving the total-token direction unchanged.
