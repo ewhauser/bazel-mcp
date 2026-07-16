@@ -42,3 +42,5 @@ efficiency. Do not include secrets or raw sensitive output.
 - TOON reduced retained MCP result bytes by 35.69% and total provider tokens by 11.99% with 20/20 verified solves; keep encoding comparisons end-to-end because payload savings do not translate directly to provider-token savings.
 - Report command-output outliers separately from MCP result bytes; one unbounded source search added 472,157 bytes and materially inflated the active-token comparison despite leaving the total-token direction unchanged.
 - Keep production-default benchmark targets aligned with the server serialization default; retain explicit encoding adapters for controlled format comparisons.
+- Pin representation-sensitive protocol harnesses to an explicit result
+  encoding so changing the production default does not invalidate their parser.
