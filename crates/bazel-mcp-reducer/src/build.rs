@@ -820,6 +820,12 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 
 fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
+    let mut cpp_linker_parser = CppLinkerDiagnosticParser::default();
+    for line in normalized.lines() {
+        if let Some(diagnostic) = cpp_linker_parser.observe_line(line) {
+            diagnostics.push(diagnostic);
+        }
+    }
     diagnostics.extend(parse_java_compiler_diagnostics(&normalized));
     let mut javascript_parser = JavaScriptTestDiagnosticParser::default();
     let mut javascript_test_messages = BTreeSet::new();
@@ -882,6 +888,11 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             diagnostics.push(diagnostic);
             continue;
         }
+        if let Some(mut diagnostic) = parse_cpp_diagnostic(&line) {
+            diagnostic.repetition_count = count;
+            diagnostics.push(diagnostic);
+            continue;
+        }
         if let Some(mut diagnostic) = parse_typescript_diagnostic(&line) {
             diagnostic.repetition_count = count;
             diagnostics.push(diagnostic);
@@ -895,6 +906,9 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
         if let Some(mut diagnostic) = parse_go_diagnostic(&line) {
             diagnostic.repetition_count = count;
             diagnostics.push(diagnostic);
+            continue;
+        }
+        if parse_cpp_linker_diagnostic(&line).is_some() {
             continue;
         }
         if parse_java_compiler_diagnostic(&line).is_some()
@@ -949,6 +963,217 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             repetition_count: count,
         });
     }
+}
+
+fn parse_cpp_diagnostic(line: &str) -> Option<Diagnostic> {
+    let line = line
+        .trim()
+        .strip_prefix("ERROR: ")
+        .unwrap_or_else(|| line.trim());
+    let (path, line_number, column, message) =
+        parse_cpp_colon_location(line).or_else(|| parse_cpp_parenthesized_location(line))?;
+    if path.contains(": ") {
+        return None;
+    }
+    let (severity, message) = parse_cpp_severity_message(message)?;
+    Some(Diagnostic {
+        severity,
+        category: DiagnosticCategory::Compilation,
+        message: message.to_owned(),
+        location: Some(DiagnosticLocation {
+            path: compact_cpp_path(path),
+            line: Some(line_number),
+            column,
+        }),
+        target: None,
+        action: None,
+        repetition_count: 1,
+    })
+}
+
+fn parse_cpp_colon_location(line: &str) -> Option<(&str, u32, Option<u32>, &str)> {
+    let path_end = cpp_path_end(line, ':')?;
+    let (line_number, remainder) = split_u32_prefix(&line[path_end + 1..])?;
+    let (column, message) = split_u32_prefix(remainder)
+        .map_or((None, remainder), |(column, message)| {
+            (Some(column), message)
+        });
+    Some((&line[..path_end], line_number, column, message))
+}
+
+fn parse_cpp_parenthesized_location(line: &str) -> Option<(&str, u32, Option<u32>, &str)> {
+    let path_end = cpp_path_end(line, '(')?;
+    let remainder = line[path_end..].strip_prefix('(')?;
+    let (coordinates, message) = remainder
+        .split_once("): ")
+        .or_else(|| remainder.split_once("):"))?;
+    let (line_number, column) = coordinates.split_once(',').map_or_else(
+        || (coordinates.trim().parse::<u32>().ok(), None),
+        |(line_number, column)| {
+            (
+                line_number.trim().parse::<u32>().ok(),
+                column.trim().parse::<u32>().ok(),
+            )
+        },
+    );
+    Some((&line[..path_end], line_number?, column, message))
+}
+
+fn parse_cpp_severity_message(message: &str) -> Option<(Severity, &str)> {
+    let message = message.trim();
+    for (marker, severity) in [
+        ("fatal error", Severity::Error),
+        ("error", Severity::Error),
+        ("warning", Severity::Warning),
+        ("note", Severity::Note),
+    ] {
+        let Some(remainder) = message.strip_prefix(marker) else {
+            continue;
+        };
+        let remainder = remainder
+            .strip_prefix(':')
+            .or_else(|| remainder.strip_prefix(' '))?
+            .trim();
+        if !remainder.is_empty() {
+            return Some((severity, remainder));
+        }
+    }
+    None
+}
+
+fn cpp_path_end(line: &str, delimiter: char) -> Option<usize> {
+    const EXTENSIONS: [&str; 19] = [
+        ".cpp", ".cxx", ".c++", ".cc", ".hpp", ".hxx", ".h++", ".hh", ".ipp", ".tpp", ".inc",
+        ".cuh", ".cu", ".mm", ".m", ".C", ".H", ".c", ".h",
+    ];
+    EXTENSIONS
+        .iter()
+        .filter_map(|extension| {
+            let marker = format!("{extension}{delimiter}");
+            line.rfind(&marker).map(|index| index + extension.len())
+        })
+        .max()
+}
+
+#[derive(Debug, Default)]
+struct CppLinkerDiagnosticParser {
+    apple_undefined_symbols: bool,
+    symbols_seen: usize,
+}
+
+impl CppLinkerDiagnosticParser {
+    const MAX_SYMBOLS: usize = 64;
+
+    fn observe_line(&mut self, line: &str) -> Option<Diagnostic> {
+        let line = line.trim();
+        if line.starts_with("Undefined symbols for architecture ") {
+            self.apple_undefined_symbols = true;
+            return None;
+        }
+        if self.apple_undefined_symbols {
+            if let Some(symbol) = parse_apple_undefined_symbol(line) {
+                if self.symbols_seen >= Self::MAX_SYMBOLS {
+                    return None;
+                }
+                self.symbols_seen = self.symbols_seen.saturating_add(1);
+                return Some(cpp_linker_diagnostic(
+                    format!("undefined symbol: {}", bounded_text(symbol, 1_000)),
+                    None,
+                ));
+            }
+            if line.starts_with("ld:") || line.starts_with("clang:") {
+                self.apple_undefined_symbols = false;
+            }
+        }
+        parse_cpp_linker_diagnostic(line)
+    }
+}
+
+fn parse_apple_undefined_symbol(line: &str) -> Option<&str> {
+    let symbol = line.strip_prefix('"')?;
+    let (symbol, _) = symbol.split_once("\", referenced from:")?;
+    (!symbol.is_empty()).then_some(symbol)
+}
+
+fn parse_cpp_linker_diagnostic(line: &str) -> Option<Diagnostic> {
+    let line = line.trim();
+    if let Some(index) = line.find("undefined reference to ") {
+        let symbol = trim_linker_symbol(&line[index + "undefined reference to ".len()..]);
+        if symbol.is_empty() {
+            return None;
+        }
+        return Some(cpp_linker_diagnostic(
+            format!("undefined reference to {symbol}"),
+            parse_cpp_linker_location(&line[..index]),
+        ));
+    }
+    if let Some(index) = line.find("undefined symbol:") {
+        let symbol = trim_linker_symbol(&line[index + "undefined symbol:".len()..]);
+        if symbol.is_empty() {
+            return None;
+        }
+        return Some(cpp_linker_diagnostic(
+            format!("undefined symbol: {symbol}"),
+            None,
+        ));
+    }
+    if let Some(index) = line.find("unresolved external symbol ") {
+        let remainder = &line[index + "unresolved external symbol ".len()..];
+        let symbol = remainder
+            .split_once(" referenced in ")
+            .map_or(remainder, |(symbol, _)| symbol)
+            .trim();
+        if symbol.is_empty() {
+            return None;
+        }
+        return Some(cpp_linker_diagnostic(
+            format!("unresolved external symbol {symbol}"),
+            None,
+        ));
+    }
+    None
+}
+
+fn parse_cpp_linker_location(prefix: &str) -> Option<DiagnosticLocation> {
+    let path_end = cpp_path_end(prefix, ':')?;
+    let (line_number, _) = split_u32_prefix(&prefix[path_end + 1..])?;
+    let path = prefix[..path_end]
+        .rsplit_once(": ")
+        .map_or(&prefix[..path_end], |(_, path)| path);
+    Some(DiagnosticLocation {
+        path: compact_cpp_path(path),
+        line: Some(line_number),
+        column: None,
+    })
+}
+
+fn trim_linker_symbol(symbol: &str) -> &str {
+    symbol
+        .trim()
+        .trim_end_matches(':')
+        .trim_matches(|character| matches!(character, '`' | '\'' | '"'))
+}
+
+fn cpp_linker_diagnostic(message: String, location: Option<DiagnosticLocation>) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        category: DiagnosticCategory::Compilation,
+        message,
+        location,
+        target: None,
+        action: None,
+        repetition_count: 1,
+    }
+}
+
+fn compact_cpp_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
 }
 
 fn parse_typescript_diagnostic(line: &str) -> Option<Diagnostic> {
@@ -2114,6 +2339,113 @@ ERROR: Build did NOT complete successfully
                 .map(|location| location.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["first.go", "second.go"]
+        );
+    }
+
+    #[test]
+    fn structures_clang_cpp_diagnostics_with_source_coordinates() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: b"mcp/cpp_fixture/type_mismatch.cc:5:7: error: no viable conversion from 'std::string' to 'int'\nERROR: Build did NOT complete successfully\n",
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(
+            diagnostic.message,
+            "no viable conversion from 'std::string' to 'int'"
+        );
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "mcp/cpp_fixture/type_mismatch.cc".into(),
+                line: Some(5),
+                column: Some(7),
+            })
+        );
+        assert!(summary.headline.contains("no viable conversion"));
+    }
+
+    #[test]
+    fn structures_msvc_cpp_diagnostics_and_preserves_error_codes() {
+        let diagnostic = parse_cpp_diagnostic(
+            r"C:\workspace\mcp\cpp_fixture\type_mismatch.cpp(12,7): error C2440: 'initializing': cannot convert from 'std::string' to 'int'",
+        )
+        .unwrap();
+
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(
+            diagnostic.message,
+            "C2440: 'initializing': cannot convert from 'std::string' to 'int'"
+        );
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "C:/workspace/mcp/cpp_fixture/type_mismatch.cpp".into(),
+                line: Some(12),
+                column: Some(7),
+            })
+        );
+    }
+
+    #[test]
+    fn ranks_apple_undefined_symbols_ahead_of_linker_wrappers() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"Undefined symbols for architecture arm64:
+  "calculate_invoice_total(int)", referenced from:
+      _main in undefined_reference.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(
+            summary.diagnostics[0].message,
+            "undefined symbol: calculate_invoice_total(int)"
+        );
+        assert!(summary.headline.contains("calculate_invoice_total"));
+    }
+
+    #[test]
+    fn parses_gnu_undefined_references_with_source_locations() {
+        let diagnostic = parse_cpp_linker_diagnostic(
+            "/usr/bin/ld: object.o: /tmp/output/execroot/_main/mcp/cpp_fixture/undefined_reference.cc:3: undefined reference to `calculate_invoice_total(int)'",
+        )
+        .unwrap();
+
+        assert_eq!(
+            diagnostic.message,
+            "undefined reference to calculate_invoice_total(int)"
+        );
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "mcp/cpp_fixture/undefined_reference.cc".into(),
+                line: Some(3),
+                column: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_msvc_unresolved_external_symbols() {
+        let diagnostic = parse_cpp_linker_diagnostic(
+            r#"undefined_reference.obj : error LNK2019: unresolved external symbol "int __cdecl calculate_invoice_total(int)" referenced in function main"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            diagnostic.message,
+            r#"unresolved external symbol "int __cdecl calculate_invoice_total(int)""#
         );
     }
 
