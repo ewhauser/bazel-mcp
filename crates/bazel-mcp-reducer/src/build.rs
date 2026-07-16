@@ -19,6 +19,325 @@ pub struct ReductionInput<'a> {
     pub budget: Budget,
 }
 
+const STREAM_MAX_ITEMS: usize = 250_000;
+const STREAM_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Bounded state retained while BEP frames are decoded one at a time.
+///
+/// This keeps only reducer-relevant owned fields; protobuf frames are dropped
+/// immediately after `observe` returns.
+#[derive(Default)]
+pub struct BepAccumulator {
+    diagnostics: Vec<Diagnostic>,
+    targets: Vec<TargetResult>,
+    tests: Vec<TestResult>,
+    named_sets: BTreeMap<String, OwnedNamedSet>,
+    artifact_roots: Vec<String>,
+    direct_artifacts: Vec<Artifact>,
+    canonical_arguments: Option<Vec<String>>,
+    retained_items: usize,
+    retained_bytes: usize,
+    truncated: bool,
+}
+
+#[derive(Default)]
+struct OwnedNamedSet {
+    files: Vec<Artifact>,
+    children: Vec<String>,
+}
+
+pub struct StreamReductionOutput {
+    pub summary: InvocationSummary,
+    pub artifacts: Vec<Artifact>,
+    pub canonical_arguments: Option<Vec<String>>,
+}
+
+impl BepAccumulator {
+    pub fn observe(&mut self, event: BepEvent) {
+        let event = event.view();
+        let id = decode_event_id(event.id).ok();
+        match event.payload.as_ref() {
+            Some(build_event::Payload::Aborted(aborted)) => {
+                let diagnostic = Diagnostic {
+                    severity: Severity::Error,
+                    category: abort_category(aborted.reason),
+                    message: bounded_text(aborted.description, 64 * 1024),
+                    location: None,
+                    target: label_from_id(id.as_ref()),
+                    action: None,
+                    repetition_count: 1,
+                };
+                let bytes =
+                    diagnostic.message.len() + diagnostic.target.as_ref().map_or(0, String::len);
+                if self.reserve(1, bytes) {
+                    self.diagnostics.push(diagnostic);
+                }
+            }
+            Some(build_event::Payload::Action(action)) if !action.success => {
+                let diagnostic = Diagnostic {
+                    severity: Severity::Error,
+                    category: DiagnosticCategory::Action,
+                    message: format!(
+                        "{} action failed with exit code {}",
+                        if action.r#type.is_empty() {
+                            "Bazel"
+                        } else {
+                            action.r#type
+                        },
+                        action.exit_code
+                    ),
+                    location: None,
+                    target: label_from_id(id.as_ref()).or_else(|| nonempty(action.label)),
+                    action: nonempty(action.r#type),
+                    repetition_count: 1,
+                };
+                let bytes = diagnostic.message.len()
+                    + diagnostic.target.as_ref().map_or(0, String::len)
+                    + diagnostic.action.as_ref().map_or(0, String::len);
+                if self.reserve(1, bytes) {
+                    self.diagnostics.push(diagnostic);
+                }
+                if let Some(output) = action.primary_output.as_option()
+                    && let Some(artifact) = file_artifact(output)
+                {
+                    self.push_direct_artifact(artifact);
+                }
+            }
+            Some(build_event::Payload::Completed(completed)) => {
+                let target = TargetResult {
+                    label: label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown target>".into()),
+                    success: completed.success,
+                };
+                if self.reserve(1, target.label.len()) {
+                    self.targets.push(target);
+                }
+                for group in &completed.output_group {
+                    for set in &group.file_sets {
+                        self.push_root(set.id);
+                    }
+                    for file in &group.inline_files {
+                        if let Some(artifact) = file_artifact(file) {
+                            self.push_direct_artifact(artifact);
+                        }
+                    }
+                }
+                for file in completed
+                    .important_output
+                    .iter()
+                    .chain(completed.directory_output.iter())
+                {
+                    if let Some(artifact) = file_artifact(file) {
+                        self.push_direct_artifact(artifact);
+                    }
+                }
+            }
+            Some(build_event::Payload::TestSummary(summary)) => {
+                let test = TestResult {
+                    label: label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown test>".into()),
+                    status: test_status(summary.overall_status),
+                    duration_ms: u64::try_from(summary.total_run_duration_millis).ok(),
+                    attempts: u32::try_from(summary.attempt_count.max(1)).unwrap_or(1),
+                    shard: u32::try_from(summary.shard_count)
+                        .ok()
+                        .filter(|value| *value > 0),
+                    cases: Vec::new(),
+                    log_uri: summary.failed.first().and_then(file_uri),
+                };
+                let bytes = test.label.len() + test.log_uri.as_ref().map_or(0, String::len);
+                if self.reserve(1, bytes) {
+                    self.tests.push(test);
+                }
+            }
+            Some(build_event::Payload::TestResult(result)) => {
+                for file in &result.test_action_output {
+                    if let Some(artifact) = file_artifact(file) {
+                        self.push_direct_artifact(artifact);
+                    }
+                }
+            }
+            Some(build_event::Payload::NamedSetOfFiles(set)) => {
+                if let Some(build_event_id::Id::NamedSet(named_set)) =
+                    id.as_ref().and_then(|id| id.id.as_ref())
+                {
+                    let files = set
+                        .files
+                        .iter()
+                        .filter_map(file_artifact)
+                        .collect::<Vec<_>>();
+                    let children = set
+                        .file_sets
+                        .iter()
+                        .map(|set| bounded_text(set.id, 4 * 1024))
+                        .collect::<Vec<_>>();
+                    let key = bounded_text(named_set.id, 4 * 1024);
+                    let bytes = key.len()
+                        + files
+                            .iter()
+                            .map(|artifact| artifact.name.len() + artifact.uri.len())
+                            .sum::<usize>()
+                        + children.iter().map(String::len).sum::<usize>();
+                    let items = 1_usize
+                        .saturating_add(files.len())
+                        .saturating_add(children.len());
+                    if self.reserve(items, bytes) {
+                        self.named_sets
+                            .insert(key, OwnedNamedSet { files, children });
+                    }
+                }
+            }
+            Some(build_event::Payload::OptionsParsed(options))
+                if self.canonical_arguments.is_none() =>
+            {
+                let mut arguments = options
+                    .startup_options
+                    .iter()
+                    .chain(options.cmd_line.iter())
+                    .map(|value| bounded_text(value, 64 * 1024))
+                    .collect::<Vec<_>>();
+                let bytes = arguments.iter().map(String::len).sum();
+                if self.reserve(arguments.len(), bytes) {
+                    self.canonical_arguments = Some(std::mem::take(&mut arguments));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[must_use]
+    pub fn finish(
+        mut self,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit_code: Option<i32>,
+        elapsed_ms: u64,
+        budget: Budget,
+    ) -> StreamReductionOutput {
+        let success = exit_code == Some(0);
+        if !success {
+            add_text_diagnostics(stderr, &mut self.diagnostics);
+            if self.diagnostics.is_empty() {
+                add_text_diagnostics(stdout, &mut self.diagnostics);
+            }
+        }
+
+        self.diagnostics
+            .sort_by_key(|diagnostic| diagnostic.severity);
+        self.diagnostics = deduplicate_diagnostics(self.diagnostics);
+        self.targets
+            .sort_by(|left, right| left.label.cmp(&right.label));
+        self.targets
+            .dedup_by(|left, right| left.label == right.label);
+        self.tests
+            .sort_by(|left, right| left.label.cmp(&right.label));
+        self.tests.dedup_by(|left, right| left.label == right.label);
+
+        let target_counts = TargetCounts {
+            requested: self.targets.len(),
+            succeeded: self.targets.iter().filter(|target| target.success).count(),
+            failed: self.targets.iter().filter(|target| !target.success).count(),
+        };
+        let mut test_counts = TestCounts::default();
+        for test in &self.tests {
+            match test.status {
+                TestStatus::Passed => test_counts.passed += 1,
+                TestStatus::Failed => test_counts.failed += 1,
+                TestStatus::Flaky => test_counts.flaky += 1,
+                TestStatus::Skipped => test_counts.skipped += 1,
+                TestStatus::TimedOut | TestStatus::Incomplete | TestStatus::Remote => {
+                    test_counts.incomplete += 1;
+                }
+            }
+        }
+
+        let mut truncated = self.truncated || self.diagnostics.len() > budget.max_items;
+        self.diagnostics.truncate(budget.max_items);
+        let mut used = 0_usize;
+        self.diagnostics.retain(|diagnostic| {
+            let next = used.saturating_add(diagnostic.message.len());
+            if next > budget.max_bytes {
+                truncated = true;
+                false
+            } else {
+                used = next;
+                true
+            }
+        });
+        let headline = if success {
+            format!("Bazel completed successfully in {elapsed_ms} ms")
+        } else if let Some(first) = self.diagnostics.first() {
+            format!("Bazel failed: {}", first.message)
+        } else {
+            format!("Bazel failed with exit code {exit_code:?}")
+        };
+        let artifacts = self.resolve_artifacts();
+        StreamReductionOutput {
+            summary: InvocationSummary {
+                success,
+                headline,
+                targets: self.targets,
+                target_counts,
+                diagnostics: self.diagnostics,
+                tests: self.tests,
+                test_counts,
+                coverage: None,
+                query_sample: Vec::new(),
+                query_result_count: None,
+                elapsed_ms,
+                truncated,
+                inspect_hint: truncated.then(|| "diagnostics".to_owned()),
+            },
+            artifacts,
+            canonical_arguments: self.canonical_arguments,
+        }
+    }
+
+    fn reserve(&mut self, items: usize, bytes: usize) -> bool {
+        let next_items = self.retained_items.saturating_add(items);
+        let next_bytes = self.retained_bytes.saturating_add(bytes);
+        if next_items > STREAM_MAX_ITEMS || next_bytes > STREAM_MAX_RETAINED_BYTES {
+            self.truncated = true;
+            return false;
+        }
+        self.retained_items = next_items;
+        self.retained_bytes = next_bytes;
+        true
+    }
+
+    fn push_root(&mut self, id: &str) {
+        let id = bounded_text(id, 4 * 1024);
+        if self.reserve(1, id.len()) {
+            self.artifact_roots.push(id);
+        }
+    }
+
+    fn push_direct_artifact(&mut self, artifact: Artifact) {
+        let bytes = artifact.name.len() + artifact.uri.len();
+        if self.reserve(1, bytes) {
+            self.direct_artifacts.push(artifact);
+        }
+    }
+
+    fn resolve_artifacts(&mut self) -> Vec<Artifact> {
+        let mut visited = BTreeSet::new();
+        let mut pending = std::mem::take(&mut self.artifact_roots);
+        let mut artifacts = std::mem::take(&mut self.direct_artifacts);
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if let Some(set) = self.named_sets.get(&id) {
+                artifacts.extend(set.files.iter().cloned());
+                pending.extend(set.children.iter().cloned());
+            }
+        }
+        let mut seen = BTreeSet::new();
+        artifacts
+            .into_iter()
+            .filter(|artifact| seen.insert((artifact.name.clone(), artifact.uri.clone())))
+            .collect()
+    }
+}
+
 #[must_use]
 pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
     let success = input.exit_code == Some(0);
@@ -536,11 +855,19 @@ mod tests {
         let completed = BepEvent::from_owned(&completed).unwrap();
         let second = BepEvent::from_owned(&second).unwrap();
         let first = BepEvent::from_owned(&first).unwrap();
-        let artifacts = reduce_artifacts(&[completed, second, first]);
+        let events = [completed, second, first];
+        let artifacts = reduce_artifacts(&events);
         assert_eq!(artifacts.len(), 2);
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == ArtifactKind::Remote && !artifact.locally_available
         }));
+
+        let mut streaming = BepAccumulator::default();
+        for event in events {
+            streaming.observe(event);
+        }
+        let output = streaming.finish(b"", b"", Some(0), 1, Budget::result_default());
+        assert_eq!(output.artifacts, artifacts);
     }
 
     #[test]

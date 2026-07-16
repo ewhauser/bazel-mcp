@@ -409,7 +409,8 @@ message MUST make the active policy clear.
   the detected Bazel version.
 - If a caller supplies an incompatible output flag, the server rejects it with
   an actionable explanation instead of silently returning an unbounded format.
-- Query rows are written incrementally to invocation storage.
+- Query rows stream directly to `stdout.log`; no second normalized copy is
+  persisted.
 - The initial result includes a count and bounded sample, never the full graph.
 
 ### 10.3 Unknown and informational output
@@ -686,57 +687,62 @@ All limits apply to the serialized model-visible tool result, before MCP framing
 
 ### 16.1 Layout
 
-Large data is stored in ordinary files. An embedded, in-process
-[Turso](https://github.com/tursodatabase/turso) database stores metadata and
-indexes in a SQLite-compatible local database file. The MVP does not require or
-contact a hosted Turso service.
+All durable data is stored in ordinary private files. Metadata records are the
+source of truth; bounded in-memory indexes are rebuilt from them on startup.
+There is no embedded or hosted database.
 
 ```text
 <cache-root>/
-  index.db
-  workspaces/<workspace-hash>/
-    invocations/<invocation-id>/
-      request.json
-      metadata.json
+  LOCK
+  trash/
+  invocations/<uuidv7-day>/<bounded-shard>/<invocation-id>/
+      manifest.json
+      details.json
       stdout.log
       stderr.log
       events.bep
-      summary.json
       artifacts.json
 ```
 
 The exact platform cache root is configurable. It defaults to an OS-appropriate
 user cache directory and MUST NOT be placed inside the Bazel workspace.
 
-### 16.2 Turso database requirements
+### 16.2 Filesystem record requirements
 
-- Use the Rust `turso` crate in local mode through
-  `turso::Builder::new_local`; do not use `rusqlite` or link the SQLite C
-  library in production.
-- Pin the pre-1.0 Turso release exactly in the workspace lockfile and upgrade it
-  only with migration, crash-recovery, and pagination tests.
-- Index invocations by UUID, workspace, state, start time, and finish time.
-- Store normalized targets, diagnostics, tests, artifacts, query rows, and
-  summary metrics in tables suitable for filtered pagination.
-- Do not store complete stdout, stderr, BEP blobs, or artifact contents in
-  Turso.
+- UUIDv7 determines a time bucket and bounded shard, so locating an invocation
+  never requires a database or an unbounded directory.
+- A versioned `manifest.json` is the atomic commit point for the request,
+  lifecycle, compact summary header, metrics, byte accounting, and optional
+  deferred-result metadata. The request and summary have no duplicate durable
+  representation. There is no migration or legacy-layout reader.
+- `details.json` contains detailed target, test, and per-file coverage
+  collections. `artifacts.json` contains artifacts. Startup reads neither
+  sidecar while rebuilding the compact index.
+- One exclusive cache-root lock prevents multiple writer processes.
+- A read/write lock protects only the compact index. Per-invocation mutation
+  locks serialize writers for one invocation; no index lock is held across
+  awaited filesystem I/O.
+- Startup removes committed trash, discards uncommitted temporary files,
+  rebuilds bounded indexes, and terminalizes orphaned nonterminal records.
+- Stdout, stderr, and BEP are written directly by Bazel to their final evidence
+  files. Query inspection scans `stdout.log` with opaque byte-offset cursors.
+- BEP parsing is frame-streaming and retains only bounded reducer state.
 - Cursors encode stable ordering keys and are opaque to clients.
-- Use an append-only `schema_migrations` table and run each migration in a
-  transaction. Released migrations are immutable.
-- Use a conservative, tested SQLite-compatible SQL subset. Configure durability
-  only through behavior supported by the pinned Turso version; the
-  implementation MUST NOT assume C SQLite driver or `rusqlite` behavior.
-- Serialize schema and lifecycle writes inside the store while allowing bounded
-  reads to proceed concurrently when the pinned Turso version supports it.
 
 ### 16.3 Durability and recovery
 
 - Request metadata is written before the child is spawned.
 - Terminal state and exit information are committed atomically.
+- Canonical arguments, artifacts, final metrics, termination, state, and summary
+  are coalesced into one terminal manifest commit. Noncritical telemetry is
+  buffered and may lose its most recent interval on a process crash.
 - On startup, nonterminal invocations without a tracked live child transition to
   `interrupted`.
 - Complete captured files remain inspectable after server restart.
 - A partially written BEP is parsed up to the last complete message.
+- File replacement uses a private temporary file followed by atomic rename.
+  The contract covers process interruption and committed-file corruption, not
+  power loss; the store does not add an `fsync` to every short-lived update.
 
 ### 16.4 Retention
 
@@ -746,8 +752,12 @@ Defaults:
 - Limit total invocation storage to 10 GiB.
 - Never evict a running invocation.
 - Under quota pressure, evict the oldest terminal invocations first.
-- Deleting an invocation removes its files and index rows as one recoverable
-  operation.
+- An unexpired deferred result protects its compact record and summary, but raw
+  stdout, stderr, BEP, and artifact sidecars may be pruned independently.
+- Deleting an invocation first renames its directory into `trash/`, removes it
+  from the in-memory index, and then unlinks it outside the index lock. Failed
+  unlinks remain recoverable trash; startup completes interrupted deletions.
+  Accounted bytes and high/low watermarks avoid full-tree quota scans.
 
 Retention is configurable by deployment.
 
@@ -775,7 +785,7 @@ code-execution service even though it does not expose a shell.
 
 ### 17.3 Secret handling
 
-- Redaction is applied before text enters Turso summaries or MCP results.
+- Redaction is applied before text enters summaries or MCP results.
 - Known credential-bearing flags and environment variables store a redacted
   placeholder in request and canonical-command metadata.
 - Raw logs remain protected by filesystem permissions and retention policy but
@@ -944,7 +954,7 @@ The corpus MUST include:
 - Reserved internal flags cannot be overridden.
 - `clean`, `shutdown`, and `run` are rejected under the default policy.
 - Secrets in configured redaction fixtures do not appear in summaries,
-  inspection responses, Turso text columns, or telemetry.
+  inspection responses, durable metadata, or telemetry.
 
 ## 22. Test strategy
 
@@ -1031,7 +1041,7 @@ crates/
   bazel-runner/          workspace discovery, scheduling, child lifecycle
   bazel-bep/             generated protos, framing, event graph
   bazel-reducer/         build, test, coverage, query, and text reducers
-  bazel-store/           Turso index, files, retention, cursors
+  bazel-store/           filesystem records, indexes, retention, cursors
   bazel-policy/          commands, flags, roots, redaction
 ```
 
@@ -1042,7 +1052,7 @@ Expected foundational dependencies include:
 - `buffa` and `buffa-build`
 - `serde`, `serde_json`, and `schemars`
 - `uuid`
-- `turso` in embedded local mode
+- database-free filesystem records with no storage driver
 - `tracing`
 - `thiserror`
 - an LCOV parser or a small internal streaming parser
@@ -1050,7 +1060,7 @@ Expected foundational dependencies include:
 
 The MCP handler MUST delegate execution to an invocation manager. It MUST NOT
 hold a global mutex across a running build or perform blocking file I/O on a
-Tokio core worker. Turso operations are awaited through the store's async API;
+Tokio core worker. Store operations are awaited through the async API;
 blocking BEP and filesystem work uses bounded blocking tasks.
 
 ## 24. Delivery plan
@@ -1077,7 +1087,7 @@ blocking BEP and filesystem work uses bounded blocking tasks.
 - Full reducers for required BEP events.
 - Test XML extraction.
 - Coverage and query adapters.
-- Turso filtering, migrations, recovery, and stable pagination.
+- Filesystem filtering, atomic-record recovery, and stable pagination.
 - Retention and crash recovery.
 - Token, diagnostic-fidelity, performance, and security acceptance gates.
 - macOS/Linux and Bazel-version compatibility matrix.
@@ -1102,7 +1112,7 @@ blocking BEP and filesystem work uses bounded blocking tasks.
 | Concurrent commands wait on the same output-base lock | Hidden latency and apparent stalls | Schedule by canonical effective output base before spawning Bazel. |
 | Logs contain secrets | Sensitive data reaches model or disk | Private storage, retention, configured redaction before summaries and inspection. |
 | Retained logs consume large amounts of disk | Builds fail or machine degrades | Quotas, oldest-first eviction, and preflight storage checks. |
-| The pinned pre-1.0 Turso release changes behavior or lacks a SQLite edge case | Metadata migration or query failure | Pin the release, use a conservative SQL subset, test migrations/crash recovery, and preserve raw invocation files so indexes can be repaired. |
+| Filesystem records are interrupted during commit or deletion | Missing metadata or leaked evidence | Use atomic rename commit points, two-phase trash deletion, exclusive locking, and crash/restart tests. |
 | Token estimates are mistaken for provider billing | Savings claims are misleading | Label `tiktoken-rs` results as deterministic estimates, record the encoding, and corroborate with live platform metrics when available. |
 | The upstream benchmark corpus drifts or disappears | Results cease to be reproducible | Pin Abseil by full commit, verify the checkout, cache it, and keep scenario overlays in this repository. |
 | Quiet flags hide the only useful error | Agent cannot diagnose failure | Capture complete stdout/stderr and retain BEP before applying reduction. |
@@ -1132,6 +1142,5 @@ These decisions do not block the MVP requirements:
 - [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25)
 - [MCP tools specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 - [Official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
-- [Turso in-process SQL database](https://github.com/tursodatabase/turso)
 - [`tiktoken-rs`](https://github.com/zurawiki/tiktoken-rs)
 - [Abseil C++](https://github.com/abseil/abseil-cpp)

@@ -45,7 +45,7 @@ direction. In particular:
 - store APIs use domain types and do not expose MCP wire types;
 - `InvocationService` remains the only application boundary presented to the
   server; and
-- Turso remains the production database driver.
+- database-free filesystem records remain the production storage layer.
 
 ## Motivation
 
@@ -568,37 +568,20 @@ The server maps these records and the associated `InvocationRecord` into the
 selected protocol's Task type. Protocol-specific distinctions such as legacy
 `failed` for `isError: true` remain in `bazel-mcp-server`.
 
-### Turso migration
+### Filesystem record
 
-Add append-only migration `0005_deferred_results.sql` with a table equivalent
-to:
-
-```sql
-CREATE TABLE deferred_results (
-    invocation_id TEXT PRIMARY KEY
-        REFERENCES invocations(id) ON DELETE CASCADE,
-    retrieval_kind TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL,
-    cancellation_requested_at_ms INTEGER,
-    terminal_override TEXT,
-    failure_kind TEXT,
-    failure_message TEXT
-);
-
-CREATE INDEX deferred_results_expiry
-    ON deferred_results(expires_at_ms);
-```
-
-Migrations 0001 through 0004 are never edited.
+Deferred metadata is an optional typed field in the invocation's versioned
+`manifest.json`. Invocation acceptance writes request metadata and this deferred
+handle before the record rename commits the submission. Startup rebuilds the
+retrieval and expiry indexes from records; there is no database migration or
+legacy schema.
 
 Store methods are named for deferred results and accept domain types. They do
 not mention MCP, task wire types, or `rmcp`.
 
 Required operations are:
 
-- create a deferred result in the invocation acceptance transaction;
+- create a deferred result in the invocation acceptance commit;
 - read one deferred result joined with its invocation;
 - require the selected adapter's retrieval kind on every task read;
 - page nonexpired deferred results for legacy listing;
@@ -606,7 +589,7 @@ Required operations are:
 - atomically set a terminal cancellation override;
 - persist a redacted internal failure;
 - extend terminal expiry; and
-- delete expired deferred-result rows.
+- clear expired deferred-result metadata.
 
 ### Storage and retention behavior
 
@@ -706,7 +689,7 @@ The following races have explicit outcomes:
 | Internal failure after acceptance | durable terminal task failure/result according to the status mapping |
 
 Errors and stored failure messages are redacted before transmission,
-persistence in Turso text fields, or telemetry.
+persistence in durable metadata, or telemetry.
 
 ## Server architecture
 
@@ -784,8 +767,8 @@ reviewed schema diffs, all negotiated-flow transcripts, `make check`, `make test
 - Add joined reads and cursor pagination.
 - Protect minimal summaries for unexpired tasks while allowing independent raw
   evidence pruning.
-- Exercise migration, restart, cancellation, expiry, and pagination against the
-  pinned Turso version.
+- Exercise atomic commit, restart, cancellation, expiry, and pagination on the
+  filesystem store.
 
 ### `bazel-mcp-runner`
 
@@ -1048,7 +1031,7 @@ values, task-result payloads, or unredacted error strings.
 - Legacy `tasks/list` is available only inside the local stdio session and
   returns bounded metadata, never results or logs.
 - Per-task status and immediate-response strings pass through secret redaction.
-- Turso failure text is redacted before insertion.
+- Deferred failure text is redacted before durable commit.
 - Task polling cannot request arbitrary files or bypass `bazel.inspect` policy.
 - Task execution never changes argv construction: Bazel is still launched
   directly with a string vector and never through a shell.
@@ -1076,7 +1059,7 @@ Implementation is delivered in these stages:
 
 1. Pin protocol schemas and add redacted golden transcripts for all three
    negotiated flows.
-2. Add configuration, domain types, Turso migration, and retention behavior.
+2. Add configuration, domain types, filesystem records, and retention behavior.
 3. Refactor `InvocationService` into submit/wait without changing synchronous
    behavior.
 4. Land legacy task negotiation and its raw protocol tests.
@@ -1125,7 +1108,7 @@ This specification is complete when:
 - Expiry, cancellation races, unknown IDs, protocol mismatch errors, and restart
   recovery have deterministic tests.
 - MCP stdout remains protocol-only and all diagnostic output remains on stderr.
-- Redaction occurs before status text, Turso text fields, and telemetry.
+- Redaction occurs before status text, durable metadata, and telemetry.
 - The pinned Claude Code executable passes `sync_only` and `auto` synchronous
   host cases with one wrapper execution per call, and the `tasks_required`
   incompatibility case rejects before launching the wrapper.

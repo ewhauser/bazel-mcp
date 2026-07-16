@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "label": "turso-2cdf8e9",
+  "platform": "macos-aarch64",
+  "parameters": {
+    "query_rows": 1000000,
+    "invocations": 2000,
+    "lookup_samples": 1000
+  },
+  "query": {
+    "stdout_bytes": 40000000,
+    "store_bytes": 186013386,
+    "postprocess_ms": 9302.514416,
+    "unfiltered_page_ms": 142.336417,
+    "filtered_page_ms": 1341.222417,
+    "lookup_p50_us": 23.292,
+    "lookup_p95_us": 25.417
+  },
+  "startup": {
+    "retained_invocations": 2000,
+    "reopen_ms": 27.369417,
+    "store_bytes": 9339232
+  },
+  "gc": {
+    "candidates": 2000,
+    "bytes_before": 17531232,
+    "target_bytes": 8765616,
+    "bytes_after": 9006816,
+    "deleted": 1432,
+    "elapsed_ms": 864.927292
+  }
+}

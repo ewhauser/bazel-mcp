@@ -9,28 +9,25 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use bazel_mcp_bep::PartialStream;
 use bazel_mcp_policy::{
     PolicyConfig, PolicyError, Redactor, effective_output_base, filtered_environment,
     resolve_bazel_executable, validate_arguments, validate_command, validate_query_arguments,
     validate_workspace,
 };
 use bazel_mcp_reducer::{
-    Budget, ReductionInput, extract_canonical_arguments, normalize_terminal_text,
-    parse_lcov_reader, parse_test_xml, reduce_artifacts, reduce_invocation,
+    Budget, StreamReductionOutput, normalize_terminal_text, parse_lcov_reader, parse_test_xml,
 };
-use bazel_mcp_store::{InvocationPaths, Store, StoreError};
+use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
     ArtifactKind, BazelCommand, CommandClass, DeferredFailure, DeferredFailureKind,
     DeferredResultRecord, DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic,
     DiagnosticCategory, InvocationId, InvocationMetrics, InvocationRecord, InvocationRequest,
-    InvocationState, Page, PageRequest, QueryRow, ResultDisposition, Severity, Termination,
-    TestStatus,
+    InvocationState, Page, PageRequest, ResultDisposition, Severity, Termination, TestStatus,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
+    io::{AsyncReadExt, AsyncSeekExt},
     process::Command,
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
 };
@@ -42,7 +39,8 @@ use crate::{
     version::detect_bazel_version,
 };
 
-const REDUCTION_LOG_LIMIT: usize = 16 * 1024 * 1024;
+const COMPLETE_BEP_LOG_LIMIT: usize = 2 * 1024 * 1024;
+const FALLBACK_LOG_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RunnerConfig {
@@ -166,7 +164,7 @@ pub struct InspectRequest {
     pub max_bytes: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 struct LogCursor {
     invocation_id: InvocationId,
     end: u64,
@@ -174,14 +172,30 @@ struct LogCursor {
 
 impl LogCursor {
     fn encode(&self) -> Result<String, RunnerError> {
-        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
+        let mut bytes = Vec::with_capacity(26);
+        bytes.extend_from_slice(&[1, 5]);
+        bytes.extend_from_slice(self.invocation_id.as_uuid().as_bytes());
+        bytes.extend_from_slice(&self.end.to_le_bytes());
+        Ok(URL_SAFE_NO_PAD.encode(bytes))
     }
 
     fn decode(value: &str) -> Result<Self, RunnerError> {
-        let raw = URL_SAFE_NO_PAD
+        let bytes = URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| RunnerError::InvalidOffset)?;
-        serde_json::from_slice(&raw).map_err(|_| RunnerError::InvalidOffset)
+        if bytes.len() != 26 || bytes[0] != 1 || bytes[1] != 5 {
+            return Err(RunnerError::InvalidOffset);
+        }
+        let uuid = uuid::Uuid::from_slice(&bytes[2..18]).map_err(|_| RunnerError::InvalidOffset)?;
+        let end = u64::from_le_bytes(
+            bytes[18..26]
+                .try_into()
+                .map_err(|_| RunnerError::InvalidOffset)?,
+        );
+        Ok(Self {
+            invocation_id: InvocationId::from_uuid(uuid),
+            end,
+        })
     }
 
     fn decode_for(value: &str, invocation_id: InvocationId) -> Result<Self, RunnerError> {
@@ -866,9 +880,15 @@ impl InvocationService {
                 )
             }
             InspectView::QueryResults => {
+                let redactor = self.redactor.clone();
                 let (page, total, filtered) = self
                     .store
-                    .page_query_rows(id, request.filter.as_deref(), page_request)
+                    .page_query_rows_mapped(
+                        id,
+                        request.filter.as_deref(),
+                        page_request,
+                        move |value| redactor.redact_bounded(value, 4 * 1024),
+                    )
                     .await?;
                 (
                     serde_json::to_value(page.items)?,
@@ -1147,25 +1167,62 @@ impl InvocationService {
             let reduction_started = Instant::now();
             let (query_row_count, query_sample) =
                 if queued.request.command.class() == CommandClass::Query {
-                    self.persist_query_rows(queued.request.id, &paths.stdout)
-                        .await?
+                    let redactor = self.redactor.clone();
+                    let (page, total, _) = self
+                        .store
+                        .page_query_rows_mapped(
+                            queued.request.id,
+                            None,
+                            PageRequest {
+                                cursor: None,
+                                limit: 3,
+                            },
+                            move |value| redactor.redact_bounded(value, 4 * 1024),
+                        )
+                        .await?;
+                    (total, page.items)
                 } else {
                     (0, Vec::new())
                 };
-            let stdout = capture::read_bounded_tail(&paths.stdout, REDUCTION_LOG_LIMIT).await?;
-            let stderr = capture::read_bounded_tail(&paths.stderr, REDUCTION_LOG_LIMIT).await?;
-            let PartialStream {
-                events,
-                terminal_error,
-            } = capture::read_bep(paths.bep.clone()).await?;
-            if let Some(error) = terminal_error {
+            let (bep, bep_outcome) = capture::reduce_bep(paths.bep.clone()).await?;
+            if let Some(error) = &bep_outcome.terminal_error {
                 tracing::warn!(invocation_id = %queued.request.id, %error, "partially decoded BEP");
             }
-            if let Some(mut arguments) =
-                catch_unwind(AssertUnwindSafe(|| extract_canonical_arguments(&events)))
-                    .ok()
-                    .flatten()
-            {
+            // Complete structured evidence needs only a small diagnostic tail;
+            // partial or missing BEP retains a larger bounded fallback.
+            let log_limit = if bep_outcome.event_count > 0 && bep_outcome.terminal_error.is_none() {
+                COMPLETE_BEP_LOG_LIMIT
+            } else {
+                FALLBACK_LOG_LIMIT
+            };
+            let stdout = capture::read_bounded_tail(&paths.stdout, log_limit).await?;
+            let stderr = capture::read_bounded_tail(&paths.stderr, log_limit).await?;
+            let exit_code = status.as_ref().and_then(ExitStatus::code);
+            let reduced = catch_unwind(AssertUnwindSafe(|| {
+                bep.finish(
+                    &stdout,
+                    &stderr,
+                    exit_code,
+                    bazel_wall_ms,
+                    Budget::result_default(),
+                )
+            }));
+            let StreamReductionOutput {
+                mut summary,
+                mut artifacts,
+                canonical_arguments,
+            } = reduced.unwrap_or_else(|_| {
+                tracing::warn!(
+                    invocation_id = %queued.request.id,
+                    "streaming BEP reducer panicked; using bounded fallback summary"
+                );
+                StreamReductionOutput {
+                    summary: fallback_summary(exit_code, bazel_wall_ms, &stderr, &stdout),
+                    artifacts: Vec::new(),
+                    canonical_arguments: None,
+                }
+            });
+            let canonical_arguments = canonical_arguments.map(|mut arguments| {
                 let workspace = queued.request.workspace.to_string_lossy();
                 for argument in &mut arguments {
                     *argument = self.redactor.redact_bounded(
@@ -1173,43 +1230,12 @@ impl InvocationService {
                         64 * 1024,
                     );
                 }
-                self.store
-                    .update_canonical_arguments(queued.request.id, &arguments)
-                    .await?;
-            }
-            let mut artifacts = catch_unwind(AssertUnwindSafe(|| reduce_artifacts(&events)))
-                .unwrap_or_else(|_| {
-                    tracing::warn!(
-                        invocation_id = %queued.request.id,
-                        "artifact reducer panicked; continuing without structured artifacts"
-                    );
-                    Vec::new()
-                });
+                arguments
+            });
             for artifact in &mut artifacts {
                 artifact.name = self.redactor.redact_bounded(&artifact.name, 1_000);
                 artifact.uri = self.redactor.redact_bounded(&artifact.uri, 1_000);
             }
-            self.store
-                .replace_artifacts(queued.request.id, &artifacts)
-                .await?;
-            let exit_code = status.as_ref().and_then(ExitStatus::code);
-            let mut summary = catch_unwind(AssertUnwindSafe(|| {
-                reduce_invocation(ReductionInput {
-                    events: &events,
-                    stdout: &stdout,
-                    stderr: &stderr,
-                    exit_code,
-                    elapsed_ms: bazel_wall_ms,
-                    budget: Budget::result_default(),
-                })
-            }))
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    invocation_id = %queued.request.id,
-                    "invocation reducer panicked; using bounded fallback summary"
-                );
-                fallback_summary(exit_code, bazel_wall_ms, &stderr, &stdout)
-            });
             if queued.request.command.class() == CommandClass::Query && exit_code == Some(0) {
                 summary.headline = format!("Bazel query returned {query_row_count} rows");
                 summary.inspect_hint = (query_row_count > 0).then(|| "query_results".to_owned());
@@ -1242,21 +1268,23 @@ impl InvocationService {
                 raw_stdout_bytes: capture::file_size(&paths.stdout).await,
                 raw_stderr_bytes: capture::file_size(&paths.stderr).await,
                 bep_bytes: capture::file_size(&paths.bep).await,
-                bep_events: u64::try_from(events.len()).unwrap_or(u64::MAX),
+                bep_events: u64::try_from(bep_outcome.event_count).unwrap_or(u64::MAX),
                 queue_ms,
                 bazel_wall_ms,
                 reduction_ms: duration_millis(reduction_started.elapsed()),
                 ..Default::default()
             };
             self.store
-                .update_metrics(queued.request.id, metrics)
-                .await?;
-            self.store
-                .transition(
+                .finish_invocation(
                     queued.request.id,
-                    state,
-                    Some(termination.clone()),
-                    Some(summary),
+                    InvocationCompletion {
+                        state,
+                        termination: termination.clone(),
+                        summary,
+                        metrics,
+                        canonical_arguments,
+                        artifacts,
+                    },
                 )
                 .await
                 .map_err(Into::into)
@@ -1530,41 +1558,6 @@ impl InvocationService {
             false
         };
         (in_workspace || in_output_root).then_some(canonical)
-    }
-
-    async fn persist_query_rows(
-        &self,
-        id: InvocationId,
-        path: &Path,
-    ) -> Result<(u64, Vec<QueryRow>), RunnerError> {
-        self.store.replace_query_rows(id, &[]).await?;
-        let file = tokio::fs::File::open(path).await?;
-        let mut lines = BufReader::new(file).lines();
-        let mut batch = Vec::with_capacity(512);
-        let mut sample = Vec::with_capacity(3);
-        let mut ordinal = 0_u64;
-        while let Some(line) = lines.next_line().await? {
-            let row = QueryRow {
-                ordinal,
-                value: self.redactor.redact_bounded(&line, 4 * 1024),
-            };
-            if sample.len() < 3 {
-                sample.push(QueryRow {
-                    ordinal,
-                    value: bounded_text(&row.value, 256),
-                });
-            }
-            batch.push(row);
-            ordinal = ordinal.saturating_add(1);
-            if batch.len() == 512 {
-                self.store.append_query_rows(id, &batch).await?;
-                batch.clear();
-            }
-        }
-        if !batch.is_empty() {
-            self.store.append_query_rows(id, &batch).await?;
-        }
-        Ok((ordinal, sample))
     }
 
     async fn read_combined_log_page(

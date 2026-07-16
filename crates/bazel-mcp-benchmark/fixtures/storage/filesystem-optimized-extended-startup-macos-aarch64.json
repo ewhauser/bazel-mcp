@@ -1,0 +1,127 @@
+{
+  "schema_version": 2,
+  "label": "filesystem-optimized-extended-startup",
+  "revision": "6b0f2d13ec74c8d879bc2331eaa6f174d4818280",
+  "platform": "macos-aarch64",
+  "parameters": {
+    "query_rows": 100,
+    "invocations": 2,
+    "lookup_samples": 1,
+    "concurrency_operations": 32
+  },
+  "lifecycle": {
+    "elapsed_ms": 1.4150420000000001,
+    "manifest_commits": 4,
+    "manifest_bytes_written": 3145,
+    "payload_recounts": 2,
+    "retained_bytes": 5198
+  },
+  "concurrency": [
+    {
+      "concurrency": 1,
+      "operations": 32,
+      "throughput_per_second": 918.9691750456792,
+      "latency_p50_ms": 1.058167,
+      "latency_p95_ms": 1.242917,
+      "latency_p99_ms": 1.2548329999999999,
+      "manifest_commits": 128,
+      "manifest_bytes_written": 100702,
+      "lookup_p95_us_during_writes": 0.375,
+      "inspection_p95_us_during_writes": 0.417
+    },
+    {
+      "concurrency": 8,
+      "operations": 32,
+      "throughput_per_second": 1499.478696859295,
+      "latency_p50_ms": 5.237541,
+      "latency_p95_ms": 5.800834,
+      "latency_p99_ms": 5.993875,
+      "manifest_commits": 128,
+      "manifest_bytes_written": 100702,
+      "lookup_p95_us_during_writes": 0.417,
+      "inspection_p95_us_during_writes": 0.5
+    },
+    {
+      "concurrency": 32,
+      "operations": 32,
+      "throughput_per_second": 1038.3036713768881,
+      "latency_p50_ms": 29.536916,
+      "latency_p95_ms": 30.503,
+      "latency_p99_ms": 30.521666,
+      "manifest_commits": 128,
+      "manifest_bytes_written": 100702,
+      "lookup_p95_us_during_writes": 0.792,
+      "inspection_p95_us_during_writes": 0.9590000000000001
+    }
+  ],
+  "bep_decode": {
+    "representative_bytes": 65322,
+    "representative_events": 158,
+    "representative_decode_ms": 0.104959,
+    "large_stream_bytes": 67085694,
+    "large_stream_events": 162266,
+    "large_stream_decode_ms": 52.834792
+  },
+  "terminal": {
+    "build_finalize_ms": 0.26304099999999997,
+    "test_finalize_ms": 0.586709,
+    "query_count_and_finalize_ms": 0.32379199999999997
+  },
+  "query": {
+    "stdout_bytes": 4000,
+    "store_bytes": 5022,
+    "postprocess_ms": 0.042166999999999996,
+    "unfiltered_page_ms": 0.031333,
+    "continuation_page_ms": 0.033083,
+    "filtered_page_ms": 0.032666,
+    "lookup_p50_us": 0.5,
+    "lookup_p95_us": 0.5
+  },
+  "startup": {
+    "retained_invocations": 2,
+    "reopen_ms": 0.313625,
+    "store_bytes": 2198,
+    "directory_traversal_ms": 0.118,
+    "manifest_read_ms": 0.027,
+    "manifest_decode_ms": 0.009,
+    "index_build_ms": 0.0
+  },
+  "startup_scale": [
+    {
+      "retained_invocations": 20,
+      "reopen_ms": 0.795833,
+      "store_bytes": 22006,
+      "directory_traversal_ms": 0.414,
+      "manifest_read_ms": 0.199,
+      "manifest_decode_ms": 0.037,
+      "index_build_ms": 0.003
+    },
+    {
+      "retained_invocations": 100000,
+      "reopen_ms": 10638.157292,
+      "store_bytes": 110715280,
+      "directory_traversal_ms": 1463.392,
+      "manifest_read_ms": 8835.535,
+      "manifest_decode_ms": 178.493,
+      "index_build_ms": 158.85
+    }
+  ],
+  "gc": {
+    "candidates": 2,
+    "bytes_before": 11060,
+    "target_bytes": 5530,
+    "bytes_after": 664,
+    "deleted": 2,
+    "elapsed_ms": 0.7380000000000001,
+    "lookup_p95_us_during_gc": 0.167,
+    "renames": 2,
+    "unlinks": 2,
+    "rename_ms": 0.246,
+    "index_write_lock_ms": 0.003,
+    "unlink_ms": 0.34
+  },
+  "process": {
+    "whole_benchmark_ms": 147294.570125,
+    "peak_rss_bytes": 198082560
+  }
+}

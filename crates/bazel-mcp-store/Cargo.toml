@@ -11,13 +11,13 @@ publish = false
 [dependencies]
 base64.workspace = true
 bazel-mcp-types.workspace = true
+memchr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-turso.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

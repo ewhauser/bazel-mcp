@@ -75,6 +75,13 @@ pub struct PartialStream {
     pub terminal_error: Option<FrameError>,
 }
 
+#[derive(Debug)]
+pub struct StreamOutcome {
+    pub event_count: usize,
+    pub decoded_bytes: usize,
+    pub terminal_error: Option<FrameError>,
+}
+
 pub fn read_frame<R: Read>(
     reader: &mut R,
     max_bytes: usize,
@@ -127,30 +134,60 @@ pub fn decode_stream_partial<R: Read>(reader: R, max_bytes: usize) -> PartialStr
 }
 
 pub fn decode_stream_partial_bounded<R: Read>(
-    mut reader: R,
+    reader: R,
     max_frame_bytes: usize,
     max_stream_bytes: usize,
     max_events: usize,
 ) -> PartialStream {
     let mut events = Vec::new();
+    let outcome = visit_stream_partial_bounded(
+        reader,
+        max_frame_bytes,
+        max_stream_bytes,
+        max_events,
+        |event| events.push(event),
+    );
+    PartialStream {
+        events,
+        terminal_error: outcome.terminal_error,
+    }
+}
+
+/// Decode a length-delimited BEP stream one frame at a time without retaining
+/// prior frames. The visitor owns each decoded event and decides what bounded
+/// state, if any, should survive to the next event.
+pub fn visit_stream_partial_bounded<R, F>(
+    mut reader: R,
+    max_frame_bytes: usize,
+    max_stream_bytes: usize,
+    max_events: usize,
+    mut visitor: F,
+) -> StreamOutcome
+where
+    R: Read,
+    F: FnMut(BepEvent),
+{
     let mut stream_bytes = 0_usize;
+    let mut event_count = 0_usize;
     loop {
         match read_frame(&mut reader, max_frame_bytes) {
             Ok(Some(frame)) => {
                 let next_bytes = stream_bytes.saturating_add(frame.len());
                 if next_bytes > max_stream_bytes {
-                    return PartialStream {
-                        events,
+                    return StreamOutcome {
+                        event_count,
+                        decoded_bytes: stream_bytes,
                         terminal_error: Some(FrameError::StreamTooLarge {
                             actual: next_bytes,
                             limit: max_stream_bytes,
                         }),
                     };
                 }
-                if events.len() >= max_events {
-                    let actual = events.len().saturating_add(1);
-                    return PartialStream {
-                        events,
+                if event_count >= max_events {
+                    let actual = event_count.saturating_add(1);
+                    return StreamOutcome {
+                        event_count,
+                        decoded_bytes: stream_bytes,
                         terminal_error: Some(FrameError::TooManyEvents {
                             actual,
                             limit: max_events,
@@ -159,24 +196,30 @@ pub fn decode_stream_partial_bounded<R: Read>(
                 }
                 stream_bytes = next_bytes;
                 match BepEvent::decode(frame) {
-                    Ok(event) => events.push(event),
+                    Ok(event) => {
+                        visitor(event);
+                        event_count = event_count.saturating_add(1);
+                    }
                     Err(error) => {
-                        return PartialStream {
-                            events,
+                        return StreamOutcome {
+                            event_count,
+                            decoded_bytes: stream_bytes,
                             terminal_error: Some(FrameError::Decode(error)),
                         };
                     }
                 }
             }
             Ok(None) => {
-                return PartialStream {
-                    events,
+                return StreamOutcome {
+                    event_count,
+                    decoded_bytes: stream_bytes,
                     terminal_error: None,
                 };
             }
             Err(error) => {
-                return PartialStream {
-                    events,
+                return StreamOutcome {
+                    event_count,
+                    decoded_bytes: stream_bytes,
                     terminal_error: Some(error),
                 };
             }

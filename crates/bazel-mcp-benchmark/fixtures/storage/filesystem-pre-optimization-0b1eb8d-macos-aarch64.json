@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "label": "filesystem-pre-optimization",
+  "revision": "0b1eb8d8087b665f232f9dfd0121af2c2c960685",
+  "platform": "macos-aarch64",
+  "parameters": {
+    "query_rows": 1000000,
+    "invocations": 2000,
+    "lookup_samples": 1000
+  },
+  "query": {
+    "stdout_bytes": 40000000,
+    "store_bytes": 40001597,
+    "postprocess_ms": 118.54029200000001,
+    "unfiltered_page_ms": 0.039667,
+    "filtered_page_ms": 126.809583,
+    "lookup_p50_us": 0.125,
+    "lookup_p95_us": 0.167
+  },
+  "startup": {
+    "retained_invocations": 2000,
+    "reopen_ms": 51.234083,
+    "store_bytes": 3241280
+  },
+  "gc": {
+    "candidates": 2000,
+    "bytes_before": 11433280,
+    "target_bytes": 5716640,
+    "bytes_after": 4568483,
+    "deleted": 1201,
+    "elapsed_ms": 432.16837499999997
+  }
+}

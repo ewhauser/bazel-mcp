@@ -37,6 +37,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Serialization and domain data
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"
+memchr = "2"
 regex = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -56,7 +58,6 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 # Storage and platform
 nix = { version = "0.30", features = ["process", "signal"] }
 tempfile = "3"
-turso = { version = "=0.7.0", default-features = false }
 which = "8"
 
 # Testing and benchmarks
