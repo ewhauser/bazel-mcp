@@ -1,6 +1,7 @@
 # bazel-mcp
 
 [![CI](https://github.com/ewhauser/bazel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ewhauser/bazel-mcp/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-50d994.svg)](https://ewhauser.github.io/bazel-mcp/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Run Bazel from MCP-compatible coding agents without filling their context
@@ -10,6 +11,9 @@ windows with build logs.
 server. It runs Bazel in your workspace, returns a compact actionable result,
 and keeps the complete invocation evidence available for inspection when an
 agent needs more detail.
+
+Read the [documentation](https://ewhauser.github.io/bazel-mcp/) for installation,
+guided workflows, configuration, architecture, and reproducible benchmarks.
 
 ## Why bazel-mcp?
 

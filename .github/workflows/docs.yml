@@ -1,0 +1,78 @@
+name: Documentation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/release-please.yml"
+      - "website/**"
+      - "docs/**"
+      - "README.md"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "CHANGELOG.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/release-please.yml"
+      - "website/**"
+      - "docs/**"
+      - "README.md"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "CHANGELOG.md"
+  workflow_call:
+    inputs:
+      deploy:
+        description: Package and publish the validated site to GitHub Pages.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install documentation dependencies
+        run: npm ci --prefix website
+      - name: Check documentation content and components
+        run: npm run check --prefix website
+      - name: Build the production website
+        run: npm run build --prefix website
+      - name: Check built links and assets
+        run: npm run check:links --prefix website
+      - name: Package GitHub Pages artifact
+        if: ${{ inputs.deploy == true }}
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: website/dist
+
+  deploy:
+    name: Publish GitHub Pages
+    if: ${{ inputs.deploy == true }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

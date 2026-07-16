@@ -1,0 +1,25 @@
+{
+  "name": "@bazel-mcp/docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync:content": "node ./scripts/sync-content.mjs",
+    "dev": "npm run sync:content && astro dev",
+    "build": "npm run sync:content && astro build",
+    "check": "npm run sync:content && astro check",
+    "check:links": "node ./scripts/check-built-links.mjs",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.41.3",
+    "astro": "7.1.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.9",
+    "typescript": "6.0.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
+  }
+}
