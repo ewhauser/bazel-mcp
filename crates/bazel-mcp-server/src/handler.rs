@@ -294,7 +294,7 @@ impl BazelMcpServer {
                 .await
                 .map_err(|error| error.to_string())?;
             let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-            let bytes = self.model_visible_bytes(&value)?;
+            let (encoded, bytes) = self.encode_with_size(value)?;
             if bytes > visible_budget {
                 let proportional_budget = representation_budget
                     .saturating_mul(visible_budget)
@@ -323,7 +323,7 @@ impl BazelMcpServer {
                     "could not persist model-visible inspection metrics"
                 );
             }
-            return self.encode(value);
+            return Ok(encoded);
         }
     }
 
@@ -398,7 +398,7 @@ impl BazelMcpServer {
             };
             let value = serde_json::to_value(&result).map_err(|error| error.to_string())?;
             let limit = if summary.success { 2 * 1024 } else { 8 * 1024 };
-            let bytes = self.model_visible_bytes(&value)?;
+            let (mut encoded, bytes) = self.encode_with_size(value)?;
             if bytes <= limit {
                 if let Err(error) = self
                     .runner
@@ -411,7 +411,6 @@ impl BazelMcpServer {
                         "could not persist model-visible response metrics"
                     );
                 }
-                let mut encoded = self.encode(value)?;
                 if tool_error {
                     encoded.is_error = Some(true);
                 }
@@ -437,32 +436,50 @@ impl BazelMcpServer {
     }
 
     fn model_visible_bytes(&self, value: &serde_json::Value) -> Result<usize, String> {
-        match self.result_encoding {
-            ResultEncoding::Text | ResultEncoding::Structured => serde_json::to_vec(value)
-                .map(|bytes| bytes.len())
-                .map_err(|error| error.to_string()),
-            ResultEncoding::Toon => Self::encode_toon(value).map(|text| text.len()),
-            ResultEncoding::Both => serde_json::to_vec(value)
-                .map(|bytes| bytes.len().saturating_mul(2))
-                .map_err(|error| error.to_string()),
-        }
+        self.encode_with_size(value.clone()).map(|(_, bytes)| bytes)
     }
 
     fn encode(&self, value: serde_json::Value) -> Result<CallToolResult, String> {
+        self.encode_with_size(value).map(|(result, _)| result)
+    }
+
+    fn encode_with_size(
+        &self,
+        value: serde_json::Value,
+    ) -> Result<(CallToolResult, usize), String> {
         Ok(match self.result_encoding {
             ResultEncoding::Text => {
-                CallToolResult::success(vec![ContentBlock::text(value.to_string())])
+                let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+                let bytes = text.len();
+                (
+                    CallToolResult::success(vec![ContentBlock::text(text)]),
+                    bytes,
+                )
             }
             ResultEncoding::Toon => {
-                CallToolResult::success(vec![ContentBlock::text(Self::encode_toon(&value)?)])
+                let text = Self::encode_toon(&value)?;
+                let bytes = text.len();
+                (
+                    CallToolResult::success(vec![ContentBlock::text(text)]),
+                    bytes,
+                )
             }
             ResultEncoding::Structured => {
+                let bytes = serde_json::to_vec(&value)
+                    .map_err(|error| error.to_string())?
+                    .len();
                 let mut result = CallToolResult::default();
                 result.structured_content = Some(value);
                 result.is_error = Some(false);
-                result
+                (result, bytes)
             }
-            ResultEncoding::Both => CallToolResult::structured(value),
+            ResultEncoding::Both => {
+                let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+                let bytes = text.len().saturating_mul(2);
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+                result.structured_content = Some(value);
+                (result, bytes)
+            }
         })
     }
 
