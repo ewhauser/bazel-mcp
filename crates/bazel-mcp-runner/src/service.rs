@@ -1185,9 +1185,19 @@ impl InvocationService {
         if cancellation.is_cancelled() {
             return self.finish_cancelled(queued.request.id).await;
         }
-        let bes_capture = if queued.request.command.class() == CommandClass::BuildLike {
+        let extension_limits = (!self.reducers.is_empty()).then_some({
+            (
+                self.config.starlark_reducers.limits.max_events,
+                self.config.starlark_reducers.limits.max_input_bytes,
+            )
+        });
+        let bes_bep = if queued.request.command.class() == CommandClass::BuildLike {
             match &self.bes {
-                Some(server) => Some(server.register(queued.request.id.to_string(), &paths.bep)?),
+                Some(server) => Some(capture::LiveBepCapture::Bes(capture::BesBepCapture::start(
+                    server.register(queued.request.id.to_string())?,
+                    paths.bep.clone(),
+                    extension_limits,
+                )?)),
                 None => None,
             }
         } else {
@@ -1284,12 +1294,6 @@ impl InvocationService {
                     .map_err(Into::into);
             }
         };
-        let extension_limits = (!self.reducers.is_empty()).then_some({
-            (
-                self.config.starlark_reducers.limits.max_events,
-                self.config.starlark_reducers.limits.max_input_bytes,
-            )
-        });
         #[cfg(unix)]
         let fifo_bep = prepared_fifo.take().map(|(prepared, server_pid)| {
             let client_pid = child.id().unwrap_or_default();
@@ -1354,7 +1358,7 @@ impl InvocationService {
             return Err(error.into());
         }
         #[cfg(unix)]
-        let incremental_bep = fifo_bep.or_else(|| {
+        let incremental_bep = fifo_bep.or(bes_bep).or_else(|| {
             (queued.request.command.class() == CommandClass::BuildLike
                 && self.config.bep_transport != BepTransport::Bes)
                 .then(|| {
@@ -1365,14 +1369,16 @@ impl InvocationService {
                 })
         });
         #[cfg(not(unix))]
-        let incremental_bep = (queued.request.command.class() == CommandClass::BuildLike
-            && self.config.bep_transport != BepTransport::Bes)
-            .then(|| {
-                capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
-                    paths.bep.clone(),
-                    extension_limits,
-                ))
-            });
+        let incremental_bep = bes_bep.or_else(|| {
+            (queued.request.command.class() == CommandClass::BuildLike
+                && self.config.bep_transport != BepTransport::Bes)
+                .then(|| {
+                    capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
+                        paths.bep.clone(),
+                        extension_limits,
+                    ))
+                })
+        });
         let started = Instant::now();
         let timeout = queued
             .request
@@ -1404,30 +1410,11 @@ impl InvocationService {
         };
         process_group.disarm();
         let bazel_wall_ms = duration_millis(started.elapsed());
-        if let Some(capture) = bes_capture {
-            match capture.finish(BES_COMPLETION_GRACE).await {
-                Ok(stats) => {
-                    tracing::debug!(
-                        invocation_id = %queued.request.id,
-                        events = stats.event_count,
-                        bytes = stats.bep_bytes,
-                        "completed BES capture"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        invocation_id = %queued.request.id,
-                        %error,
-                        "BES capture did not complete cleanly; reducing retained prefix"
-                    );
-                }
-            }
-        }
         let postprocess: Result<InvocationRecord, RunnerError> = async {
             let reduction_started = Instant::now();
             let incremental_reduction = match incremental_bep {
                 Some(capture) => {
-                    let reduction = capture.finish().await?;
+                    let reduction = capture.finish(BES_COMPLETION_GRACE).await?;
                     tracing::debug!(
                         invocation_id = %queued.request.id,
                         source = ?reduction.source,

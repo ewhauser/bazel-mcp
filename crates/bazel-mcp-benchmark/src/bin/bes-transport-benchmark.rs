@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -211,7 +212,39 @@ async fn run_bes(
     invocation_id: &str,
 ) -> Result<Duration> {
     let start = Instant::now();
-    let capture = server.register(invocation_id, path)?;
+    let mut capture = server.register(invocation_id)?;
+    let mut captured_events = capture.take_events()?;
+    let sink_path = path.to_owned();
+    let sink = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&sink_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        while let Some(event) = captured_events.blocking_recv() {
+            if event.is_finished() {
+                let result = file.flush().context("flush BES benchmark evidence");
+                event.acknowledge(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                return result;
+            }
+            let result = event
+                .framed_events()
+                .unwrap()
+                .iter()
+                .try_for_each(|framed| {
+                    file.write_all(framed)
+                        .context("write BES benchmark evidence")
+                });
+            event.acknowledge(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            result?;
+        }
+        Ok(())
+    });
     let stream_id = StreamId {
         build_id: format!("build-{invocation_id}"),
         invocation_id: invocation_id.to_owned(),
@@ -260,6 +293,7 @@ async fn run_bes(
         "BES acknowledged {acknowledged} of {expected_acknowledgements} requests"
     );
     let stats = capture.finish(Duration::from_secs(30)).await?;
+    sink.await??;
     ensure!(
         stats.event_count == frames.len() * repetitions,
         "BES retained {} of {} events",

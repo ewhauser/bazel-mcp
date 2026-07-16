@@ -43,13 +43,16 @@ reader because no released installation uses the previous layout.
       v
 3. Bazel execution
    disk:   stdout.log / stderr.log (raw bytes, direct child output)
-           events.bep (varint-length-delimited protobuf, direct Bazel output)
-   memory: only process state, cancellation handle, progress counters
+           events.bep (varint-length-delimited protobuf, authoritative raw BEP)
+   flow:   tail verifies already-written frames; FIFO/BES write frames through
+           the same durability gate before ordered reduction observes them
+   memory: bounded framing state, reducer state, process state, cancellation
       |
       | process exits, is cancelled, or times out
       v
 4. Bounded reduction
-   reads:  events.bep frame by frame into BepAccumulator
+   input:  the same ordered frame stream after its durability gate; a post-hoc
+           events.bep replay remains the fallback after capture inconsistency
            stdout.log query rows in 1 MiB byte chunks for newline counting
            returned query rows only, capped at 64 KiB retained / 4 KiB visible
            2 MiB log tails with complete BEP, otherwise 8 MiB tails

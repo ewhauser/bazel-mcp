@@ -7,8 +7,8 @@ use std::{
 };
 
 use bazel_mcp_bep::proto::{
-    BuildEvent, BuildEventId, File, TestResult as BepTestResult, TestSummary as BepTestSummary,
-    build_event, build_event_id, file,
+    ActionExecuted, BuildEvent, BuildEventId, File, TestResult as BepTestResult,
+    TestSummary as BepTestSummary, build_event, build_event_id, file,
 };
 use bazel_mcp_bep::{encode_event_id, encode_frame};
 use bazel_mcp_policy::PolicyConfig;
@@ -395,6 +395,70 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
             .unwrap()
             .contains("remote_artifact_unavailable")
     );
+}
+
+#[tokio::test]
+async fn preserves_raw_bep_before_redacting_every_persisted_and_visible_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let secret = "token=PIPELINESECRET";
+    let raw_bep = encode_frame(&BuildEvent {
+        payload: Some(build_event::Payload::Action(Box::new(ActionExecuted {
+            success: false,
+            exit_code: 1,
+            r#type: secret.to_owned(),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    });
+    let fixture = root.path().join("secret.bep");
+    tokio::fs::write(&fixture, &raw_bep).await.unwrap();
+    let script = format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\ncp '{}' \"$bep_path\"\nexit 1\n",
+        fixture.display()
+    );
+    let service =
+        service_with_redaction(&root, &workspace, &script, vec![r"token=[^\s]+".to_owned()]).await;
+    let request = InvocationRequest::new(workspace, BazelCommand::Build, vec!["//:secret".into()]);
+    let id = request.id;
+    let record = service.run(request).await.unwrap();
+    assert_eq!(record.state, InvocationState::Failed);
+    assert!(!serde_json::to_string(&record).unwrap().contains(secret));
+
+    let paths = service.store().paths_for(&record);
+    let retained = std::fs::read(&paths.bep).unwrap();
+    assert_eq!(retained, raw_bep);
+    assert!(
+        retained
+            .windows(secret.len())
+            .any(|bytes| bytes == secret.as_bytes())
+    );
+    for path in [&paths.manifest, &paths.details, &paths.artifacts] {
+        if path.exists() {
+            assert!(
+                !String::from_utf8_lossy(&std::fs::read(path).unwrap()).contains(secret),
+                "{} retained an unredacted projection",
+                path.display()
+            );
+        }
+    }
+
+    let inspected = service
+        .inspect(InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            state: None,
+            command: None,
+            view: InspectView::Diagnostics,
+            cursor: None,
+            filter: None,
+            limit: 20,
+            max_bytes: 8 * 1024,
+        })
+        .await
+        .unwrap();
+    assert!(!serde_json::to_string(&inspected).unwrap().contains(secret));
 }
 
 #[tokio::test]

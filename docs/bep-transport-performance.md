@@ -29,40 +29,47 @@ The live benchmark starts persistent tail, FIFO, and BES MCP servers that share
 one Bazel output user root. After two warmups per mode, it rotates the order of
 the modes across `bazel.run build //:bazel-mcp` calls and compares the invocation
 durations reported by Bazel MCP. This includes FIFO creation, the Bazel server
-PID probe, evidence spooling, reduction, and cleanup.
+PID probe, evidence spooling, reduction, and cleanup. The capture-pipeline
+comparison uses nine measured samples and `--lockfile_mode=error` for both the
+clean `109e183` baseline and the refactored working tree.
 
 Results below were measured on macOS arm64 on 2026-07-16.
 
 ## Results
 
-The first BES implementation performed two asynchronous file writes for each
-event: one for the varint length and one for the payload. The optimized pass
-reuses a framing buffer and writes each complete frame once before sending its
-acknowledgement.
+Tail, FIFO, and BES now feed one ordered capture pipeline. Tail frames enter
+after Bazel has written them to the private evidence file. FIFO and BES frames
+pass through an authoritative durable writer first; only then does the reducer
+subscriber observe them. BES hands off at most 64 events or 1 MiB per bounded
+batch. It flushes a partial batch after one scheduler yield, so a valid
+stop-and-wait BES client cannot deadlock, and sends each protocol
+acknowledgement only after the batch is accepted by the durable writer.
 
 | Isolated capture | Median | p95 | Throughput |
 | --- | ---: | ---: | ---: |
-| Bulk `tail` baseline, final run | 1.17 ms | 1.58 ms | 5,342 MiB/s |
-| BES, first pass | 389.85 ms | 394.95 ms | 15.98 MiB/s |
-| BES, optimized | 203.59 ms | 211.99 ms | 30.60 MiB/s |
+| Bulk `tail`, `109e183` baseline | 1.012 ms | 1.532 ms | 6,154 MiB/s |
+| Bulk `tail`, capture pipeline | 1.078 ms | 1.515 ms | 5,781 MiB/s |
+| BES, `109e183` baseline | 200.496 ms | 203.570 ms | 31.07 MiB/s |
+| BES, capture pipeline | 43.953 ms | 46.033 ms | 141.73 MiB/s |
 
-The second pass reduced isolated BES capture time by 47.8%. Its remaining cost
-is primarily per-event gRPC decoding, validation, file-write submission, and
-acknowledgement. Dividing the optimized median by the event count gives about
-12.9 microseconds per event.
+The common pipeline plus bounded handoff reduced isolated BES capture time by
+78.1%, a 4.56x speedup. The bulk-tail control moved by 0.065 ms at the median
+while its p95 improved slightly; that control path is unchanged and the
+sub-millisecond difference is treated as run-to-run noise.
 
-| Warm `build //:bazel-mcp` (7 samples) | Median | p95 |
-| --- | ---: | ---: |
-| `tail` | 275 ms | 277 ms |
-| `fifo` | 271 ms | 273 ms |
-| `bes` | 275 ms | 282 ms |
+| Warm `build //:bazel-mcp` (9 samples) | Baseline median | Pipeline median | Change |
+| --- | ---: | ---: | ---: |
+| `tail` | 273 ms | 269 ms | -4 ms (-1.5%) |
+| `fifo` | 268 ms | 269 ms | +1 ms (+0.4%) |
+| `bes` | 271 ms | 272 ms | +1 ms (+0.4%) |
 
-FIFO was 4 ms (1.5%) faster than regular-file tailing at the median on this
-workload, while BES matched the tail median. The FIFO improvement is modest,
-so FIFO remains an explicit POSIX optimization rather than replacing the
-portable default. The isolated bulk-write comparison still makes BES's
-per-event protocol overhead visible even though it overlaps with the build in
-the live workload.
+Whole-invocation performance is effectively flat. Tail and FIFO p95 improved
+or stayed equal; BES p95 moved from 280 ms to 289 ms in this nine-sample run,
+while its median changed by only 1 ms. FIFO therefore remains an explicit
+POSIX optimization rather than replacing the portable default. The isolated
+result shows the reduced BES ingestion cost clearly, while the live result
+shows that incremental reduction and the durability gate do not materially
+change ordinary build latency.
 
 ## Reproduce
 
