@@ -16,6 +16,9 @@ efficiency. Do not include secrets or raw sensitive output.
 
 ### 2026-07-16
 
+- A persistent CI disk cache can bypass an embedded remote-cache smoke server
+  even with isolated output bases; disable unrelated cache layers when testing
+  transport-specific reads and writes, and report observed request counts.
 - Listing full durable invocation records exhausted 8 KiB and destructive byte
   shrinking erased IDs and states; keep ledger rows compact and direct users to
   per-invocation views for canonical arguments and detailed diagnostics.
