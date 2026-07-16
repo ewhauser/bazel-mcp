@@ -1,0 +1,24 @@
+# bazel-mcp
+
+> A local MCP server that runs Bazel for coding agents, returns bounded actionable results, and retains complete invocation evidence for narrow follow-up inspection.
+
+bazel-mcp exposes exactly three tools: bazel.run, bazel.inspect, and bazel.cancel. It never invokes Bazel through a shell. Raw evidence stays local, while summaries, durable metadata, and telemetry are redacted.
+
+## Start here
+
+- [Get started](https://ewhauser.github.io/bazel-mcp/getting-started/): Install the server, connect an MCP client, and run the first build.
+- [How it works](https://ewhauser.github.io/bazel-mcp/concepts/how-it-works/): Evidence lifecycle, response budgets, encodings, and the security boundary.
+- [Tool reference](https://ewhauser.github.io/bazel-mcp/tools/): The complete public MCP tool surface.
+- [Configuration](https://ewhauser.github.io/bazel-mcp/reference/generated/configuration/): Authoritative settings and CLI options.
+
+## Guides
+
+- [Debug a failure](https://ewhauser.github.io/bazel-mcp/guides/debugging-failures/): Root-cause-first debugging with targeted inspection.
+- [Long-running builds](https://ewhauser.github.io/bazel-mcp/guides/long-running-builds/): Negotiated MCP task execution and recovery.
+- [Architecture](https://ewhauser.github.io/bazel-mcp/project/architecture/): Runtime flow and design specifications.
+
+## Evidence
+
+- [Benchmarks](https://ewhauser.github.io/bazel-mcp/reference/generated/benchmarks/): Reproducible token and visible-byte measurements.
+- [Security](https://ewhauser.github.io/bazel-mcp/reference/generated/security/): Vulnerability reporting and local execution threat model.
+- [Full documentation context](https://ewhauser.github.io/bazel-mcp/llms-full.txt): Concatenated core project documentation.

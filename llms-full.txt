@@ -1,0 +1,959 @@
+# bazel-mcp documentation context
+
+# README
+
+
+[![CI](https://github.com/ewhauser/bazel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ewhauser/bazel-mcp/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-50d994.svg)](https://ewhauser.github.io/bazel-mcp/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Run Bazel from MCP-compatible coding agents without filling their context
+windows with build logs.
+
+`bazel-mcp` is a local [Model Context Protocol](https://modelcontextprotocol.io/)
+server. It runs Bazel in your workspace, returns a compact actionable result,
+and keeps the complete invocation evidence available for inspection when an
+agent needs more detail.
+
+Read the [documentation](https://ewhauser.github.io/bazel-mcp/) for installation,
+guided workflows, configuration, architecture, and reproducible benchmarks.
+
+## Why bazel-mcp?
+
+Bazel output can be enormous. Sending complete progress output, repeated
+warnings, and test logs to a coding agent wastes context and can hide the error
+that matters.
+
+`bazel-mcp` gives agents:
+
+- concise summaries of successful and failed invocations;
+- structured diagnostics, test results, coverage, artifacts, and query output;
+- filtered, paginated access to retained evidence;
+- cancellation of queued or running commands.
+
+Bazel still runs locally with your workspace, configured credentials,
+toolchains, and remote execution settings.
+
+## Quick start
+
+### Requirements
+
+- macOS, Linux, or Windows x86_64 (preview)
+- Bazel 8 or 9, Bazelisk, or an executable workspace-local `tools/bazel`
+- an MCP-compatible client
+- Bazelisk when building from source (the repository pins Bazel and Rust)
+
+### Install with Homebrew
+
+```sh
+brew install ewhauser/tap/bazel-mcp
+```
+
+### Install from a release
+
+Download a prebuilt archive from the
+[latest GitHub release](https://github.com/ewhauser/bazel-mcp/releases/latest),
+or run the shell installer on macOS or Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ewhauser/bazel-mcp/releases/latest/download/bazel-mcp-server-installer.sh | sh
+```
+
+On Windows, run the PowerShell installer:
+
+```powershell
+irm https://github.com/ewhauser/bazel-mcp/releases/latest/download/bazel-mcp-server-installer.ps1 | iex
+```
+
+### Build from source
+
+Clone the repository and build the server with the pinned Bazel and Rust
+toolchains:
+
+```sh
+git clone https://github.com/ewhauser/bazel-mcp.git
+cd bazel-mcp
+bazelisk build -c opt //:bazel-mcp
+```
+
+The binary is written to `bazel-bin/crates/bazel-mcp-server/bazel-mcp`.
+
+### Connect your MCP client
+
+Register the binary as a stdio MCP server. The exact settings location depends
+on your client.
+
+```json
+{
+  "mcpServers": {
+    "bazel": {
+      "command": "bazel-mcp"
+    }
+  }
+}
+```
+
+If you built from source without installing the binary, use the absolute path
+to `bazel-bin/crates/bazel-mcp-server/bazel-mcp` instead.
+
+Restart the client, open a Bazel workspace, and try prompts such as:
+
+- “Build `//app:server`.”
+- “Run the tests under `//services/...` and explain any failures.”
+- “Which targets depend on `//lib:core`?”
+
+No configuration file is required. By default, the server can run Bazel in any
+workspace accessible to the current user. See [Security and local data](#security-and-local-data)
+to restrict it to specific roots.
+
+## Tools
+
+The server exposes three tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `bazel.run` | Run an allowed Bazel command and return a bounded summary. |
+| `bazel.inspect` | Read filtered diagnostics, tests, coverage, artifacts, query results, or logs from an invocation. |
+| `bazel.cancel` | Cancel a queued or running invocation. |
+
+`bazel.run` supports `build`, `test`, `coverage`, `query`, `cquery`, `aquery`,
+and selected informational commands. Successful results are limited to 2 KiB
+and unsuccessful results to 8 KiB. Follow-up `bazel.inspect` calls are also
+bounded and paginated, so an agent only retrieves the evidence it needs.
+
+Failure results rank concrete root causes before aggregated action failures.
+Equivalent fanout failures are represented once with `target: null` and a
+`repetition_count`. Test and coverage commands use Bazel's
+`--test_output=errors`. Failed-test logs are copied into private invocation
+storage before they are exposed; test results report `test_log_available` or an
+explicit `test_log_unavailable_reason`, never a synthetic or local failure-log
+URI.
+
+The `summary` view returns structured counts and bounded diagnostics. The `log`
+and `test_log` views deliberately have the simpler logical shape below in every
+result encoding:
+
+```json
+{
+  "invocation_id": "019...",
+  "view": "test_log",
+  "items": [
+    "[//foo:foo_test] assertion error: expected 3, received 4"
+  ],
+  "next_cursor": null,
+  "truncated": false
+}
+```
+
+The MCP shape has no stdout/stderr field or selector. The server automatically
+normalizes, redacts, exactly deduplicates, filters, and sequences both captured
+streams. Requested item limits are maxima; serialized byte packing may return
+fewer items with an opaque cursor that resumes after the last emitted item.
+
+Long calls can be returned as durable task handles when the MCP client declares
+task support. With the default `auto` policy, the server discovers the
+negotiated protocol and chooses synchronous execution, MCP `2025-11-25` legacy
+tasks, or the `io.modelcontextprotocol/tasks` extension at runtime. This does
+not add tools: task status, result, and cancellation are protocol methods.
+
+## MCP protocol shape
+
+MCP clients normally produce these messages on an agent's behalf, but the wire
+shape is useful when integrating or debugging a host. `bazel-mcp` uses
+newline-delimited JSON-RPC 2.0 over stdio; the examples below are formatted
+across lines for readability and omit unrelated response fields.
+
+| Flow | Client signal | Initial result | Final result |
+| --- | --- | --- | --- |
+| Synchronous | No task capability, or `sync_only` policy | `CallToolResult` | Same `tools/call` response |
+| Legacy tasks | MCP `2025-11-25` plus `params.task` | Nested `result.task` | Separate `tasks/result` call |
+| Tasks extension | Extension capability in request `_meta` | Flat `resultType: "task"` | Inline in terminal `tasks/get` |
+
+<details>
+<summary>Show representative JSON-RPC messages</summary>
+
+### Synchronous call
+
+A basic call is an ordinary MCP tool request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "bazel.run",
+    "arguments": {
+      "workspace": "/src/project",
+      "command": "build",
+      "args": ["//app:server"]
+    }
+  }
+}
+```
+
+Without a compatible task opt-in, the request remains attached and returns a
+normal `CallToolResult`. The default `toon` encoding places the bounded logical
+result in one text content block:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "invocation_id: \"019f...\"\nstate: succeeded\ncommand: build\nexit_code: 0\nheadline: Build succeeded\nmore_available: true"
+    }],
+    "isError": false
+  }
+}
+```
+
+That `invocation_id` can be passed to `bazel.inspect` or `bazel.cancel`.
+Different result encodings change the content representation, not the logical
+result or its byte budget.
+
+### Legacy MCP tasks
+
+A client negotiating MCP `2025-11-25` sees
+`bazel.run.execution.taskSupport = "optional"`. It opts into detached execution
+by adding `params.task` to the same tool call:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "bazel.run",
+    "arguments": {
+      "workspace": "/src/project",
+      "command": "test",
+      "args": ["//services/..."]
+    },
+    "task": {}
+  }
+}
+```
+
+The response contains a nested task. Its `taskId` is also the Bazel invocation
+ID, and it is readable as soon as the handle is returned:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "task": {
+      "taskId": "019f...",
+      "status": "working",
+      "ttl": 86400000,
+      "pollInterval": 2000
+    },
+    "_meta": {
+      "io.modelcontextprotocol/related-task": {
+        "taskId": "019f..."
+      }
+    }
+  }
+}
+```
+
+The client polls `tasks/get`, waits for the original `CallToolResult` with
+`tasks/result`, lists durable handles with `tasks/list`, or requests
+`tasks/cancel`.
+
+### Tasks extension
+
+Modern extension-aware clients can discover the capability with
+`server/discover`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "server/discover",
+  "params": {}
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "capabilities": {
+      "extensions": {
+        "io.modelcontextprotocol/tasks": {}
+      }
+    }
+  }
+}
+```
+
+After negotiating the extension's `2026-06-30` base protocol, each participating
+request declares the extension in `_meta`. The initial result is flat rather
+than nested:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "bazel.run",
+    "arguments": {
+      "workspace": "/src/project",
+      "command": "build",
+      "args": ["//app:server"]
+    },
+    "_meta": {
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/tasks": {}
+        }
+      }
+    }
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "resultType": "task",
+    "taskId": "019f...",
+    "status": "working",
+    "ttlMs": 86400000,
+    "pollIntervalMs": 2000
+  }
+}
+```
+
+Here the client polls `tasks/get`; once terminal, that response contains the
+original `CallToolResult` inline in its `result` field. The extension has no
+`tasks/result` or `tasks/list` methods. Both task dialects are durable across a
+server restart, while clients that declare neither continue to use the simpler
+synchronous shape.
+
+</details>
+
+See [specification 003](specs/003-configurable-mcp-task-execution.md) for the
+complete negotiation matrix, cancellation semantics, error codes, and pinned
+protocol revisions.
+
+## Security and local data
+
+`bazel-mcp` executes Bazel with the permissions of the user who started the MCP
+client. It does not make untrusted repositories safe; use a sandbox or isolated
+account for untrusted source.
+
+The server:
+
+- invokes Bazel directly without shell evaluation or concatenated arguments;
+- denies `clean`, `fetch`, `mobile-install`, `run`, `shutdown`, and `sync` by
+  default;
+- prevents requests from overriding server-owned BEP and output-root flags;
+- filters the child-process environment and supports configurable regex
+  redaction;
+- stores raw output and BEP evidence only in the local cache, using private file
+  permissions.
+
+To restrict the server to one or more workspace roots, add a repeated
+`--allow-root` argument to the MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "bazel": {
+      "command": "bazel-mcp",
+      "args": ["--allow-root", "/absolute/path/to/workspaces"]
+    }
+  }
+}
+```
+
+See [SECURITY.md](SECURITY.md) for the security policy and threat-model
+guidance.
+
+## Configuration
+
+The built-in defaults cover personal local use. For workspace restrictions,
+retention limits, timeouts, command policy, result encoding, BEP transport, or
+custom redaction, start with [`examples/config.toml`](examples/config.toml).
+
+BEP capture defaults to the private binary-file (`tail`) path so existing
+remote BES and BuildBuddy configurations keep working. Set
+`bep_transport = "bes"` to use bazel-mcp's loopback gRPC Build Event Service.
+See [BEP transport performance](docs/bep-transport-performance.md) for the
+design tradeoffs, measured results, and reproduction commands.
+
+Pass a configuration explicitly with `--config`, set `BAZEL_MCP_CONFIG`, or
+place it at `$XDG_CONFIG_HOME/bazel-mcp/config.toml` (normally
+`~/.config/bazel-mcp/config.toml`). Command-line options can also add allowed
+roots or override the cache directory.
+
+See the [configuration reference](docs/configuration.md) for all settings and
+their defaults.
+
+### Result formats
+
+TOON is the default model-visible result format. Select a different format in
+the server configuration when required by an MCP host:
+
+```toml
+result_encoding = "toon"
+```
+
+| Value | Representation | When to use it |
+| --- | --- | --- |
+| `toon` | One token-oriented TOON text block. | Default; use for compact model context. |
+| `text` | One compact JSON text block. | Use when a host or downstream tool expects JSON text. |
+| `structured` | MCP `structuredContent` only. | Use with hosts verified to consume structured content without duplicating it into model context. |
+| `both` | Structured content plus compact JSON text. | Compatibility mode for hosts that need both representations; it has the largest model-visible footprint. |
+
+The setting applies to the server, not individual tool calls. Restart the MCP
+server after changing it. All four choices carry the same logical result,
+redaction, and byte ceilings; they only change its model-visible representation.
+
+## Compatibility
+
+| Component | Supported |
+| --- | --- |
+| Bazel | Major versions 8 and 9 |
+| Platforms | macOS and Linux; Windows x86_64 preview |
+| Transport | Local MCP over stdio |
+| Bazel discovery | `tools/bazel`, then Bazelisk, then Bazel on `PATH` |
+| Task execution | Synchronous fallback, MCP `2025-11-25` legacy tasks, and the SEP-2663 Tasks extension |
+
+Other Bazel major versions are rejected before an invocation is created unless
+they are explicitly enabled in the configuration.
+
+Use `mcp_execution_policy = "sync_only"` if a host cannot consume task-shaped
+results. Use `tasks_required` only when detached execution is mandatory; calls
+from clients without compatible capabilities are then rejected before Bazel
+starts. See the [configuration reference](docs/configuration.md#configure-negotiated-task-execution)
+for TTL and polling settings.
+
+## Performance
+
+### Deterministic invocation benchmark
+
+Across three independent five-sample runs against a pinned Abseil corpus,
+`bazel-mcp` reduced cumulative model context by 89.73–90.69% compared with a
+default shell agent. The latest run measured an 89.73% reduction, with 0.00%
+median paired Bazel wall-time overhead.
+
+These results are deterministic tokenizer estimates, not provider billing. See
+the [benchmark methodology](docs/benchmarks.md) for the complete results,
+corpus, acceptance gates, and reproduction commands.
+
+### Agentic coding benchmark
+
+In a five-sample run over two high-output Abseil coding tasks,
+`gpt-5.6-luna` at `xhigh` reasoning solved all 10 attempts with both the direct
+shell and compact-JSON MCP adapters. The JSON MCP arm reduced
+provider-reported total tokens by **36.88%** and active tokens by **41.77%**
+when cached input was assigned zero weight.
+
+| Metric | Shell Bazel | `bazel-mcp` | Reduction |
+| --- | ---: | ---: | ---: |
+| Verified solves | 10/10 | 10/10 | parity |
+| Total tokens | 2,444,393 | 1,542,870 | 36.88% |
+| Active tokens, 0% cached-input weight | 479,593 | 279,254 | 41.77% |
+| Agent time | 653.2s | 637.1s | 2.46% |
+
+A second five-sample run compared the same MCP tools using compact JSON and
+TOON. Both encodings again solved every attempt, while TOON reduced total
+provider tokens by **11.99%** and the retained MCP result payload by **35.69%**.
+
+| Metric | Compact JSON | TOON | Reduction |
+| --- | ---: | ---: | ---: |
+| Verified solves | 10/10 | 10/10 | parity |
+| Total tokens | 1,624,930 | 1,430,032 | 11.99% |
+| MCP result bytes | 48,785 | 31,375 | 35.69% |
+
+The comparison includes MCP schema and tool-call overhead. See the
+[checked-in agentic benchmark report](docs/agentic-benchmark-report.md) for
+task-level results, cache sensitivity, integrity checks, and limitations, or
+the [TOON comparison report](docs/toon-agentic-benchmark-report.md) for the
+format-specific run. See
+the [agentic benchmark methodology](docs/benchmarks.md#agentic-coding-benchmark)
+to reproduce it.
+
+## Contributing
+
+Contributions are welcome. The usual local checks are:
+
+```sh
+make build
+make test
+make check
+```
+
+Runner, BEP, policy, or reducer changes should also run
+`make test-bazel-matrix`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening
+a pull request.
+
+Architecture and protocol decisions are recorded under [`specs/`](specs/).
+
+## License
+
+`bazel-mcp` is available under the [MIT License](LICENSE).
+
+
+---
+
+# Configuration
+
+
+`bazel-mcp` works without a configuration file. The built-in defaults allow
+any Bazel workspace available to the current user and retain invocation
+evidence in a local cache.
+
+For shared environments or tighter local controls, configure allowed workspace
+roots, command policy, retention, timeouts, environment variables, and
+redaction explicitly.
+
+## Loading configuration
+
+The server looks for configuration in this order:
+
+1. the file passed with `--config`;
+2. the file named by `BAZEL_MCP_CONFIG`;
+3. `$XDG_CONFIG_HOME/bazel-mcp/config.toml`, or
+   `~/.config/bazel-mcp/config.toml` when `XDG_CONFIG_HOME` is not set;
+4. built-in defaults.
+
+The default path is used only when the file already exists. Command-line
+`--allow-root` values are added to roots read from the file, and `--cache-root`
+overrides the configured cache directory.
+
+Start with the repository's [example configuration](../examples/config.toml):
+
+```sh
+mkdir -p ~/.config/bazel-mcp
+cp examples/config.toml ~/.config/bazel-mcp/config.toml
+```
+
+Replace the example workspace path before starting the server.
+
+## Common settings
+
+### Restrict workspace access
+
+An empty `allowed_roots` list permits every workspace available to the current
+user. Production or shared configurations should list one or more absolute
+roots:
+
+```toml
+allowed_roots = ["/work/company", "/work/open-source"]
+```
+
+A requested workspace must be contained by one of these roots. The invocation
+cache cannot be located inside an allowed workspace root.
+
+For a single root, the equivalent CLI option is:
+
+```sh
+bazel-mcp --allow-root /work/company
+```
+
+### Select Bazel
+
+By default, `bazel-mcp` looks for an executable in this order:
+
+1. `tools/bazel` in the requested workspace;
+2. `bazelisk` on `PATH`;
+3. `bazel` on `PATH`.
+
+Set an explicit executable to bypass discovery:
+
+```toml
+bazel_executable = "/usr/local/bin/bazelisk"
+```
+
+### Pass environment variables
+
+Child Bazel processes always receive `HOME`, `PATH`, `TMPDIR`, `TEMP`, `TMP`,
+and `USER` when those variables are present. Add other variable names to the
+allowlist when they are required by credentials, toolchains, or remote
+execution:
+
+```toml
+environment_allowlist = ["GOOGLE_APPLICATION_CREDENTIALS", "JAVA_HOME"]
+```
+
+### Redact sensitive text
+
+Configured regular expressions are replaced with `[REDACTED]` before text is
+written to summaries, durable metadata, or telemetry:
+
+```toml
+redaction_patterns = [
+  "(?i)authorization: bearer [^\\s]+",
+  "(?i)token=[^\\s]+",
+]
+```
+
+Raw evidence remains local and should still be treated as sensitive.
+
+### Choose BEP transport
+
+```toml
+bep_transport = "tail"
+```
+
+`tail` is the backwards-compatible default. Bazel writes the private binary
+BEP file directly, so an existing remote `--bes_backend` or BuildBuddy setup
+continues to receive events.
+
+`bes` starts a plaintext gRPC Build Event Service on an ephemeral loopback
+port and configures Bazel to publish to it with
+`--bes_upload_mode=wait_for_upload_complete`. The service validates the
+invocation ID and stream sequence with Buffa views, then reconstructs the same
+private varint-delimited `events.bep` file used by reducers and inspection.
+Select this mode explicitly because Bazel supports only one `--bes_backend`;
+caller-supplied remote BES flags are rejected in this mode. The listener is
+never exposed outside the local host.
+
+See [BEP transport performance](bep-transport-performance.md) for benchmark
+methodology, current results, and reproduction commands.
+
+### Choose a result encoding
+
+```toml
+result_encoding = "toon"
+```
+
+Available values are:
+
+| Value | MCP result |
+| --- | --- |
+| `text` | Compact JSON in one text content block. |
+| `toon` | Token-oriented TOON text in one content block. This is the default. |
+| `structured` | MCP structured content only. |
+| `both` | Structured content plus backwards-compatible JSON text. |
+
+### Configure negotiated task execution
+
+```toml
+mcp_execution_policy = "auto"
+task_ttl_seconds = 86400
+task_poll_interval_ms = 2000
+```
+
+`auto` is the recommended default. The server discovers support at runtime and
+uses synchronous execution for ordinary clients, the experimental task flow
+for clients negotiating MCP `2025-11-25` and sending `params.task`, or the
+`io.modelcontextprotocol/tasks` extension for clients negotiating its
+`2026-06-30` base protocol and declaring the extension in per-request
+capabilities. The task dialect is never selected from a host name.
+
+`sync_only` always returns an ordinary `CallToolResult` for new calls. Existing
+unexpired task handles remain readable and cancellable after a restart or
+policy change. `tasks_required` rejects `bazel.run` before starting Bazel when
+the client did not declare a compatible task flow.
+
+The TTL is the minimum time a terminal task result remains available. A task
+that is still queued or running never expires. The poll interval is advisory
+and must be between 100 and 60,000 milliseconds.
+
+## Reference
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `allowed_roots` | `[]` | Absolute roots containing workspaces the server may access. An empty list allows any workspace. |
+| `cache_root` | Platform user cache under `bazel-mcp` | Directory for metadata, logs, and BEP evidence. |
+| `bep_transport` | `tail` | BEP ingestion path: private binary file (`tail`) or loopback Build Event Service (`bes`). |
+| `bazel_executable` | unset | Explicit Bazel or Bazelisk executable. |
+| `output_user_root` | unset | Isolated Bazel output user root managed by the server. |
+| `allowed_commands` | build, test, coverage, query commands, and selected informational commands | Commands eligible to run. |
+| `denied_commands` | `clean`, `fetch`, `mobile-install`, `run`, `shutdown`, `sync` | Commands rejected even if also present in `allowed_commands`. |
+| `environment_allowlist` | `[]` | Additional environment variables passed to Bazel. |
+| `redaction_patterns` | `[]` | Regular expressions removed from model-visible and persisted text fields. |
+| `global_concurrency` | `4` | Maximum concurrent Bazel invocations. |
+| `maximum_pending_invocations` | `256` | Maximum queued and running invocations. Must be at least `global_concurrency`. |
+| `default_timeout_seconds` | `1800` | Timeout used when a request omits one. |
+| `maximum_timeout_seconds` | `7200` | Maximum timeout accepted from a request. |
+| `cancellation_interrupt_grace_seconds` | `10` | Time allowed after the initial interrupt. |
+| `cancellation_terminate_grace_seconds` | `5` | Additional time allowed after termination. |
+| `progress_initial_seconds` | `30` | Delay before the first MCP progress notification. |
+| `progress_interval_seconds` | `60` | Interval between later progress notifications. |
+| `mcp_execution_policy` | `auto` | New-run policy: `auto`, `sync_only`, or `tasks_required`. |
+| `task_ttl_seconds` | `86400` | Minimum terminal task-result availability window; must be greater than zero. |
+| `task_poll_interval_ms` | `2000` | Suggested task polling interval, from 100 through 60,000 ms. |
+| `retention_days` | `7` | Maximum age of retained invocation evidence. |
+| `maximum_storage_bytes` | `10737418240` | Maximum cache size before older evidence is removed. |
+| `retention_cleanup_interval_seconds` | `3600` | Interval between retention sweeps. |
+| `result_encoding` | `toon` | Model-visible result representation. |
+| `supported_bazel_major_versions` | `[8, 9]` | Bazel major versions accepted by default. |
+| `allow_unsupported_bazel_versions` | `false` | Allow majors outside `supported_bazel_major_versions`. |
+| `version_check_timeout_seconds` | `30` | Timeout for the pre-invocation Bazel version check. |
+| `isolated_bazel_server_idle_seconds` | `60` | Bazel server idle timeout used with `output_user_root`. |
+
+## CLI options
+
+Run `bazel-mcp --help` for the authoritative command-line reference:
+
+| Option | Description |
+| --- | --- |
+| `--config <PATH>` | Read configuration from a TOML file. |
+| `--allow-root <PATH>` | Add an allowed workspace root. May be repeated. |
+| `--cache-root <PATH>` | Override the invocation cache directory. |
+| `--log <FILTER>` | Set the tracing filter written to stderr. |
+
+Standard output is reserved for MCP protocol frames. Tracing and diagnostics
+are always written to standard error.
+
+
+---
+
+# Token benchmark
+
+
+The token integration benchmark measures how much Bazel-related context an
+agent sees when using `bazel-mcp`, a default shell, or a shell with optimized
+instructions. It also measures Bazel wall-time overhead independently from
+model-visible output.
+
+## Results
+
+Three independent five-sample runs against a pinned Abseil commit measured an
+89.73–90.69% reduction in cumulative model context compared with a default
+shell agent.
+
+The latest recorded run produced these results:
+
+| Baseline | Context reduction | Visible-byte reduction | Median Bazel overhead |
+| --- | ---: | ---: | ---: |
+| Default shell | 89.73% (95% CI 87.28–91.38%) | 96.43% (95% CI 95.40–97.09%) | 0.00% |
+| Optimized shell instructions | 94.46% (95% CI 91.90–95.89%) | 97.54% (95% CI 96.53–98.15%) | -0.33% |
+
+These numbers are deterministic tokenizer estimates, not provider billing.
+
+## Corpus and method
+
+The corpus is
+[`abseil/abseil-cpp`](https://github.com/abseil/abseil-cpp) at commit
+`5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a`, using Bazel 9.1.0 and
+`tiktoken-rs` with the `o200k_base` encoding.
+
+Every run covers six real build, test, query, and failure scenarios under cold
+and warm cache conditions. Five samples produce 180 paired adapter
+observations per run. Adapter order rotates, every observation receives an
+isolated output root, and confidence intervals use deterministic paired
+bootstrap resampling.
+
+The generated reports retain environment metadata, raw evidence, checksummed
+transcripts, and the inputs needed to review a comparison. Reports,
+transcripts, and evidence are excluded from source control because they are
+large and may contain local paths.
+
+## Acceptance gates
+
+The credential-free integration benchmark enforces these gates against both
+shell baselines:
+
+- at least 75% cumulative context reduction;
+- at least 75% model-visible byte reduction;
+- a lower 95% confidence bound of at least 75% for both reductions;
+- no more than 3% median paired Bazel wall-time overhead.
+
+## Reproduce the benchmark
+
+Install the development dependencies described in
+[CONTRIBUTING.md](../CONTRIBUTING.md), then set up the pinned corpus once:
+
+```sh
+make setup-oss-corpus
+```
+
+Run the deterministic acceptance benchmark:
+
+```sh
+make test-token-integration
+```
+
+Package the latest report and its reviewable evidence under
+`.cache/published-benchmarks`:
+
+```sh
+make publish-token-benchmark
+```
+
+The scheduled
+[token integration workflow](https://github.com/ewhauser/bazel-mcp/actions/workflows/token-integration.yml)
+repeats the acceptance run on Linux and macOS and retains its artifact bundle
+for 30 days.
+
+## Live-agent comparison
+
+The live benchmark uses the Codex CLI JSON event stream to compare
+provider-reported input, cached-input, output, and total tokens for the same
+three adapters:
+
+```sh
+make bench-token-live
+```
+
+The live comparison is separate from the deterministic acceptance gate because
+provider behavior and billing metrics can change independently of the local
+tokenizer estimate.
+
+## Agentic coding benchmark
+
+The agentic benchmark measures complete coding attempts rather than a single
+Bazel invocation. Codex receives a clean, disposable snapshot of the pinned
+Abseil corpus, investigates a task, edits source or BUILD files, runs Bazel as
+often as needed, and returns a structured final response. A host-side verifier
+then tests the patch without exposing its additional test package to the agent.
+The latest presentation run is preserved in the
+[checked-in agentic benchmark report](agentic-benchmark-report.md).
+The compact-JSON versus TOON comparison is preserved in the
+[checked-in TOON agentic benchmark report](toon-agentic-benchmark-report.md).
+
+Every task and sample is run against identical snapshots with these adapters:
+
+- `shell-default`: Codex uses its shell for Bazel;
+- `shell-optimized`: Codex uses the shell with output and polling guidance;
+- `shell-mcp-loaded`: Codex uses the shell while the Bazel MCP schemas are
+  loaded but prohibited, isolating fixed MCP context overhead;
+- `bazel-mcp`: compact-JSON control; Codex uses the shell for inspection and
+  editing, but every Bazel invocation must use `bazel.run` or `bazel.inspect`;
+- `bazel-mcp-toon`: production-default TOON encoding with the same MCP-only
+  Bazel policy.
+
+The shell adapters find an instrumented executable on `PATH` that launches
+Bazel directly with an isolated output user root and preserves stdout and
+stderr unchanged. For the MCP adapter, that executable refuses direct shell
+Bazel calls. The harness also audits Codex JSONL events and fails tool-path
+validation when the expected adapter was not used.
+
+The harness snapshots the proxy and MCP server executables into the run
+directory before starting the first attempt. Concurrent local builds therefore
+cannot change adapter behavior partway through a comparison.
+
+Codex runs with `danger-full-access` for every adapter because Bazel's
+persistent server needs loopback sockets and process inspection that the macOS
+`workspace-write` sandbox blocks. Keep agentic runs on the pinned disposable
+corpus: this setting equalizes the comparison but is not appropriate for an
+untrusted repository.
+
+Each report includes provider-reported input, cached-input, uncached-input,
+output, reasoning, and total tokens; verified solve rate; tokens per verified
+solve; changed paths; patch size; agent messages; tool calls; captured command
+and MCP output bytes; and end-to-end time. Task-level paired tables keep
+heterogeneous workload effects visible instead of relying only on an aggregate.
+Cached-input sensitivity tables
+report weighted totals at 0%, 25%, and 100% cached-input weights without
+assuming a particular price. Aggregate
+token comparisons use paired, task-clustered bootstrap confidence intervals.
+Concordant-solve savings are reported only for pairs where both adapters pass
+the independent verifier. A failed or contaminated attempt therefore cannot
+look efficient merely because it stopped early.
+
+Adapter order is cyclically counterbalanced by task and sample. The checked-in
+corpus currently contains four deterministic tasks:
+
+- a source fix with a held-out whitespace regression test;
+- a BUILD dependency fix whose C++ sources and tests are protected;
+- a noisy 512-case test regression that requires a failing run before editing;
+- a shared macro regression that fans out into 48 failing compile actions.
+
+Set up the pinned corpus before the first run:
+
+```sh
+make setup-oss-corpus
+```
+
+Run one sample of all four tasks against the default shell and MCP adapters.
+This launches eight paid Codex attempts:
+
+```sh
+make bench-agentic-smoke
+```
+
+Run the full five-sample comparison, which launches forty paid attempts for
+the current four-task, two-adapter corpus:
+
+```sh
+make bench-agentic-live
+```
+
+The presentation target selects only the two high-output tasks. At five
+samples it launches twenty paid attempts:
+
+```sh
+make bench-agentic-presentation
+```
+
+Run the three-arm control smoke to measure fixed MCP schema overhead. It
+launches six paid attempts:
+
+```sh
+make bench-agentic-control-smoke
+```
+
+Compare the compact-JSON MCP result encoding with TOON on the two
+high-output tasks. At five samples it launches twenty paid attempts:
+
+```sh
+make bench-agentic-toon
+```
+
+Agentic Make targets pin `gpt-5.6-luna` with `xhigh` reasoning by default.
+Override `AGENTIC_MODEL`, `AGENTIC_REASONING_EFFORT`, or `AGENTIC_ARGS` to
+change the experiment:
+
+```sh
+make bench-agentic-presentation AGENTIC_MODEL=MODEL AGENTIC_REASONING_EFFORT=high
+```
+
+Raw JSONL, stderr, verifier logs, patches, and reports are retained under
+`.cache/benchmarks/abseil-cpp/agentic-<run-id>/`. They are excluded from source
+control and may contain local paths. `LATEST_AGENTIC` identifies the most
+recent completed run. Paid runs are manual and are not pull-request checks.
+
+
+---
+
+# Security
+
+
+Security fixes are supported for the latest release. Please report a
+vulnerability privately through GitHub Security Advisories rather than a public
+issue.
+
+`bazel-mcp` executes Bazel with the invoking user's permissions. Allowed roots,
+command policy, reserved flags, a filtered child environment, response budgets,
+and regex redaction reduce risk but do not make untrusted repositories safe.
+Use a sandbox or isolated account for untrusted source. Invocation logs and BEP
+files may contain source paths and compiler output; they are stored with private
+permissions, retained locally, and should be treated as sensitive.
+
+
+---
+
+# Contributing
+
+
+Install the pinned Rust toolchain, Bazelisk, Git, a C++ toolchain, and the tools
+provided by `nix develop`. Run `make setup-hooks` once per checkout.
+
+Use the root Makefile as the stable interface. Before opening a pull request,
+run `make check` and `make test`; run `make test-bazel-matrix` for runner, BEP,
+policy, or reducer changes. Reducer changes require reviewed fixture/snapshot
+diffs. Raw fixtures must not contain usernames, hostnames, credentials, or
+absolute local paths.
+
+Fuzz with `make fuzz-smoke` or `make fuzz-run FUZZ_TARGET=<name>`. Set up the
+explicit Abseil cache with `make setup-oss-corpus`; normal tests never fetch it.
+
+Commits and squash-merge PR titles follow Conventional Commits, for example
+`feat(server): add bounded coverage inspection`. Release Please owns versions
+and `CHANGELOG.md`; do not edit release versions manually.

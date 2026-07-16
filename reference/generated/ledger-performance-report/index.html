@@ -1,0 +1,249 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-vdxcvpsm"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Ledger performance report | bazel-mcp</title><link rel="canonical" href="https://ewhauser.github.io/bazel-mcp/reference/generated/ledger-performance-report/"/><link rel="sitemap" href="/bazel-mcp/sitemap-index.xml"/><link rel="shortcut icon" href="/bazel-mcp/og.png" type="image/png"/><meta name="generator" content="Astro v7.1.0"/><meta name="generator" content="Starlight v0.41.3"/><meta property="og:title" content="Ledger performance report"/><meta property="og:type" content="article"/><meta property="og:url" content="https://ewhauser.github.io/bazel-mcp/reference/generated/ledger-performance-report/"/><meta property="og:locale" content="en"/><meta property="og:description" content="Feature coverage, failure cases, latency measurements, and improvement opportunities."/><meta property="og:site_name" content="bazel-mcp"/><meta name="description" content="Feature coverage, failure cases, latency measurements, and improvement opportunities."/><meta property="og:image" content="https://ewhauser.github.io/bazel-mcp/og.png"/><meta name="twitter:card" content="summary_large_image"/><meta name="theme-color" content="#07100d"/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg><svg aria-hidden="true" class="dark astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg><svg aria-hidden="true" class="auto astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg></template><link rel="stylesheet" href="/bazel-mcp/_astro/print.ehPL0gv-.css" media="print"><link rel="stylesheet" href="/bazel-mcp/_astro/common.DR9aHWDW.css"><script type="module" src="/bazel-mcp/_astro/page.B2uBVZjk.js"></script></head><body class="astro-vdxcvpsm"><a class="sl-skip-link astro-vxeigawq" href="#_top">Skip to content</a><div class="page sl-flex astro-gqpr5s5a"><header class="header astro-gqpr5s5a"><div class="header astro-nczgtkxc"><div class="title-wrapper sl-flex astro-nczgtkxc"><a href="/bazel-mcp/" class="site-title sl-flex astro-clw6ags5"><span class="astro-clw6ags5" translate="no">bazel-mcp</span></a></div><div class="sl-flex print:hidden astro-nczgtkxc"><site-search class="astro-nczgtkxc astro-r5ar4xm7" data-translations="{&quot;placeholder&quot;:&quot;Search&quot;}"><button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-r5ar4xm7"><svg aria-hidden="true" class="astro-r5ar4xm7 astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg><span class="sl-hidden md:sl-block astro-r5ar4xm7" aria-hidden="true">Search</span><kbd class="sl-hidden md:sl-flex astro-r5ar4xm7" style="display: none;"><kbd class="astro-r5ar4xm7">Ctrl</kbd><kbd class="astro-r5ar4xm7">K</kbd></kbd></button><dialog style="padding:0" aria-label="Search" class="astro-r5ar4xm7"><div class="dialog-frame sl-flex astro-r5ar4xm7"><button data-close-modal class="sl-flex md:sl-hidden astro-r5ar4xm7">Cancel</button><div class="search-container astro-r5ar4xm7"><div id="starlight__search" class="astro-r5ar4xm7"></div></div></div></dialog></site-search><script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script><script type="module" src="/bazel-mcp/_astro/Search.astro_astro_type_script_index_0_lang.znVdiOLc.js"></script></div><div class="sl-hidden md:sl-flex print:hidden right-group astro-nczgtkxc"><div class="sl-flex social-icons astro-nczgtkxc"><a href="https://github.com/ewhauser/bazel-mcp" rel="me" class="sl-flex astro-cg55etiy"><span class="sr-only astro-cg55etiy">GitHub</span><svg aria-hidden="true" class="astro-cg55etiy astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="dark" class="astro-r2p65idu">Dark</option><option value="light" class="astro-r2p65idu">Light</option><option value="auto" selected class="astro-r2p65idu">Auto</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><script type="module">var e=`starlight-theme`,t=e=>e===`auto`||e===`dark`||e===`light`?e:`auto`,n=()=>t(typeof localStorage<`u`&&localStorage.getItem(e));function r(t){typeof localStorage<`u`&&localStorage.setItem(e,t===`light`||t===`dark`?t:``)}var i=()=>matchMedia(`(prefers-color-scheme: light)`).matches?`light`:`dark`;function a(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e===`auto`?i():e,r(e)}matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,()=>{n()===`auto`&&a(`auto`)});var o=class extends HTMLElement{constructor(){super(),a(n()),this.querySelector(`select`)?.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&a(t(e.currentTarget.value))})}};customElements.define(`starlight-theme-select`,o);</script><script type="module">var e=class extends HTMLElement{constructor(){super();let e=this.querySelector(`select`);e&&(e.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=e.currentTarget.value)}),window.addEventListener(`pageshow`,t=>{if(!t.persisted)return;let n=e.querySelector(`option[selected]`)?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}};customElements.define(`starlight-lang-select`,e);</script></div></div></header><nav class="sidebar print:hidden astro-gqpr5s5a" aria-label="Main"><starlight-menu-button class="print:hidden astro-vvx7mffu"><button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-vvx7mffu"><svg aria-hidden="true" class="open-menu astro-vvx7mffu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg><svg aria-hidden="true" class="close-menu astro-vvx7mffu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg></button></starlight-menu-button><script type="module">var e=class extends HTMLElement{btn=this.querySelector(`button`);constructor(){super(),this.btn.addEventListener(`click`,()=>this.toggleExpanded());let e=this.closest(`nav`);e&&e.addEventListener(`keyup`,e=>this.closeOnEscape(e)),matchMedia(`(min-width: 50em)`).addEventListener(`change`,()=>this.setExpanded(!1))}setExpanded(e){this.setAttribute(`aria-expanded`,String(e)),document.body.toggleAttribute(`data-mobile-menu-expanded`,e),document.querySelectorAll(`.main-frame, .sl-skip-link`).forEach(t=>{t.toggleAttribute(`inert`,e)})}toggleExpanded(){this.setExpanded(this.getAttribute(`aria-expanded`)!==`true`)}closeOnEscape(e){e.code===`Escape`&&(this.setExpanded(!1),this.btn.focus())}};customElements.define(`starlight-menu-button`,e);</script><div id="starlight__sidebar" class="sidebar-pane astro-gqpr5s5a"><div class="sidebar-content sl-flex astro-gqpr5s5a"><sl-sidebar-state-persist data-hash="11n4cxh" class="astro-f5yvicm7"><script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script><ul class="top-level astro-ojxuodky"><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Start</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="0"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/bazel-mcp/" class="astro-ojxuodky"><span class="astro-ojxuodky">Overview</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/getting-started/" class="astro-ojxuodky"><span class="astro-ojxuodky">Get started</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Use bazel-mcp</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="1"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/bazel-mcp/concepts/how-it-works/" class="astro-ojxuodky"><span class="astro-ojxuodky">How it works</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/tools/" class="astro-ojxuodky"><span class="astro-ojxuodky">Tools</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/guides/debugging-failures/" class="astro-ojxuodky"><span class="astro-ojxuodky">Debug a failure</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/guides/long-running-builds/" class="astro-ojxuodky"><span class="astro-ojxuodky">Long-running builds</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Reference</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="2"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/configuration/" class="astro-ojxuodky"><span class="astro-ojxuodky">Configuration</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/benchmarks/" class="astro-ojxuodky"><span class="astro-ojxuodky">Benchmarks</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/agentic-benchmark-report/" class="astro-ojxuodky"><span class="astro-ojxuodky">Agentic benchmark</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/toon-agentic-benchmark-report/" class="astro-ojxuodky"><span class="astro-ojxuodky">TOON benchmark</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/bep-transport-performance/" class="astro-ojxuodky"><span class="astro-ojxuodky">BEP transport</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/storage-performance/" class="astro-ojxuodky"><span class="astro-ojxuodky">Storage performance</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Project</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="3"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/bazel-mcp/project/architecture/" class="astro-ojxuodky"><span class="astro-ojxuodky">Architecture</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/security/" class="astro-ojxuodky"><span class="astro-ojxuodky">Security</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/contributing/" class="astro-ojxuodky"><span class="astro-ojxuodky">Contributing</span></a></li><li class="astro-ojxuodky"><a href="/bazel-mcp/reference/generated/changelog/" class="astro-ojxuodky"><span class="astro-ojxuodky">Changelog</span></a></li></ul></details></li></ul><script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script></sl-sidebar-state-persist><div class="md:sl-hidden"><div class="mobile-preferences sl-flex astro-b5gddk54"><div class="social-icons astro-b5gddk54"><a href="https://github.com/ewhauser/bazel-mcp" rel="me" class="sl-flex astro-cg55etiy"><span class="sr-only astro-cg55etiy">GitHub</span><svg aria-hidden="true" class="astro-cg55etiy astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="dark" class="astro-r2p65idu">Dark</option><option value="light" class="astro-r2p65idu">Light</option><option value="auto" selected class="astro-r2p65idu">Auto</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script></div></div></div></div></nav><div class="main-frame astro-gqpr5s5a"><script type="module">var e=document.getElementById(`starlight__sidebar`),t=e?.querySelector(`sl-sidebar-state-persist`),n=`sl-sidebar-state`,r=()=>{let r=[],i=t?.dataset.hash||``;try{let e=sessionStorage.getItem(n),t=JSON.parse(e||`{}`);Array.isArray(t.open)&&t.hash===i&&(r=t.open)}catch{}return{hash:i,open:r,scroll:e?.scrollTop||0}},i=e=>{try{sessionStorage.setItem(n,JSON.stringify(e))}catch{}},a=()=>i(r()),o=(e,t)=>{let n=r();n.open[t]=e,i(n)};t?.addEventListener(`click`,e=>{if(!(e.target instanceof Element))return;let t=e.target.closest(`summary`)?.closest(`details`);if(!t)return;let n=t.querySelector(`sl-sidebar-restore`),r=parseInt(n?.dataset.index||``);isNaN(r)||o(!t.open,r)}),addEventListener(`visibilitychange`,()=>{document.visibilityState===`hidden`&&a()}),addEventListener(`pageHide`,a);</script><div class="lg:sl-flex astro-abfeecmu"><aside class="right-sidebar-container print:hidden astro-abfeecmu"><div class="right-sidebar astro-abfeecmu"><div class="lg:sl-hidden astro-q5mffni3"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-5ulgm6bh"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-5ulgm6bh"><details id="starlight__mobile-toc" class="astro-5ulgm6bh"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-5ulgm6bh"><span class="toggle sl-flex astro-5ulgm6bh">On this page<svg aria-hidden="true" class="caret astro-5ulgm6bh astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></span><span class="display-current astro-5ulgm6bh"></span></summary><div class="dropdown astro-5ulgm6bh"><ul class="isMobile astro-cxyftcne" style="--depth: 0;"><li style="--depth: 0;" class="astro-cxyftcne"><a href="#_top" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Overview</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#scope-and-provenance" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Scope and provenance</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#sequential-features" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Sequential features</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#deliberately-exercised-failures" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Deliberately exercised failures</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#ledger-review-and-generic-improvements" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Ledger review and generic improvements</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#benchmark-method-and-results" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Benchmark method and results</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#validation" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Validation</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#overfitting-risks" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Overfitting risks</span></a></li></ul></div></details></nav></mobile-starlight-toc><script type="module" src="/bazel-mcp/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.BcSo_yiZ.js"></script></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-q5mffni3"><div class="sl-container astro-q5mffni3"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-cxyftcne" style="--depth: 0;"><li style="--depth: 0;" class="astro-cxyftcne"><a href="#_top" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Overview</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#scope-and-provenance" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Scope and provenance</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#sequential-features" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Sequential features</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#deliberately-exercised-failures" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Deliberately exercised failures</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#ledger-review-and-generic-improvements" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Ledger review and generic improvements</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#benchmark-method-and-results" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Benchmark method and results</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#validation" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Validation</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#overfitting-risks" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Overfitting risks</span></a></li></ul></nav></starlight-toc><script type="module" src="/bazel-mcp/_astro/TableOfContents.astro_astro_type_script_index_0_lang.Csloo1VZ.js"></script></div></div></div></aside><div class="main-pane astro-abfeecmu"><main data-pagefind-body class="astro-vdxcvpsm" lang="en" dir="ltr"><div class="content-panel astro-oil7k7jf"><div class="sl-container astro-oil7k7jf"><h1 id="_top" class="astro-2sm4b3ln">Ledger performance report</h1></div></div><div class="content-panel astro-oil7k7jf"><div class="sl-container astro-oil7k7jf"><div class="sl-markdown-content"><div class="sl-heading-wrapper level-h2"><h2 id="scope-and-provenance">Scope and provenance</h2><a class="sl-anchor-link" href="#scope-and-provenance"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Scope and provenance”</span></a></div>
+<p>Work started on <code dir="auto">codex/ledger-performance</code> from fetched <code dir="auto">origin/main</code> commit
+<code dir="auto">a439d44345113a63e63a7b00c330eb20a48538f6</code>.</p>
+<p>Homebrew initially provided <code dir="auto">ewhauser/tap/bazel-mcp-server</code> 0.1.0. Its release
+archive checksum was
+<code dir="auto">ea0bf3799c369f5cf542c34eeeff107aa3c136c494a51213ffbdc4102a69de07</code>, and the
+installed executable checksum was
+<code dir="auto">5fd34748f3d6dc6a0ecad394a3a497ebd52711646fe757b344909839c41780f1</code>.
+That executable was preserved only as provenance because it was older than
+<code dir="auto">origin/main</code> and was not used as the performance baseline.</p>
+<p>The fetched <code dir="auto">origin/main</code> source was built through <code dir="auto">bazel.run</code> for
+<code dir="auto">//:bazel-mcp</code> (invocation <code dir="auto">019f6994-4fee-7f20-aadc-fb8b7968336a</code>). The resulting
+0.2.0 executable was copied over the Homebrew-linked executable and preserved
+as the benchmark baseline with SHA-256
+<code dir="auto">13aefacd618b00aafefc056a7e52d870df6752a9b96350b5a476bbe1b0b069c3</code>.</p>
+<p>The first optimized candidate at <code dir="auto">c40715f</code> was built through <code dir="auto">bazel.run</code> and
+preserved with SHA-256
+<code dir="auto">1d68388fef79834e58c9cb043d07ef6d3a020dfc78e9ed4d84621f52c6408f0a</code>.
+The exact deliverable was rebuilt through <code dir="auto">bazel.run</code> after the test-only lint
+cleanup and validation fixes (invocation
+<code dir="auto">019f69be-420d-7cc1-afdd-3fcb8116be94</code>), copied over the Homebrew-linked
+executable, and preserved with SHA-256
+<code dir="auto">e0612520f06a37b62298d377d1c08a6d360fb0b5efc80041dbd1f1ea9d0930a0</code>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="sequential-features">Sequential features</h2><a class="sl-anchor-link" href="#sequential-features"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Sequential features”</span></a></div>
+<ol>
+<li><code dir="auto">6626127</code> exposes a workspace-scoped retained-invocation ledger through
+<code dir="auto">bazel.inspect</code> with <code dir="auto">view=invocations</code>.</li>
+<li><code dir="auto">7695d8a</code> adds a caller-selected inspection response ceiling clamped from 512
+through 8192 model-visible bytes.</li>
+<li><code dir="auto">e9c6efd</code> adds invocation-state filtering and binds pagination cursors to the
+state filter.</li>
+<li><code dir="auto">7b910aa</code> adds Bazel-command filtering and binds pagination cursors to the
+command filter.</li>
+<li><code dir="auto">9f61b81</code> adds a dedicated <code dir="auto">metrics</code> view for lifecycle timestamps,
+termination, byte counts, queue/Bazel/reduction latency, and inspection
+telemetry.</li>
+</ol>
+<p>Each feature was validated before the next feature began, and each completed
+feature was rebuilt and copied over the Homebrew-linked executable.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="deliberately-exercised-failures">Deliberately exercised failures</h2><a class="sl-anchor-link" href="#deliberately-exercised-failures"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Deliberately exercised failures”</span></a></div>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Invocation</th>
+<th>Evidence and recovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rust compiler</td>
+<td><code dir="auto">019f6997-c24d-7a83-9b75-19745e5a10bd</code></td>
+<td>Making <code dir="auto">invocation_id</code> optional before updating its consumer produced E0308: expected <code dir="auto">&amp;str</code>, found <code dir="auto">&amp;Option&lt;String&gt;</code>. <code dir="auto">bazel.inspect view=log</code> retained the exact location and type mismatch. Updating the handler and adding a ledger test restored the build.</td>
+</tr>
+<tr>
+<td>Rust test</td>
+<td><code dir="auto">019f699a-896e-7581-b163-d5a1ba6e9b5a</code></td>
+<td>A stale budget expectation produced Bazel test exit code 3. <code dir="auto">view=test_log</code> identified <code dir="auto">inspection_byte_budget_is_bounded</code>, with left 8192 and right 4096. Correcting the expected default restored the test.</td>
+</tr>
+<tr>
+<td>BUILD file</td>
+<td><code dir="auto">019f69a0-94b5-7c10-9dcb-e44376af68ef</code></td>
+<td>The dependency label <code dir="auto">bazel_mcp_runer</code> failed during analysis. The initial MCP result retained Bazel’s <code dir="auto">did you mean bazel_mcp_runner?</code> suggestion. Correcting the BUILD label restored analysis and tests.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="ledger-review-and-generic-improvements">Ledger review and generic improvements</h2><a class="sl-anchor-link" href="#ledger-review-and-generic-improvements"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Ledger review and generic improvements”</span></a></div>
+<p>The first ledger implementation returned complete durable records. Three rows
+filled the 8 KiB ceiling because every row repeated canonical startup flags,
+full summaries, diagnostics, and local cache paths. At 4 KiB the result could
+not fit at all. With multiple failed rows, generic string shrinking eventually
+replaced IDs, states, commands, and diagnostics with empty strings, satisfying
+the byte limit while destroying the evidence.</p>
+<p><code dir="auto">59df058</code> replaces those records with purpose-built rows containing identity,
+workspace, state, command, bounded requested arguments, timestamps, exit code,
+duration, headline, target/test counts, and selected byte telemetry. It also
+retries with a smaller page size so the returned opaque cursor follows the last
+emitted row. The same 4 KiB failed-only request then returned all three failures
+with intact evidence.</p>
+<p>The ledger also showed zero model-visible bytes and inspection calls for
+short-lived MCP clients. The store intentionally debounced telemetry writes by
+250 ms, but stdio shutdown could drop the pending update. <code dir="auto">199ad3a</code> adds an
+explicit pending-telemetry flush during graceful shutdown. A fresh <code dir="auto">info</code>
+invocation subsequently persisted 493 model-visible bytes; after one separate
+metrics inspection, the next server process observed 986 bytes and one inspect
+call.</p>
+<p>Finally, profiling the benchmarked handler path showed that JSON results were
+serialized once for byte accounting and again for response encoding. <code dir="auto">c40715f</code>
+combines those operations without changing text, TOON, structured, or combined
+result semantics.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="benchmark-method-and-results">Benchmark method and results</h2><a class="sl-anchor-link" href="#benchmark-method-and-results"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Benchmark method and results”</span></a></div>
+<p><a href="https://github.com/ewhauser/bazel-mcp/blob/main/scripts/benchmarks/run-mcp-inspect-latency.py"><code dir="auto">run-mcp-inspect-latency.py</code></a>
+starts each preserved executable with a fresh store outside the workspace,
+initializes MCP, creates one retained record through <code dir="auto">bazel.run</code>, warms the
+selected <code dir="auto">bazel.inspect</code> view, and measures repeated stdio tool-call round
+trips. Server startup and the setup <code dir="auto">bazel.run</code> are deliberately outside the
+sample. Baseline/candidate order alternates by pair. The environment was macOS
+15.7.7 arm64, Python 3.14.6, and Bazel 9.2.0.</p>
+<table>
+<thead>
+<tr>
+<th>Workload</th>
+<th style="text-align: right">Samples</th>
+<th style="text-align: right">Baseline median</th>
+<th style="text-align: right">Candidate median</th>
+<th style="text-align: right">Median ratio improvement</th>
+<th style="text-align: right">Median paired improvement</th>
+<th style="text-align: right">Minimum paired improvement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">info release</code>, <code dir="auto">summary</code></td>
+<td style="text-align: right">9 pairs, 1,000 calls each, 100 warmups</td>
+<td style="text-align: right">156.319 us</td>
+<td style="text-align: right">145.788 us</td>
+<td style="text-align: right">6.74%</td>
+<td style="text-align: right">6.72%</td>
+<td style="text-align: right">4.23%</td>
+</tr>
+<tr>
+<td><code dir="auto">query //...</code>, <code dir="auto">query_results</code>, limit 20</td>
+<td style="text-align: right">7 pairs, 500 calls each, 50 warmups</td>
+<td style="text-align: right">331.095 us</td>
+<td style="text-align: right">302.434 us</td>
+<td style="text-align: right">8.66%</td>
+<td style="text-align: right">8.71%</td>
+<td style="text-align: right">7.19%</td>
+</tr>
+</tbody>
+</table>
+<p>Example reproduction, after producing preserved baseline and candidate binaries
+through <code dir="auto">bazel.run</code>:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/bazel-mcp/_astro/ec.v4551.css"><script type="module" src="/bazel-mcp/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="sh"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">python3</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/benchmarks/run-mcp-inspect-latency.py</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--baseline</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/path/to/origin-main-bazel-mcp</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--candidate</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/path/to/candidate-bazel-mcp</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--baseline-label</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">origin-main-a439d44</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--candidate-label</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">final</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--workspace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$PWD</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--cache-parent</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$HOME</span><span style="--0:#ECC48D;--1:#984E4D">/Library/Caches/bazel-mcp-inspect-benchmark</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--pairs</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">9</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--calls</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">1000</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--warmup</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">100</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="python3 scripts/benchmarks/run-mcp-inspect-latency.py \  --baseline /path/to/origin-main-bazel-mcp \  --candidate /path/to/candidate-bazel-mcp \  --baseline-label origin-main-a439d44 \  --candidate-label final \  --workspace &quot;$PWD&quot; \  --cache-parent &quot;$HOME/Library/Caches/bazel-mcp-inspect-benchmark&quot; \  --pairs 9 --calls 1000 --warmup 100"><div></div></button></div></figure></div>
+<p>The query cross-check adds <code dir="auto">--command query --argument //... --view query_results --limit 20 --pairs 7 --calls 500 --warmup 50</code>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="validation">Validation</h2><a class="sl-anchor-link" href="#validation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Validation”</span></a></div>
+<ul>
+<li><code dir="auto">make test</code> passed the complete Cargo workspace, including 16 runner process
+tests, 30 store tests, server shutdown coverage, reducer goldens, and doc
+tests.</li>
+<li><code dir="auto">make mcp-conformance</code> passed synchronous, legacy-task, extension-task, and
+policy conformance while retaining the three-tool public surface.</li>
+<li><code dir="auto">cargo fmt --all -- --check</code>, Clippy across the workspace with all targets and
+features under <code dir="auto">-D warnings</code>, and <code dir="auto">cargo shear</code> all passed. <code dir="auto">make check</code> could
+not enter its Nix development shell because this host has no <code dir="auto">nix</code> command,
+so those underlying checks were run directly.</li>
+<li><code dir="auto">bazel.run test //...</code> passed 26 targets and all 12 Bazel tests in invocation
+<code dir="auto">019f69bb-6554-75e2-82a8-8370bd0cfc2a</code>. Its first clean run exposed a missing
+direct BEP dependency in the standalone runner process test; <code dir="auto">c49b356</code> fixed
+the BUILD declaration before the successful rerun.</li>
+<li>The direct Bazel matrix passed all 14 cases on Bazel 7.6.1, 8.4.2, and 9.1.0.
+A focused 9.1.0 rerun passed after <code dir="auto">598cea3</code> moved generated workspaces outside
+the repository so later <code dir="auto">//...</code> traversals cannot enter them.</li>
+<li>Python bytecode compilation for the benchmark harness and shell syntax
+validation for the matrix script passed.</li>
+<li><code dir="auto">make fuzz-smoke</code> could not start because the host has neither <code dir="auto">rustup</code> nor a
+nightly Cargo toolchain. No fuzz result is claimed.</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="overfitting-risks">Overfitting risks</h2><a class="sl-anchor-link" href="#overfitting-risks"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Overfitting risks”</span></a></div>
+<ul>
+<li>These are local model-boundary microbenchmarks, not end-to-end Bazel build
+benchmarks. They intentionally exclude server startup and Bazel execution.</li>
+<li>The result is specific to macOS arm64, local stdio, the text encoding, one
+repository, and two inspection shapes. TOON, structured output, Windows,
+Linux, remote filesystems, and high concurrency may have different ratios.</li>
+<li>Summary timings had scheduler noise: one of nine paired rounds improved by
+less than 5%, even though both median measures exceeded the gate. The claim is
+therefore a median improvement, not a per-call or per-run guarantee.</li>
+<li>The query-results cross-check reduces single-payload overfitting risk and all
+seven exact-deliverable pairs exceeded 7%, but it still uses warm local
+caches.</li>
+<li>Candidate functionality differs from the baseline because the five requested
+features and ledger fixes are present. The optimized code path itself is
+generic across every tool result, but future regressions should be assessed
+against the preserved checksums and multiple response sizes.</li>
+</ul>
+</div><footer class="sl-flex astro-xhxjzfa7"><div class="meta sl-flex astro-xhxjzfa7"><a href="https://github.com/ewhauser/bazel-mcp/edit/main/docs/ledger-performance-report.md" class="sl-flex print:hidden astro-xk5gmzsg"><svg aria-hidden="true" class="astro-xk5gmzsg astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a></div><div class="pagination-links print:hidden astro-jgq3vlii" dir="ltr"></div></footer></div></div></main></div></div></div></div></body></html>
