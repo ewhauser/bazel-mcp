@@ -32,10 +32,15 @@ toml.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+regex.workspace = true
 tempfile.workspace = true
 
 [[bench]]
 name = "reduction"
+harness = false
+
+[[bench]]
+name = "custom_reducers"
 harness = false
 
 [[bin]]

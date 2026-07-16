@@ -4,7 +4,7 @@ mod config;
 mod handler;
 
 pub use bazel_mcp_runner::BepTransport;
-pub use config::{Cli, McpExecutionPolicy, ResultEncoding, ServerConfig};
+pub use config::{Cli, McpExecutionPolicy, ResultEncoding, ServerConfig, StarlarkConfig};
 pub use handler::BazelMcpServer;
 
 use anyhow::Context;
@@ -56,6 +56,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
             ),
             maximum_pending_invocations: config.maximum_pending_invocations,
             bep_transport: config.bep_transport,
+            starlark_reducers: config.starlark.runner_config(),
         },
     )
     .await?;

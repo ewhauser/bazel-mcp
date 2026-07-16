@@ -16,7 +16,8 @@ use bazel_mcp_policy::{
     validate_workspace,
 };
 use bazel_mcp_reducer::{
-    Budget, StreamReductionOutput, finalize_diagnostics, normalize_terminal_text,
+    Budget, REDUCER_API_VERSION, ReducerContext, ReducerPipeline, StarlarkReducerConfig,
+    StreamReductionOutput, finalize_diagnostics, load_starlark_reducers, normalize_terminal_text,
     parse_go_diagnostic, parse_lcov_reader, parse_test_xml,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
@@ -32,6 +33,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    task,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +70,7 @@ pub struct RunnerConfig {
     pub version_check_timeout: Duration,
     pub maximum_pending_invocations: usize,
     pub bep_transport: BepTransport,
+    pub starlark_reducers: StarlarkReducerConfig,
 }
 
 impl Default for RunnerConfig {
@@ -86,6 +89,7 @@ impl Default for RunnerConfig {
             version_check_timeout: Duration::from_secs(30),
             maximum_pending_invocations: 256,
             bep_transport: BepTransport::Tail,
+            starlark_reducers: StarlarkReducerConfig::default(),
         }
     }
 }
@@ -130,6 +134,8 @@ pub enum RunnerError {
     BesBackendConflict,
     #[error("BES transport owns --bes_upload_mode so capture is complete before reduction")]
     BesUploadModeConflict,
+    #[error("invalid custom reducer configuration: {0}")]
+    ReducerConfiguration(String),
 }
 
 #[derive(Clone)]
@@ -143,6 +149,7 @@ pub struct InvocationService {
     live: Arc<Mutex<HashMap<InvocationId, CancellationToken>>>,
     version_cache: Arc<Mutex<HashMap<VersionCacheKey, u32>>>,
     bes: Option<BesServer>,
+    reducers: ReducerPipeline,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -315,6 +322,9 @@ impl InvocationService {
             ));
         }
         let redactor = Redactor::new(&config.policy.redaction_patterns)?;
+        let reducers = load_starlark_reducers(&config.starlark_reducers).map_err(|error| {
+            RunnerError::ReducerConfiguration(redactor.redact_bounded(&error.to_string(), 8 * 1024))
+        })?;
         Ok(Self {
             store,
             global: Arc::new(Semaphore::new(config.global_concurrency)),
@@ -325,6 +335,7 @@ impl InvocationService {
             live: Arc::new(Mutex::new(HashMap::new())),
             version_cache: Arc::new(Mutex::new(HashMap::new())),
             bes,
+            reducers,
         })
     }
 
@@ -1333,7 +1344,14 @@ impl InvocationService {
                 } else {
                     (0, Vec::new())
                 };
-            let (bep, bep_outcome) = capture::reduce_bep(paths.bep.clone()).await?;
+            let extension_limits = (!self.reducers.is_empty()).then_some({
+                (
+                    self.config.starlark_reducers.limits.max_events,
+                    self.config.starlark_reducers.limits.max_input_bytes,
+                )
+            });
+            let (bep, bep_outcome) =
+                capture::reduce_bep(paths.bep.clone(), extension_limits).await?;
             if let Some(error) = &bep_outcome.terminal_error {
                 tracing::warn!(invocation_id = %queued.request.id, %error, "partially decoded BEP");
             }
@@ -1375,6 +1393,8 @@ impl InvocationService {
                 mut summary,
                 mut artifacts,
                 canonical_arguments,
+                reducer_events,
+                reducer_input_truncated,
             } = reduced.unwrap_or_else(|_| {
                 tracing::warn!(
                     invocation_id = %queued.request.id,
@@ -1384,6 +1404,8 @@ impl InvocationService {
                     summary: fallback_summary(exit_code, bazel_wall_ms, &stderr, &stdout),
                     artifacts: Vec::new(),
                     canonical_arguments: None,
+                    reducer_events: Vec::new(),
+                    reducer_input_truncated: false,
                 }
             });
             let canonical_arguments = canonical_arguments.map(|mut arguments| {
@@ -1422,7 +1444,63 @@ impl InvocationService {
             }
             self.enrich_tests(paths, &queued.request.workspace, &mut summary, &artifacts)
                 .await;
-            finalize_diagnostics(&mut summary, Budget::result_default());
+            if queued.request.command == BazelCommand::Coverage {
+                summary.coverage = self
+                    .load_coverage(&queued.request.workspace, &artifacts)
+                    .await;
+            }
+            let mut custom_headline = None;
+            let mut custom_notices = Vec::new();
+            if !self.reducers.is_empty() {
+                let context = self.reducer_context(
+                    &queued.request,
+                    exit_code,
+                    bazel_wall_ms,
+                    &stdout,
+                    &stderr,
+                    reducer_events,
+                    reducer_input_truncated,
+                    &summary,
+                );
+                let reducers = self.reducers.clone();
+                let (next_summary, report) = task::spawn_blocking(move || {
+                    let mut next_summary = summary;
+                    let report = reducers.apply(&context, &mut next_summary);
+                    (next_summary, report)
+                })
+                .await?;
+                summary = next_summary;
+                if report.headline_applied {
+                    custom_headline = Some(summary.headline.clone());
+                }
+                for name in report.applied {
+                    let name = self.redactor.redact_bounded(&name, 128);
+                    tracing::debug!(invocation_id = %queued.request.id, reducer = %name, "applied custom reducer");
+                }
+                for failure in report.failures {
+                    let name = self.redactor.redact_bounded(&failure.name, 128);
+                    let error = self.redactor.redact_bounded(&failure.error, 2 * 1024);
+                    tracing::warn!(
+                        invocation_id = %queued.request.id,
+                        reducer = %name,
+                        %error,
+                        "custom reducer failed; native result retained"
+                    );
+                    custom_notices.push(custom_reducer_notice(format!(
+                        "Custom reducer {:?} failed; native reducer output was retained",
+                        name
+                    )));
+                }
+                for collision in report.override_collisions {
+                    let collision = self.redactor.redact_bounded(&collision, 512);
+                    tracing::warn!(invocation_id = %queued.request.id, %collision, "custom reducer override collision");
+                    custom_notices.push(custom_reducer_notice(collision));
+                }
+            }
+            finalize_with_custom_notices(&mut summary, custom_notices);
+            if let Some(headline) = custom_headline {
+                summary.headline = headline;
+            }
             if !summary.success && summary.inspect_hint.is_none() {
                 let view = if summary
                     .tests
@@ -1434,11 +1512,6 @@ impl InvocationService {
                     "log"
                 };
                 summary.inspect_hint = Some(view.to_owned());
-            }
-            if queued.request.command == BazelCommand::Coverage {
-                summary.coverage = self
-                    .load_coverage(&queued.request.workspace, &artifacts)
-                    .await;
             }
             self.sanitize_summary(queued.request.id, &queued.request.workspace, &mut summary);
             let metrics = InvocationMetrics {
@@ -1575,6 +1648,94 @@ impl InvocationService {
             for file in &mut coverage.files {
                 file.path = sanitize(&file.path, 1_000);
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reducer_context(
+        &self,
+        request: &InvocationRequest,
+        exit_code: Option<i32>,
+        elapsed_ms: u64,
+        stdout: &[u8],
+        stderr: &[u8],
+        mut events: Vec<bazel_mcp_reducer::ReducerEvent>,
+        mut input_truncated: bool,
+        summary: &bazel_mcp_types::InvocationSummary,
+    ) -> ReducerContext {
+        let maximum_input = self.config.starlark_reducers.limits.max_input_bytes;
+        let workspace = request.workspace.to_string_lossy();
+        let sanitize = |value: &str, maximum_bytes| {
+            self.redactor.redact_bounded(
+                &value.replace(workspace.as_ref(), "<workspace>"),
+                maximum_bytes,
+            )
+        };
+        let stdout = normalize_terminal_text(stdout);
+        let stderr = normalize_terminal_text(stderr);
+        let (stdout_limit, stderr_limit) = match (stdout.is_empty(), stderr.is_empty()) {
+            (false, true) => (maximum_input, 0),
+            (true, false) => (0, maximum_input),
+            _ => (
+                maximum_input / 2,
+                maximum_input.saturating_sub(maximum_input / 2),
+            ),
+        };
+        input_truncated |= stdout.len() > stdout_limit || stderr.len() > stderr_limit;
+        let stdout = sanitize(&stdout, stdout_limit);
+        let stderr = sanitize(&stderr, stderr_limit);
+        for event in &mut events {
+            event.label = event
+                .label
+                .as_deref()
+                .map(|value| sanitize(value, 4 * 1024));
+            event.target_kind = event
+                .target_kind
+                .as_deref()
+                .map(|value| sanitize(value, 4 * 1024));
+            event.action_type = event
+                .action_type
+                .as_deref()
+                .map(|value| sanitize(value, 4 * 1024));
+            event.message = event
+                .message
+                .as_deref()
+                .map(|value| sanitize(value, 64 * 1024));
+        }
+        const MAX_ARGUMENTS: usize = 1_024;
+        let raw_arguments = request
+            .startup_arguments
+            .iter()
+            .chain(request.arguments.iter());
+        let arguments = raw_arguments
+            .take(MAX_ARGUMENTS)
+            .map(|value| sanitize(value, 4 * 1024))
+            .collect::<Vec<_>>();
+        input_truncated |= request
+            .startup_arguments
+            .len()
+            .saturating_add(request.arguments.len())
+            > MAX_ARGUMENTS;
+        let mut baseline = summary.clone();
+        finalize_diagnostics(
+            &mut baseline,
+            Budget {
+                max_bytes: maximum_input / 4,
+                max_items: self.config.starlark_reducers.limits.max_output_items,
+            },
+        );
+        self.sanitize_summary(request.id, &request.workspace, &mut baseline);
+        ReducerContext {
+            api_version: REDUCER_API_VERSION,
+            command: request.command.as_str().to_owned(),
+            arguments,
+            exit_code,
+            elapsed_ms,
+            stdout,
+            stderr,
+            events,
+            input_truncated,
+            baseline,
         }
     }
 
@@ -2286,6 +2447,58 @@ fn set_test_log_unavailable(summary: &mut bazel_mcp_types::InvocationSummary, re
     {
         test.test_log_available = false;
         test.test_log_unavailable_reason = Some(reason.to_owned());
+    }
+}
+
+fn custom_reducer_notice(message: String) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Note,
+        category: DiagnosticCategory::Bazel,
+        message,
+        location: None,
+        target: None,
+        action: None,
+        repetition_count: 1,
+    }
+}
+
+fn finalize_with_custom_notices(
+    summary: &mut bazel_mcp_types::InvocationSummary,
+    notices: Vec<Diagnostic>,
+) {
+    if notices.is_empty() {
+        finalize_diagnostics(summary, Budget::result_default());
+        return;
+    }
+    let mut notice_summary = bazel_mcp_types::InvocationSummary {
+        success: true,
+        diagnostics: notices,
+        ..Default::default()
+    };
+    finalize_diagnostics(
+        &mut notice_summary,
+        Budget {
+            max_bytes: 1024,
+            max_items: 4,
+        },
+    );
+    let notices = notice_summary.diagnostics;
+    let notice_bytes = notices
+        .iter()
+        .map(|notice| notice.message.len())
+        .sum::<usize>();
+    let budget = Budget::result_default();
+    finalize_diagnostics(
+        summary,
+        Budget {
+            max_bytes: budget.max_bytes.saturating_sub(notice_bytes),
+            max_items: budget.max_items.saturating_sub(notices.len()),
+        },
+    );
+    summary.diagnostics.extend(notices);
+    if notice_summary.truncated {
+        summary.truncated = true;
+        summary.inspect_hint = Some("diagnostics".to_owned());
     }
 }
 

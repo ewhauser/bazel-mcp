@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use bazel_mcp_runner::BepTransport;
+use bazel_mcp_runner::{BepTransport, StarlarkLimits, StarlarkReducerConfig};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,101 @@ pub enum McpExecutionPolicy {
     Auto,
     SyncOnly,
     TasksRequired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StarlarkConfig {
+    pub files: Vec<PathBuf>,
+    pub max_source_bytes: usize,
+    pub max_input_bytes: usize,
+    pub max_events: usize,
+    pub max_output_bytes: usize,
+    pub max_output_items: usize,
+    pub max_ticks: u64,
+    pub max_heap_bytes: usize,
+    pub max_callstack_size: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for StarlarkConfig {
+    fn default() -> Self {
+        let limits = StarlarkLimits::default();
+        Self {
+            files: Vec::new(),
+            max_source_bytes: limits.max_source_bytes,
+            max_input_bytes: limits.max_input_bytes,
+            max_events: limits.max_events,
+            max_output_bytes: limits.max_output_bytes,
+            max_output_items: limits.max_output_items,
+            max_ticks: limits.max_ticks,
+            max_heap_bytes: limits.max_heap_bytes,
+            max_callstack_size: limits.max_callstack_size,
+            timeout_ms: u64::try_from(limits.timeout.as_millis()).unwrap_or(100),
+        }
+    }
+}
+
+impl StarlarkConfig {
+    #[must_use]
+    pub fn runner_config(&self) -> StarlarkReducerConfig {
+        StarlarkReducerConfig {
+            files: self.files.clone(),
+            limits: StarlarkLimits {
+                max_source_bytes: self.max_source_bytes,
+                max_input_bytes: self.max_input_bytes,
+                max_events: self.max_events,
+                max_output_bytes: self.max_output_bytes,
+                max_output_items: self.max_output_items,
+                max_ticks: self.max_ticks,
+                max_heap_bytes: self.max_heap_bytes,
+                max_callstack_size: self.max_callstack_size,
+                timeout: std::time::Duration::from_millis(self.timeout_ms),
+            },
+        }
+    }
+
+    fn canonicalize_files(&mut self, config_path: Option<&Path>) -> anyhow::Result<()> {
+        if self.max_source_bytes == 0
+            || self.max_input_bytes == 0
+            || self.max_events == 0
+            || self.max_output_bytes == 0
+            || self.max_output_items == 0
+            || self.max_ticks == 0
+            || self.max_heap_bytes == 0
+            || self.max_callstack_size == 0
+            || self.timeout_ms == 0
+        {
+            anyhow::bail!("all Starlark reducer resource limits must be greater than zero");
+        }
+        let base = config_path
+            .and_then(Path::parent)
+            .map(Path::to_owned)
+            .unwrap_or(std::env::current_dir()?);
+        let mut seen = BTreeSet::new();
+        self.files = self
+            .files
+            .iter()
+            .map(|path| {
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    base.join(path)
+                };
+                let path = path
+                    .canonicalize()
+                    .with_context(|| format!("canonicalize Starlark reducer {}", path.display()))?;
+                if !path.is_file() {
+                    anyhow::bail!("Starlark reducer is not a regular file: {}", path.display());
+                }
+                if !seen.insert(path.clone()) {
+                    anyhow::bail!("duplicate Starlark reducer file: {}", path.display());
+                }
+                Ok(path)
+            })
+            .collect::<anyhow::Result<_>>()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Parser)]
@@ -76,6 +171,7 @@ pub struct ServerConfig {
     pub task_ttl_seconds: u64,
     pub task_poll_interval_ms: u64,
     pub bep_transport: BepTransport,
+    pub starlark: StarlarkConfig,
 }
 
 impl Default for ServerConfig {
@@ -110,6 +206,7 @@ impl Default for ServerConfig {
             task_ttl_seconds: 24 * 60 * 60,
             task_poll_interval_ms: 2_000,
             bep_transport: BepTransport::Tail,
+            starlark: StarlarkConfig::default(),
         }
     }
 }
@@ -117,8 +214,8 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn load(cli: &Cli) -> anyhow::Result<Self> {
         let config_path = cli.config.clone().or_else(default_config_path_if_present);
-        let mut config = if let Some(path) = config_path {
-            let source = std::fs::read_to_string(&path)
+        let mut config = if let Some(path) = &config_path {
+            let source = std::fs::read_to_string(path)
                 .with_context(|| format!("read configuration {}", path.display()))?;
             toml::from_str(&source)
                 .with_context(|| format!("parse configuration {}", path.display()))?
@@ -169,6 +266,7 @@ impl ServerConfig {
         {
             anyhow::bail!("supported Bazel major versions must not be empty");
         }
+        config.starlark.canonicalize_files(config_path.as_deref())?;
         config.cache_root = canonicalize_with_missing_tail(&config.cache_root)?;
         config.allowed_roots = config
             .allowed_roots
@@ -337,6 +435,47 @@ mod tests {
         let config = ServerConfig::load(&cli(path)).unwrap();
 
         assert!(config.allowed_roots.is_empty());
+    }
+
+    #[test]
+    fn resolves_starlark_reducers_relative_to_the_configuration_file() {
+        let root = tempdir().unwrap();
+        let reducer = root.path().join("custom.star");
+        fs::write(
+            &reducer,
+            "API_VERSION = 1\nNAME = \"custom\"\ndef reduce(ctx): return None\n",
+        )
+        .unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                "cache_root = {:?}\n[starlark]\nfiles = [\"custom.star\"]\n",
+                root.path().join("cache")
+            ),
+        )
+        .unwrap();
+
+        let config = ServerConfig::load(&cli(path)).unwrap();
+
+        assert_eq!(config.starlark.files, vec![reducer.canonicalize().unwrap()]);
+        assert_eq!(config.starlark.timeout_ms, 100);
+    }
+
+    #[test]
+    fn rejects_zero_starlark_resource_limits() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                "cache_root = {:?}\n[starlark]\nmax_ticks = 0\n",
+                root.path().join("cache")
+            ),
+        )
+        .unwrap();
+
+        assert!(ServerConfig::load(&cli(path)).is_err());
     }
 
     #[cfg(unix)]

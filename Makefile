@@ -1,6 +1,7 @@
 .PHONY: setup-hooks build test test-unit test-integration test-bazel-matrix \
 	setup-oss-corpus test-token-integration run check bench bench-save \
 	bench-compare bench-storage bench-storage-compare bench-bes-transport bench-bes-live bench-token bench-token-live bench-agentic \
+	bench-reducers \
 	bench-agentic-smoke bench-agentic-live bench-agentic-presentation \
 	bench-agentic-control-smoke bench-agentic-toon publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
@@ -70,6 +71,9 @@ bench-save:
 
 bench-compare:
 	cargo bench -p bazel-mcp-benchmark -- --baseline main
+
+bench-reducers:
+	cargo bench -p bazel-mcp-benchmark --bench custom_reducers
 
 bench-storage:
 	cargo run --release -p bazel-mcp-benchmark --bin storage-benchmark -- \
