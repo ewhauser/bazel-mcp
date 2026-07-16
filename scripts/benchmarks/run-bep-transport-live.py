@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark warm Bazel invocations through tail and loopback BES MCP servers."""
+"""Benchmark warm Bazel invocations through tail, FIFO, and BES MCP servers."""
 
 import argparse
 import json
@@ -157,53 +157,59 @@ def main():
         temporary = tempfile.TemporaryDirectory(prefix="bazel-mcp-bep-benchmark-")
         root = pathlib.Path(temporary.name)
     output_user_root = root / "bazel"
-    tail_config = root / "tail.toml"
-    bes_config = root / "bes.toml"
-    write_config(tail_config, workspace, root / "tail-store", output_user_root, bazel, "tail")
-    write_config(bes_config, workspace, root / "bes-store", output_user_root, bazel, "bes")
-
-    tail_server = McpServer(server_binary, tail_config)
-    bes_server = McpServer(server_binary, bes_config)
+    transports = ["tail", "fifo", "bes"]
+    servers = {}
+    for transport in transports:
+        config = root / f"{transport}.toml"
+        write_config(
+            config,
+            workspace,
+            root / f"{transport}-store",
+            output_user_root,
+            bazel,
+            transport,
+        )
+        servers[transport] = McpServer(server_binary, config)
     try:
         for _ in range(args.warmups):
-            tail_server.build(workspace, args.target, args.timeout, args.build_arg)
-            bes_server.build(workspace, args.target, args.timeout, args.build_arg)
-        tail_samples = []
-        bes_samples = []
+            for transport in transports:
+                servers[transport].build(
+                    workspace, args.target, args.timeout, args.build_arg
+                )
+        samples = {transport: [] for transport in transports}
         for sample in range(args.samples):
-            if sample % 2 == 0:
-                tail_samples.append(
-                    tail_server.build(workspace, args.target, args.timeout, args.build_arg)
-                )
-                bes_samples.append(
-                    bes_server.build(workspace, args.target, args.timeout, args.build_arg)
-                )
-            else:
-                bes_samples.append(
-                    bes_server.build(workspace, args.target, args.timeout, args.build_arg)
-                )
-                tail_samples.append(
-                    tail_server.build(workspace, args.target, args.timeout, args.build_arg)
+            offset = sample % len(transports)
+            order = transports[offset:] + transports[:offset]
+            for transport in order:
+                samples[transport].append(
+                    servers[transport].build(
+                        workspace, args.target, args.timeout, args.build_arg
+                    )
                 )
     finally:
-        tail_server.close()
-        bes_server.close()
+        for server in servers.values():
+            server.close()
         if temporary:
             temporary.cleanup()
 
-    tail = metrics(tail_samples)
-    bes = metrics(bes_samples)
+    results = {transport: metrics(samples[transport]) for transport in transports}
+    tail = results["tail"]
+    fifo = results["fifo"]
+    bes = results["bes"]
     print(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "workspace": str(workspace),
                 "target": args.target,
                 "build_args": args.build_arg,
                 "samples": args.samples,
                 "warmups": args.warmups,
                 "tail": tail,
+                "fifo": fifo,
                 "bes": bes,
+                "fifo_over_tail_median_ratio": fifo["median_ms"] / tail["median_ms"],
+                "fifo_median_delta_ms": fifo["median_ms"] - tail["median_ms"],
                 "bes_over_tail_median_ratio": bes["median_ms"] / tail["median_ms"],
                 "bes_median_delta_ms": bes["median_ms"] - tail["median_ms"],
             },

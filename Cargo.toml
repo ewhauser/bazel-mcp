@@ -39,6 +39,7 @@ tonic = "0.14"
 
 # Serialization and domain data
 base64 = "0.22"
+blake3 = { version = "1.8", features = ["mmap", "rayon"] }
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 memchr = "2"
@@ -60,7 +61,7 @@ protoc-bin-vendored = "3"
 quick-xml = { version = "0.41", features = ["serialize"] }
 
 # Storage and platform
-nix = { version = "0.30", features = ["process", "signal"] }
+nix = { version = "0.30", features = ["fs", "process", "signal"] }
 tempfile = "3"
 which = "8"
 

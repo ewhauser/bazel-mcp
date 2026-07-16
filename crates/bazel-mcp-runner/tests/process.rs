@@ -1459,6 +1459,71 @@ async fn preserves_user_bes_flags_while_adding_the_private_bep_file() {
 }
 
 #[tokio::test]
+async fn fifo_transport_spools_private_evidence_and_cleans_up_the_pipe() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bazel-mcp-reducer/tests/fixtures/bazel-9/test-outcomes.bep");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do [ \"$arg\" = info ] && is_info=1; done\nif [ \"${{is_info:-0}}\" = 1 ]; then echo '{}'; exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\ncp '{}' \"$bep_path\"\n",
+        std::process::id(),
+        fixture.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |config| {
+        config.bep_transport = BepTransport::Fifo;
+    })
+    .await;
+
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//:target".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.state, InvocationState::Succeeded);
+    let paths = service.store().paths_for(&record);
+    assert_eq!(
+        std::fs::read(&paths.bep).unwrap(),
+        std::fs::read(fixture).unwrap()
+    );
+    assert!(!paths.bep.with_extension("bep.fifo").exists());
+}
+
+#[tokio::test]
+async fn fifo_transport_falls_back_to_file_tail_when_pid_probe_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bazel-mcp-reducer/tests/fixtures/bazel-9/test-outcomes.bep");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do [ \"$arg\" = info ] && exit 1; done\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\n[ -f \"$bep_path\" ] || exit 42\ncp '{}' \"$bep_path\"\n",
+        fixture.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |config| {
+        config.bep_transport = BepTransport::Fifo;
+    })
+    .await;
+
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//:target".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.state, InvocationState::Succeeded);
+    assert_eq!(
+        std::fs::read(service.store().paths_for(&record).bep).unwrap(),
+        std::fs::read(fixture).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn bes_transport_injects_the_loopback_backend_and_owns_upload_mode() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
