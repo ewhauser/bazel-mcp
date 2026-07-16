@@ -11,8 +11,9 @@ mod text;
 
 pub use budget::{Budget, Budgeted};
 pub use build::{
-    BepAccumulator, ReductionInput, StreamReductionOutput, extract_canonical_arguments,
-    finalize_diagnostics, parse_go_diagnostic, reduce_artifacts, reduce_invocation,
+    BepAccumulator, PythonDiagnosticParser, ReductionInput, StreamReductionOutput,
+    extract_canonical_arguments, finalize_diagnostics, parse_go_diagnostic, reduce_artifacts,
+    reduce_invocation,
 };
 pub use coverage::{CoverageError, parse_lcov, parse_lcov_reader};
 pub use extension::{

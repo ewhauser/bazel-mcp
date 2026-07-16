@@ -816,6 +816,12 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 
 fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
+    let mut python_parser = PythonDiagnosticParser::default();
+    for line in normalized.lines() {
+        if let Some(diagnostic) = python_parser.observe_line(line) {
+            diagnostics.push(diagnostic);
+        }
+    }
     let candidates = deduplicate_lines(&normalized);
     let has_strict_dependency_block = candidates.iter().any(|(line, _)| {
         line.to_ascii_lowercase()
@@ -837,6 +843,9 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
         if let Some(mut diagnostic) = parse_go_diagnostic(&line) {
             diagnostic.repetition_count = count;
             diagnostics.push(diagnostic);
+            continue;
+        }
+        if parse_python_location(&line).is_some() || python_exception_message(&line).is_some() {
             continue;
         }
         if has_strict_dependency_block
@@ -873,6 +882,111 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             repetition_count: count,
         });
     }
+}
+
+/// Stateful extractor for standard Python traceback and syntax-error output.
+///
+/// Python reports source locations on a `File "...", line N` frame before the
+/// terminal exception. Keeping only the latest frame is bounded and matches
+/// traceback semantics, where the innermost frame is printed last.
+#[derive(Debug, Default)]
+pub struct PythonDiagnosticParser {
+    location: Option<DiagnosticLocation>,
+}
+
+impl PythonDiagnosticParser {
+    /// Observes one normalized output line and returns a diagnostic when the
+    /// line terminates a Python exception block.
+    pub fn observe_line(&mut self, line: &str) -> Option<Diagnostic> {
+        if line.trim() == "Traceback (most recent call last):" {
+            self.location = None;
+            return None;
+        }
+        if let Some(location) = parse_python_location(line) {
+            self.location = Some(location);
+            return None;
+        }
+        let message = python_exception_message(line)?;
+        let exception_type = message.split_once(':').map_or(message, |(name, _)| name);
+        Some(Diagnostic {
+            severity: if exception_type.ends_with("Warning") {
+                Severity::Warning
+            } else {
+                Severity::Error
+            },
+            category: DiagnosticCategory::Compilation,
+            message: message.to_owned(),
+            location: self.location.take(),
+            target: None,
+            action: None,
+            repetition_count: 1,
+        })
+    }
+}
+
+fn parse_python_location(line: &str) -> Option<DiagnosticLocation> {
+    let marker = "File \"";
+    let start = line.find(marker)? + marker.len();
+    let remainder = &line[start..];
+    let (path, remainder) = remainder.split_once("\", line ")?;
+    if path.starts_with('<') || path.ends_with("_stage2_bootstrap.py") {
+        return None;
+    }
+    let digits = remainder
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let line_number = remainder[..digits].parse::<u32>().ok()?;
+    Some(DiagnosticLocation {
+        path: compact_python_path(path),
+        line: Some(line_number),
+        column: None,
+    })
+}
+
+fn python_exception_message(line: &str) -> Option<&str> {
+    let mut line = line.trim();
+    if let Some(remainder) = line.strip_prefix('E')
+        && remainder.chars().next().is_some_and(char::is_whitespace)
+    {
+        line = remainder.trim_start();
+    }
+    if line.contains("File \"") {
+        return None;
+    }
+    let exception_type = line.split_once(':').map_or(line, |(name, _)| name);
+    if exception_type.is_empty()
+        || exception_type
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.')))
+    {
+        return None;
+    }
+    let class_name = exception_type.rsplit('.').next()?;
+    let recognized = class_name.ends_with("Error")
+        || class_name.ends_with("Exception")
+        || class_name.ends_with("Failure")
+        || class_name.ends_with("Warning")
+        || matches!(class_name, "Failed" | "KeyboardInterrupt" | "SystemExit");
+    recognized.then_some(line)
+}
+
+fn compact_python_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
+        if let Some((_, relative)) = path.rsplit_once(marker) {
+            return relative.to_owned();
+        }
+    }
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
 }
 
 /// Parses the standard Go compiler location form without depending on a
@@ -1249,6 +1363,115 @@ ERROR: Build did NOT complete successfully
                 .map(|location| location.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["first.go", "second.go"]
+        );
+    }
+
+    #[test]
+    fn ranks_python_syntax_errors_ahead_of_pycompile_wrappers() {
+        let stderr = br#"Unhandled error:
+Traceback (most recent call last):
+  File "/opt/python/lib/python3.11/py_compile.py", line 144, in compile
+  File "mcp_reducer_fixture/syntax_failure_test.py", line 6
+    configuration = {
+                    ^
+SyntaxError: '{' was never closed
+py_compile.PyCompileError:   File "mcp_reducer_fixture/syntax_failure_test.py", line 6
+SyntaxError: '{' was never closed
+ERROR: Build did NOT complete successfully
+"#;
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.message, "SyntaxError: '{' was never closed");
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(diagnostic.repetition_count, 2);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "mcp_reducer_fixture/syntax_failure_test.py".into(),
+                line: Some(6),
+                column: None,
+            })
+        );
+        assert!(summary.headline.contains("SyntaxError"));
+    }
+
+    #[test]
+    fn extracts_python_test_traceback_locations_from_bazel_runfiles() {
+        let stderr = br#"Traceback (most recent call last):
+  File "/tmp/output/test.runfiles/_main/pkg/_pricing_test_stage2_bootstrap.py", line 588, in <module>
+  File "/tmp/output/test.runfiles/_main/pkg/pricing_test.py", line 7, in test_total
+    self.assertEqual(actual_total, 41)
+AssertionError: 42 != 41
+"#;
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert_eq!(summary.diagnostics[0].message, "AssertionError: 42 != 41");
+        assert_eq!(
+            summary.diagnostics[0].location,
+            Some(DiagnosticLocation {
+                path: "pkg/pricing_test.py".into(),
+                line: Some(7),
+                column: None,
+            })
+        );
+    }
+
+    #[test]
+    fn recognizes_pytest_exception_prefixes() {
+        let mut parser = PythonDiagnosticParser::default();
+        assert!(
+            parser
+                .observe_line("  File \"pkg/test_checkout.py\", line 19, in test_total")
+                .is_none()
+        );
+        let diagnostic = parser
+            .observe_line("E       ValueError: invalid discount")
+            .unwrap();
+
+        assert_eq!(diagnostic.message, "ValueError: invalid discount");
+        assert_eq!(diagnostic.location.unwrap().line, Some(19));
+    }
+
+    #[test]
+    fn keeps_identical_python_messages_at_distinct_locations() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"  File "pkg/first_test.py", line 3, in test_value
+AssertionError: mismatch
+  File "pkg/second_test.py", line 8, in test_value
+AssertionError: mismatch
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 2);
+        assert_eq!(
+            summary
+                .diagnostics
+                .iter()
+                .filter_map(|diagnostic| diagnostic.location.as_ref())
+                .map(|location| location.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pkg/first_test.py", "pkg/second_test.py"]
         );
     }
 

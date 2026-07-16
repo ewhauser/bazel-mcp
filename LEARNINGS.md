@@ -60,3 +60,12 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
 - `bazel.run mod deps` refreshed the rules_rs crate extension lock with a compact
   success summary and no raw dependency output; use that informational command
   plus a local lockfile diff for token-efficient Cargo dependency changes.
+- Python precompilation surfaced `Unhandled error:` ahead of a retained
+  `SyntaxError` and omitted the source line; pair standard traceback frames with
+  terminal exception classes so agents can edit the failing file without a log
+  inspection. Thread: `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Python import and assertion failures retained the terminal exception but
+  discarded the preceding runfiles source frame, while a trailing `FAILED`
+  summary could replace richer test evidence; prefer located traceback causes
+  and keep `test_log` as optional context. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.

@@ -636,6 +636,82 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
 }
 
 #[tokio::test]
+async fn failed_python_test_logs_promote_the_located_traceback_cause() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let output_root = root.path().join("output-user-root");
+    let test_directory = output_root.join("execroot/ws/bazel-out/testlogs/pkg/failing");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&test_directory).await.unwrap();
+    let test_log = test_directory.join("test.log");
+    let test_xml = test_directory.join("test.xml");
+    tokio::fs::write(
+        &test_log,
+        r#"Traceback (most recent call last):
+  File "/tmp/output/failing.runfiles/_main/pkg/failing_test.py", line 7, in test_total
+    self.assertEqual(actual_total, 41)
+AssertionError: 42 != 41 : invoice total should include the fee
+FAILED (failures=1)
+"#,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        &test_xml,
+        r#"<testsuites><testsuite><testcase name="test_total"><failure message="invoice total mismatch"/></testcase></testsuite></testsuites>"#,
+    )
+    .await
+    .unwrap();
+    let bep = root.path().join("failed-python-test.bep");
+    tokio::fs::write(
+        &bep,
+        failed_test_bep(
+            &format!("file://{}", test_log.display()),
+            &format!("file://{}", test_xml.display()),
+        ),
+    )
+    .await
+    .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --build_event_binary_file=*) bep_path=${{arg#*=}} ;;\n  esac\ndone\ncp '{}' \"$bep_path\"\necho 'AssertionError: 42 != 41 : invoice total should include the fee' >&2\nexit 1\n",
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//pkg:failing".into()],
+        ))
+        .await
+        .unwrap();
+    let summary = failed.summary.as_ref().unwrap();
+    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    assert!(
+        summary
+            .headline
+            .contains("invoice total should include the fee")
+    );
+    let matching = summary
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic
+                .message
+                .contains("invoice total should include the fee")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].category, DiagnosticCategory::Test);
+    assert_eq!(
+        matching[0].location.as_ref().unwrap().path,
+        "pkg/failing_test.py"
+    );
+    assert_eq!(matching[0].location.as_ref().unwrap().line, Some(7));
+}
+
+#[tokio::test]
 async fn cancellation_stops_a_running_process_group() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
