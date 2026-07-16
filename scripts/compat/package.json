@@ -1,0 +1,9 @@
+{
+  "name": "bazel-mcp-claude-compat",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Claude Code dependency for credential-free MCP compatibility tests",
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.204"
+  }
+}
