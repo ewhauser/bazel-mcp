@@ -39,11 +39,11 @@ The product spans several failure and performance domains:
 - Bazel workspace, wrapper, command, and flag policy
 - versioned protobuf generation and BEP graph reconstruction
 - deterministic build, test, coverage, query, and text reduction
-- durable embedded Turso and filesystem storage
+- database-free, crash-recoverable filesystem storage
 - benchmarking of both system overhead and model-visible output
 
 Putting all of this in one crate would couple protocol code to subprocess and
-database details, make reducer tests require an async runtime, and make it easy
+persistence details, make reducer tests require an async runtime, and make it easy
 for MCP handlers to bypass token and safety boundaries. The workspace needs small
 crates with explicit ownership and a single application service that composes
 them.
@@ -156,7 +156,7 @@ not ignored.
 ### `bazel-mcp-types`
 
 Leaf crate containing domain types shared across subsystems. It has no filesystem,
-process, database, Tokio, or MCP dependencies.
+process, storage-driver, Tokio, or MCP dependencies.
 
 Responsibilities:
 
@@ -278,17 +278,17 @@ records.
 
 ### `bazel-mcp-store`
 
-Owns durable invocation files, embedded Turso indexes, migrations, cursors,
-retention, and crash recovery. It is an async library because Turso's local Rust
-API is async; it does not hide database calls behind `spawn_blocking`.
+Owns durable invocation files, startup-built indexes, cursors, retention, and
+crash recovery. It is an async library so filesystem commits compose directly
+with the runner without blocking Tokio core workers.
 
 Responsibilities:
 
 - Create private cache and invocation directories.
 - Persist requests before process launch.
 - Open stdout, stderr, and BEP capture files safely.
-- Store normalized invocation, target, diagnostic, test, coverage, artifact,
-  query, and metric records.
+- Store versioned invocation metadata and compact structured sidecars only where
+  they avoid reparsing genuinely structured results.
 - Commit monotonic lifecycle transitions atomically.
 - Provide filtered, stable pagination for every inspect view.
 - Recover orphaned invocations as `interrupted`.
@@ -299,38 +299,28 @@ Suggested layout:
 ```text
 crates/bazel-mcp-store/
 ├── Cargo.toml
-├── migrations/
-│   └── 0001_initial.sql
 ├── src/
 │   ├── cursor.rs
 │   ├── files.rs
 │   ├── lib.rs
-│   ├── migration.rs
-│   ├── reader.rs
-│   ├── recovery.rs
-│   ├── retention.rs
-│   ├── database.rs
-│   └── writer.rs
+│   └── storage.rs
 └── tests/
-    ├── migrations.rs
     ├── pagination.rs
     └── recovery.rs
 ```
 
-Use the `turso` crate with `turso::Builder::new_local` and a database file under
-the configured cache root. Do not use `rusqlite` in production. `Store` owns the
-Turso database handle, serializes migrations and lifecycle writes with a short
-async write coordinator, and uses separate connections for bounded reads where
-the pinned Turso version permits. Store methods are async, accept and return
-`bazel-mcp-types`, and do not mention MCP or BEP protobufs. Migrations are
-append-only, recorded in `schema_migrations`, and run in a transaction. A
-migration already included in a release is never edited.
+`Store` owns an exclusive cache-root lock, a short async write coordinator, and
+bounded in-memory indexes rebuilt from versioned `record.json` files. UUIDv7
+maps deterministically to a day bucket and bounded shard. Record and sidecar
+commits use write-private-temp plus atomic rename; deletion uses rename to a
+cache-root trash directory followed by unlink. Store methods accept and return
+`bazel-mcp-types` and do not mention MCP or BEP protobufs. There is intentionally
+no database, migration layer, or legacy-layout reader.
 
-Turso is pre-1.0 and does not claim complete SQLite compatibility. Pin its exact
-release through `Cargo.lock`, use only the SQL exercised by store integration
-tests, and treat migration plus crash-recovery tests as upgrade gates. Complete
-stdout, stderr, BEP, and artifact data remain ordinary files, so a damaged index
-does not erase the underlying diagnostic evidence.
+Complete stdout, stderr, and BEP evidence remains ordinary files written
+directly by the Bazel child. Query pagination scans stdout using opaque byte
+offsets, applies bounded redaction before filtering, and never writes a duplicate
+normalized query payload.
 
 ### `bazel-mcp-reducer`
 
@@ -505,7 +495,7 @@ Responsibilities:
 - BEP frame and graph throughput.
 - Reduction throughput for representative successful, failed, and noisy builds.
 - `NamedSetOfFiles` scaling.
-- Turso ingest and inspection pagination throughput.
+- Filesystem record commit, startup rebuild, GC, and inspection throughput.
 - Query streaming throughput and peak-memory cases.
 - Response byte accounting for golden results.
 - Commit-pinned Abseil integration scenarios and three execution adapters.
@@ -574,7 +564,7 @@ Rules:
 - `bazel-mcp-policy`, `bazel-mcp-store`, and `bazel-mcp-reducer` are siblings and
   do not depend on each other.
 - `bazel-mcp-runner` is the only composition layer below the server.
-- `bazel-mcp-server` does not call Turso, parse BEP, read diagnostic files, or
+- `bazel-mcp-server` does not call the store directly, parse BEP, read diagnostic files, or
   spawn Bazel directly.
 - No library crate depends on `bazel-mcp-server` or `bazel-mcp-benchmark`.
 - A new cross-cutting type moves downward into `bazel-mcp-types`; it is not
@@ -605,7 +595,7 @@ bazel-mcp-runner
       │               stdout.log + stderr.log + events.bep
       ├─ spawn_blocking ─► bazel-mcp-bep + bazel-mcp-reducer
       └────── await ─────► bazel-mcp-store
-                              Turso + invocation files
+                              atomic records + invocation files
 ```
 
 The live registry stores only running/queued control state and cancellation
@@ -614,8 +604,8 @@ the source of truth for completed results.
 
 MCP request tasks never hold a global lock while awaiting a child process. The
 scheduler owns short critical sections around queue transitions. Each invocation
-runs in its own Tokio task. Turso database work is awaited; blocking parsing and
-filesystem work runs outside Tokio core workers.
+runs in its own Tokio task. Async record commits are awaited; blocking streaming
+reduction and filesystem scans run outside Tokio core workers.
 
 ## Cargo workspace configuration
 
@@ -667,7 +657,7 @@ set includes:
 | MCP and async | `rmcp`, `tokio`, `tokio-util`, `futures` |
 | Serialization and schemas | `serde`, `serde_json`, `schemars`, `uuid` |
 | BEP | `buffa`, `buffa-build`, vendored `protoc` support |
-| Storage | `turso`, `tempfile` |
+| Storage | standard filesystem APIs, `tempfile` for tests |
 | Parsing | a bounded XML parser, LCOV parser or internal LCOV reader, `memchr`, ANSI stripping |
 | Errors and logging | `thiserror`, `anyhow`, `tracing`, `tracing-subscriber` |
 | CLI and platform | `clap`, user-directory resolution, Unix signal/process support |
@@ -675,9 +665,8 @@ set includes:
 | Benchmarks | `criterion`, `tiktoken-rs` |
 
 Dependency versions are selected and tested during scaffolding, declared once in
-the workspace manifest, and committed through `Cargo.lock`. The pre-1.0 `turso`
-dependency uses an exact workspace-manifest version as well as the lockfile. The
-official Rust MCP SDK is pinned to a released version rather than a Git branch.
+the workspace manifest, and committed through `Cargo.lock`. The official Rust
+MCP SDK is pinned to a released version rather than a Git branch.
 
 ### Package manifests
 
@@ -759,7 +748,7 @@ workspace has its own committed `fuzz/Cargo.lock`.
   executable and orchestration boundaries where context is more valuable than
   enum matching.
 - Pure leaf crates remain synchronous. Tokio belongs only in runner, server, and
-  store code; the store needs it for Turso's async local API.
+  store code; the store uses it for async private-file commits.
 - Production code does not use `unwrap` or `expect` for recoverable input,
   process, storage, protobuf, or protocol failures.
 - Public APIs are narrow and re-exported intentionally from each `lib.rs`.
@@ -892,8 +881,7 @@ The default shell includes:
 - `cargo-shear`
 - `cargo-fuzz`
 - `hyperfine`
-- SQLite CLI for compatibility-level inspection of the local Turso file, not as
-  the production database driver
+- filesystem inspection tools such as `find`, `du`, and `jq`
 - `jq`
 - Python 3 for benchmark and release-security scripts
 - Node.js only if required by the pinned MCP conformance suite
@@ -915,7 +903,7 @@ Ownership:
 - BEP framing, graph, and cross-version fixtures belong to `bazel-mcp-bep`.
 - Reduction input/output fixtures and snapshots belong to
   `bazel-mcp-reducer`.
-- Turso migration, retention, recovery, and cursor tests belong to
+- Filesystem commit, retention, recovery, and cursor tests belong to
   `bazel-mcp-store`.
 - Policy and argument injection tests belong to `bazel-mcp-policy`.
 - Process, cancellation, concurrency, and real workspace tests belong to
@@ -1289,7 +1277,7 @@ Scaffolding proceeds in dependency order:
 2. Create `bazel-mcp-types` and freeze lifecycle/domain terminology.
 3. Create `bazel-mcp-bep`, vendor the pinned proto set, and land cross-version
    framing fixtures.
-4. Create policy, async Turso store, and reducer sibling crates with no
+4. Create policy, async filesystem store, and reducer sibling crates with no
    cross-dependencies.
 5. Create the runner and wire process capture to durable storage and reduction.
 6. Create the thin server with the three tool schema snapshots and stdio
@@ -1312,9 +1300,9 @@ needed by the next layer rather than speculative APIs.
 - Among production library and binary dependencies, only `bazel-mcp-runner`,
   `bazel-mcp-server`, and `bazel-mcp-store` depend directly on Tokio. Benchmark
   and test-only targets may use Tokio to drive the runner API.
-- Production storage uses the local `turso` crate and contains no `rusqlite`
-  dependency. Store APIs are async and migration/crash-recovery tests pass
-  against the pinned Turso version.
+- Production storage is database-free and contains no SQL driver dependency.
+  Store APIs are async and atomic-commit/crash-recovery tests pass on supported
+  filesystems.
 - `bazel-mcp-reducer` and `bazel-mcp-store` do not depend on each other.
 - All packages inherit version, edition, Rust version, license, authors, and
   repository metadata from the workspace.
@@ -1360,7 +1348,6 @@ needed by the next layer rather than speculative APIs.
 - [Cargo workspaces](https://doc.rust-lang.org/book/ch14-03-cargo-workspaces.html)
 - [Official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk)
 - [Bazel Build Event Protocol](https://bazel.build/remote/bep)
-- [Turso](https://github.com/tursodatabase/turso)
 - [`tiktoken-rs`](https://github.com/zurawiki/tiktoken-rs)
 - [Abseil C++](https://github.com/abseil/abseil-cpp)
 - [cargo-dist](https://opensource.axo.dev/cargo-dist/)

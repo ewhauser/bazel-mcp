@@ -5,7 +5,11 @@ use std::{
     process::Stdio,
 };
 
-use bazel_mcp_bep::{DEFAULT_MAX_FRAME_BYTES, PartialStream, decode_stream_partial};
+use bazel_mcp_bep::{
+    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, DEFAULT_MAX_STREAM_EVENTS, StreamOutcome,
+    visit_stream_partial_bounded,
+};
+use bazel_mcp_reducer::BepAccumulator;
 use bazel_mcp_store::InvocationPaths;
 use tokio::{
     fs,
@@ -45,13 +49,29 @@ pub(crate) async fn read_bounded_tail(
     Ok(data)
 }
 
-pub(crate) async fn read_bep(path: PathBuf) -> Result<PartialStream, RunnerError> {
+pub(crate) async fn reduce_bep(
+    path: PathBuf,
+) -> Result<(BepAccumulator, StreamOutcome), RunnerError> {
     task::spawn_blocking(move || match std::fs::File::open(path) {
-        Ok(file) => Ok(decode_stream_partial(file, DEFAULT_MAX_FRAME_BYTES)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(PartialStream {
-            events: Vec::new(),
-            terminal_error: None,
-        }),
+        Ok(file) => {
+            let mut accumulator = BepAccumulator::default();
+            let outcome = visit_stream_partial_bounded(
+                file,
+                DEFAULT_MAX_FRAME_BYTES,
+                DEFAULT_MAX_STREAM_BYTES,
+                DEFAULT_MAX_STREAM_EVENTS,
+                |event| accumulator.observe(event),
+            );
+            Ok((accumulator, outcome))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((
+            BepAccumulator::default(),
+            StreamOutcome {
+                event_count: 0,
+                decoded_bytes: 0,
+                terminal_error: None,
+            },
+        )),
         Err(error) => Err(RunnerError::Io(error)),
     })
     .await?

@@ -19,9 +19,7 @@
             pkgs.hyperfine
             pkgs.jq
             pkgs.python3
-            pkgs.sqlite
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.clang ];
         };
       });
 }
-

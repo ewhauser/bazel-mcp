@@ -1,6 +1,6 @@
 .PHONY: setup-hooks build test test-unit test-integration test-bazel-matrix \
 	setup-oss-corpus test-token-integration run check bench bench-save \
-	bench-compare bench-token bench-token-live bench-agentic \
+	bench-compare bench-storage bench-storage-compare bench-token bench-token-live bench-agentic \
 	bench-agentic-smoke bench-agentic-live bench-agentic-presentation \
 	bench-agentic-control-smoke publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
@@ -16,6 +16,7 @@ NIX_DEVELOP ?= nix --extra-experimental-features 'nix-command flakes' develop --
 OSS_PROJECT ?= abseil-cpp
 TOKEN_ENCODING ?= o200k_base
 TOKEN_SAMPLES ?= 5
+STORAGE_BENCHMARK_ARGS ?=
 LIVE_AGENT_ARGS ?=
 AGENTIC_SAMPLES ?= 5
 AGENTIC_MODEL ?= gpt-5.6-luna
@@ -67,6 +68,15 @@ bench-save:
 
 bench-compare:
 	cargo bench -p bazel-mcp-benchmark -- --baseline main
+
+bench-storage:
+	cargo run --release -p bazel-mcp-benchmark --bin storage-benchmark -- \
+		$(STORAGE_BENCHMARK_ARGS)
+
+bench-storage-compare:
+	cargo run --release -p bazel-mcp-benchmark --bin storage-benchmark -- \
+		--label filesystem-current \
+		--baseline crates/bazel-mcp-benchmark/fixtures/storage/baseline-turso-2cdf8e9-macos-aarch64.json
 
 bench-token: test-token-integration
 

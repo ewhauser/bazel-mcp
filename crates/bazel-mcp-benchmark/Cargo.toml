@@ -13,10 +13,13 @@ anyhow.workspace = true
 bazel-mcp-bep.workspace = true
 bazel-mcp-policy.workspace = true
 bazel-mcp-reducer.workspace = true
+bazel-mcp-store.workspace = true
+bazel-mcp-types.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 tiktoken-rs.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -40,3 +43,7 @@ path = "src/bin/agentic-benchmark.rs"
 [[bin]]
 name = "bazel-agentic-shell"
 path = "src/bin/bazel-agentic-shell.rs"
+
+[[bin]]
+name = "storage-benchmark"
+path = "src/bin/storage-benchmark.rs"

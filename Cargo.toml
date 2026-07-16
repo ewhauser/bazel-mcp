@@ -56,7 +56,6 @@ quick-xml = { version = "0.41", features = ["serialize"] }
 # Storage and platform
 nix = { version = "0.30", features = ["process", "signal"] }
 tempfile = "3"
-turso = { version = "=0.7.0", default-features = false }
 which = "8"
 
 # Testing and benchmarks

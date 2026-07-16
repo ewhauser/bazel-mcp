@@ -79,6 +79,54 @@ pub(crate) struct OrdinalCursor {
     pub ordinal: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct FileCursor {
+    context: String,
+    pub offset: u64,
+    pub ordinal: u64,
+}
+
+impl FileCursor {
+    pub fn new(
+        scope: &str,
+        invocation_id: &str,
+        filter: Option<&str>,
+        offset: u64,
+        ordinal: u64,
+    ) -> Self {
+        Self {
+            context: cursor_context(&[scope, invocation_id, filter.unwrap_or_default()]),
+            offset,
+            ordinal,
+        }
+    }
+
+    pub fn encode(&self) -> Result<String, StoreError> {
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
+    }
+
+    pub fn decode(value: &str) -> Result<Self, StoreError> {
+        let raw = URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| StoreError::InvalidCursor)?;
+        serde_json::from_slice(&raw).map_err(|_| StoreError::InvalidCursor)
+    }
+
+    pub fn decode_for(
+        value: &str,
+        scope: &str,
+        invocation_id: &str,
+        filter: Option<&str>,
+    ) -> Result<Self, StoreError> {
+        let cursor = Self::decode(value)?;
+        let expected = cursor_context(&[scope, invocation_id, filter.unwrap_or_default()]);
+        if cursor.context != expected {
+            return Err(StoreError::InvalidCursor);
+        }
+        Ok(cursor)
+    }
+}
+
 impl OrdinalCursor {
     pub fn new(scope: &str, invocation_id: &str, filter: Option<&str>, ordinal: i64) -> Self {
         Self {

@@ -80,7 +80,7 @@ environment_allowlist = ["GOOGLE_APPLICATION_CREDENTIALS", "JAVA_HOME"]
 ### Redact sensitive text
 
 Configured regular expressions are replaced with `[REDACTED]` before text is
-written to summaries, database text fields, or telemetry:
+written to summaries, durable metadata, or telemetry:
 
 ```toml
 redaction_patterns = [

@@ -1,7 +1,9 @@
 use std::{fs, path::Path};
 
 use bazel_mcp_bep::{DEFAULT_MAX_FRAME_BYTES, decode_stream_partial};
-use bazel_mcp_reducer::{Budget, ReductionInput, reduce_artifacts, reduce_invocation};
+use bazel_mcp_reducer::{
+    BepAccumulator, Budget, ReductionInput, reduce_artifacts, reduce_invocation,
+};
 use bazel_mcp_types::ArtifactKind;
 use serde::Serialize;
 
@@ -65,21 +67,34 @@ fn assert_golden(root: &Path, version: u32, case: &str) {
         .trim()
         .parse()
         .unwrap();
+    let budget = Budget {
+        max_items: 100,
+        max_bytes: 64 * 1024,
+    };
+    let summary = reduce_invocation(ReductionInput {
+        events: &partial.events,
+        stdout: &stdout,
+        stderr: &stderr,
+        exit_code: Some(exit_code),
+        elapsed_ms: 0,
+        budget,
+    });
+    let artifacts = reduce_artifacts(&partial.events);
+    let mut accumulator = BepAccumulator::default();
+    for event in partial.events.iter().cloned() {
+        accumulator.observe(event);
+    }
+    let streaming = accumulator.finish(&stdout, &stderr, Some(exit_code), 0, budget);
+    assert_eq!(streaming.summary, summary, "streaming summary changed");
+    assert_eq!(
+        streaming.artifacts, artifacts,
+        "streaming artifacts changed"
+    );
     let output = GoldenOutput {
         event_count: partial.events.len(),
         terminal_error: partial.terminal_error.as_ref().map(ToString::to_string),
-        summary: reduce_invocation(ReductionInput {
-            events: &partial.events,
-            stdout: &stdout,
-            stderr: &stderr,
-            exit_code: Some(exit_code),
-            elapsed_ms: 0,
-            budget: Budget {
-                max_items: 100,
-                max_bytes: 64 * 1024,
-            },
-        }),
-        artifacts: reduce_artifacts(&partial.events),
+        summary,
+        artifacts,
     };
     let actual = serde_json::to_string_pretty(&output).unwrap() + "\n";
     let expected_path = prefix.with_extension("expected.json");

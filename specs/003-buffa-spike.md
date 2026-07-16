@@ -160,7 +160,7 @@ user-plus-system CPU time. Do not use a single wall-time result.
 - Buffa is used only in `bazel-mcp-bep`; reducers consume stable re-exports from
   that crate rather than importing Buffa directly. The wrapper uses Buffa's
   public generated re-exports and does not expose generated `__buffa` modules.
-- Prost remains in the final dependency graph through Turso's sync engine, but
+- Prost may remain in transitive tooling dependencies, but
   it is no longer a direct BEP or reducer dependency. The measured release
   server binary is nevertheless slightly smaller.
 - [Upstream issue #298](https://github.com/anthropics/buffa/issues/298) reports

@@ -813,7 +813,7 @@ async fn postprocessing_failures_do_not_leave_invocations_running() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir(&workspace).await.unwrap();
-    let invocation_root = root.path().join("store/workspaces");
+    let invocation_root = root.path().join("store/invocations");
     let script = format!(
         "#!/bin/sh\necho '//pkg:target'\nrm -rf '{}'\nexit 0\n",
         invocation_root.display()
