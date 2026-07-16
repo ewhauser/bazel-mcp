@@ -65,6 +65,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { persist-credentials: false }
       - run: cargo check --workspace --all-targets --all-features
+      - name: Install dist
+        shell: pwsh
+        run: irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
+      - name: Build Windows release archive
+        shell: pwsh
+        run: dist build --print=linkage --output-format=json --artifacts=local --target=x86_64-pc-windows-msvc > dist-manifest.json
+      - name: Smoke test Windows release archive
+        shell: pwsh
+        run: ./scripts/smoke-windows-release.ps1
   cargo-deny:
     runs-on: ubuntu-latest
     timeout-minutes: 20

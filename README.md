@@ -31,7 +31,7 @@ toolchains, and remote execution settings.
 
 ### Requirements
 
-- macOS or Linux
+- macOS, Linux, or Windows x86_64 (preview)
 - Bazel 8 or 9, Bazelisk, or an executable workspace-local `tools/bazel`
 - an MCP-compatible client
 - Bazelisk when building from source (the repository pins Bazel and Rust)
@@ -50,7 +50,13 @@ or run the shell installer on macOS or Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/ewhauser/bazel-mcp/releases/latest/download/bazel-mcp-installer.sh | sh
+  https://github.com/ewhauser/bazel-mcp/releases/latest/download/bazel-mcp-server-installer.sh | sh
+```
+
+On Windows, run the PowerShell installer:
+
+```powershell
+irm https://github.com/ewhauser/bazel-mcp/releases/latest/download/bazel-mcp-server-installer.ps1 | iex
 ```
 
 ### Build from source
@@ -412,7 +418,7 @@ redaction, and byte ceilings; they only change its model-visible representation.
 | Component | Supported |
 | --- | --- |
 | Bazel | Major versions 8 and 9 |
-| Platforms | macOS and Linux |
+| Platforms | macOS and Linux; Windows x86_64 preview |
 | Transport | Local MCP over stdio |
 | Bazel discovery | `tools/bazel`, then Bazelisk, then Bazel on `PATH` |
 | Task execution | Synchronous fallback, MCP `2025-11-25` legacy tasks, and the SEP-2663 Tasks extension |

@@ -135,11 +135,16 @@ jobs:
           persist-credentials: false
           ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
-      - name: Install dist
+      - name: Install dist (Unix)
+        if: ${{ runner.os != 'Windows' }}
         # Install a native binary for this matrix runner. Reusing the plan
         # job's binary breaks on ARM Linux and macOS runners.
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+      - name: Install dist (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -152,13 +157,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes musl-tools
-      - name: Build artifacts
+      - name: Build artifacts (Unix)
+        if: ${{ runner.os != 'Windows' }}
         env:
           DIST_TARGET: ${{ join(matrix.targets, ',') }}
+        shell: bash
         run: |
           # Actually do builds and make zips and whatnot
           dist build "--tag=$RELEASE_TAG" --print=linkage --output-format=json "--artifacts=local" "--target=$DIST_TARGET" > dist-manifest.json
           echo "dist ran successfully"
+      - name: Build artifacts (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        env:
+          DIST_TARGET: ${{ join(matrix.targets, ',') }}
+        shell: pwsh
+        run: |
+          dist build "--tag=$env:RELEASE_TAG" --print=linkage --output-format=json "--artifacts=local" "--target=$env:DIST_TARGET" > dist-manifest.json
+          Write-Output "dist ran successfully"
+      - name: Smoke test Windows archive
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: ./scripts/smoke-windows-release.ps1
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up

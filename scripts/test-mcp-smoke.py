@@ -216,6 +216,7 @@ def main():
     try:
         remote_args = [
             "//:remote_cache_target", f"--remote_cache={cache_url}",
+            "--disk_cache=",
             "--remote_upload_local_results=true", "--remote_timeout=10",
         ]
         first = call(
@@ -229,7 +230,10 @@ def main():
         if first["state"] != "succeeded" or second["state"] != "succeeded":
             raise RuntimeError(f"remote cache builds failed: {first} {second}")
         if CacheHandler.puts == 0 or CacheHandler.gets == 0:
-            raise RuntimeError("remote cache did not observe both uploads and reads")
+            raise RuntimeError(
+                "remote cache did not observe both uploads and reads "
+                f"(puts={CacheHandler.puts}, gets={CacheHandler.gets})"
+            )
         print("remote_cache\tsucceeded\t0")
     finally:
         cache_server.shutdown()
