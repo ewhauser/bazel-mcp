@@ -77,3 +77,11 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   terminal `Error in fail`, forcing log inspection or returning a large BEP
   wrapper; pair them into a concise loading or analysis diagnostic. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Javac diagnostics retained the source path inside the message but discarded
+  its structured location and the following `symbol:` detail; pair the bounded
+  compiler block before ranking. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Java test exceptions were recognized as Python-style compilation failures,
+  while their application stack frames remained only in `test_log`; prefer the
+  first non-framework JVM frame as located test evidence. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
