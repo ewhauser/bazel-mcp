@@ -389,12 +389,9 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
     tokio::fs::create_dir_all(&test_directory).await.unwrap();
     let test_log = test_directory.join("test.log");
     let test_xml = test_directory.join("test.xml");
-    tokio::fs::write(
-        &test_log,
-        "setup\nassertion error: SNAPSHOT_TEST_ROOT_CAUSE\n",
-    )
-    .await
-    .unwrap();
+    tokio::fs::write(&test_log, "setup\npkg/failing_test.go:42: got 1, want 2\n")
+        .await
+        .unwrap();
     tokio::fs::write(
         &test_xml,
         r#"<testsuites><testsuite><testcase name="failing_case" time="0.01"><failure message="expected true"/></testcase></testsuite></testsuites>"#,
@@ -414,7 +411,7 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
     let flag_marker = root.path().join("saw-test-output-errors");
     let failed_once = root.path().join("failed-once");
     let script = format!(
-        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --build_event_binary_file=*) bep_path=${{arg#*=}} ;;\n    --test_output=errors) touch '{}' ;;\n  esac\ndone\nif [ -f '{}' ]; then : > \"$bep_path\"; exit 0; fi\ncp '{}' \"$bep_path\"\ntouch '{}'\necho 'SNAPSHOT_TEST_ROOT_CAUSE'\nexit 1\n",
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --build_event_binary_file=*) bep_path=${{arg#*=}} ;;\n    --test_output=errors) touch '{}' ;;\n  esac\ndone\nif [ -f '{}' ]; then : > \"$bep_path\"; exit 0; fi\ncp '{}' \"$bep_path\"\ntouch '{}'\necho 'test execution failed'\nexit 1\n",
         flag_marker.display(),
         failed_once.display(),
         bep.display(),
@@ -433,7 +430,27 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
     assert_eq!(failed.state, InvocationState::Failed);
     assert!(flag_marker.exists());
     let summary = failed.summary.as_ref().unwrap();
-    assert!(summary.headline.contains("SNAPSHOT_TEST_ROOT_CAUSE"));
+    assert!(summary.headline.contains("got 1, want 2"));
+    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    let diagnostic = summary
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("got 1, want 2"))
+        .unwrap();
+    assert_eq!(
+        summary
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("got 1, want 2"))
+            .count(),
+        1
+    );
+    assert_eq!(diagnostic.category, DiagnosticCategory::Test);
+    assert_eq!(
+        diagnostic.location.as_ref().unwrap().path,
+        "pkg/failing_test.go"
+    );
+    assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(42));
     assert!(summary.tests[0].test_log_available);
     assert_eq!(summary.tests[0].cases[0].name, "failing_case");
     assert!(!serde_json::to_string(summary).unwrap().contains("log_uri"));
@@ -457,12 +474,12 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
     assert!(
         items
             .iter()
-            .any(|item| item.as_str().unwrap().contains("SNAPSHOT_TEST_ROOT_CAUSE"))
+            .any(|item| item.as_str().unwrap().contains("got 1, want 2"))
     );
 
     let failed_paths = service.store().paths_for(&failed);
     let retained_before = tokio::fs::read(&failed_paths.test_logs_raw).await.unwrap();
-    assert!(String::from_utf8_lossy(&retained_before).contains("SNAPSHOT_TEST_ROOT_CAUSE"));
+    assert!(String::from_utf8_lossy(&retained_before).contains("got 1, want 2"));
     tokio::fs::remove_file(&flag_marker).await.unwrap();
     let passing = service
         .run(InvocationRequest::new(
