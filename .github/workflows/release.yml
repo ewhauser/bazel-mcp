@@ -312,12 +312,21 @@ jobs:
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" artifacts/* --clobber
-          else
+          release_tag_uri="$(jq -rn --arg tag "$RELEASE_TAG" '$tag | @uri')"
+          lookup_error="$RUNNER_TEMP/release-lookup-error.txt"
+
+          if gh api --silent "repos/$GITHUB_REPOSITORY/releases/tags/$release_tag_uri" 2>"$lookup_error"; then
+            gh release upload "$RELEASE_TAG" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
+          elif grep -q '(HTTP 404)' "$lookup_error"; then
+            cat "$lookup_error" >&2
+            echo "No GitHub release exists for $RELEASE_TAG; creating it now."
             # Write and read notes from a file to avoid quoting breaking things.
             echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
-            gh release create "$RELEASE_TAG" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+            gh release create "$RELEASE_TAG" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" --repo "$GITHUB_REPOSITORY" artifacts/*
+          else
+            cat "$lookup_error" >&2
+            echo "Unable to determine whether the GitHub release exists; refusing to create a duplicate." >&2
+            exit 1
           fi
 
   publish-homebrew-formula:
