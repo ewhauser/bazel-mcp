@@ -9,6 +9,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use bazel_mcp_bes::{BesError, BesServer};
 use bazel_mcp_policy::{
     PolicyConfig, PolicyError, Redactor, effective_output_base, filtered_environment,
     resolve_bazel_executable, validate_arguments, validate_command, validate_query_arguments,
@@ -42,6 +43,15 @@ use crate::{
 
 const COMPLETE_BEP_LOG_LIMIT: usize = 2 * 1024 * 1024;
 const FALLBACK_LOG_LIMIT: usize = 8 * 1024 * 1024;
+const BES_COMPLETION_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BepTransport {
+    #[default]
+    Tail,
+    Bes,
+}
 
 #[derive(Clone, Debug)]
 pub struct RunnerConfig {
@@ -57,6 +67,7 @@ pub struct RunnerConfig {
     pub allow_unsupported_bazel_versions: bool,
     pub version_check_timeout: Duration,
     pub maximum_pending_invocations: usize,
+    pub bep_transport: BepTransport,
 }
 
 impl Default for RunnerConfig {
@@ -74,6 +85,7 @@ impl Default for RunnerConfig {
             allow_unsupported_bazel_versions: false,
             version_check_timeout: Duration::from_secs(30),
             maximum_pending_invocations: 256,
+            bep_transport: BepTransport::Tail,
         }
     }
 }
@@ -110,6 +122,14 @@ pub enum RunnerError {
     WaitCancelled(InvocationId),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Bes(#[from] BesError),
+    #[error(
+        "BES transport cannot be combined with a caller-supplied --bes_backend; select tail transport to preserve the remote BES"
+    )]
+    BesBackendConflict,
+    #[error("BES transport owns --bes_upload_mode so capture is complete before reduction")]
+    BesUploadModeConflict,
 }
 
 #[derive(Clone)]
@@ -122,6 +142,7 @@ pub struct InvocationService {
     workspace_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
     live: Arc<Mutex<HashMap<InvocationId, CancellationToken>>>,
     version_cache: Arc<Mutex<HashMap<VersionCacheKey, u32>>>,
+    bes: Option<BesServer>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -234,6 +255,28 @@ pub struct CancelResult {
 
 impl InvocationService {
     pub fn new(store: Store, config: RunnerConfig) -> Result<Self, RunnerError> {
+        if config.bep_transport == BepTransport::Bes {
+            return Err(RunnerError::InvalidConfiguration(
+                "BES transport requires asynchronous InvocationService::start",
+            ));
+        }
+        Self::new_with_bes(store, config, None)
+    }
+
+    pub async fn start(store: Store, config: RunnerConfig) -> Result<Self, RunnerError> {
+        let bes = if config.bep_transport == BepTransport::Bes {
+            Some(BesServer::start().await?)
+        } else {
+            None
+        };
+        Self::new_with_bes(store, config, bes)
+    }
+
+    fn new_with_bes(
+        store: Store,
+        config: RunnerConfig,
+        bes: Option<BesServer>,
+    ) -> Result<Self, RunnerError> {
         if config.global_concurrency == 0 {
             return Err(RunnerError::InvalidConfiguration(
                 "global concurrency must be greater than zero",
@@ -281,6 +324,7 @@ impl InvocationService {
             workspace_locks: Arc::new(Mutex::new(HashMap::new())),
             live: Arc::new(Mutex::new(HashMap::new())),
             version_cache: Arc::new(Mutex::new(HashMap::new())),
+            bes,
         })
     }
 
@@ -445,6 +489,22 @@ impl InvocationService {
         validate_arguments(&request.startup_arguments)?;
         validate_arguments(&request.arguments)?;
         validate_query_arguments(&request.command, &request.arguments)?;
+        if self.config.bep_transport == BepTransport::Bes
+            && request
+                .arguments
+                .iter()
+                .any(|argument| is_flag(argument, "--bes_backend"))
+        {
+            return Err(RunnerError::BesBackendConflict);
+        }
+        if self.config.bep_transport == BepTransport::Bes
+            && request
+                .arguments
+                .iter()
+                .any(|argument| is_flag(argument, "--bes_upload_mode"))
+        {
+            return Err(RunnerError::BesUploadModeConflict);
+        }
         let pending_permit = self
             .pending
             .clone()
@@ -1060,6 +1120,14 @@ impl InvocationService {
                     .map_err(Into::into);
             }
         };
+        let bes_capture = if queued.request.command.class() == CommandClass::BuildLike {
+            match &self.bes {
+                Some(server) => Some(server.register(queued.request.id.to_string(), &paths.bep)?),
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut command = Command::new(executable);
         command
             .current_dir(&queued.request.workspace)
@@ -1077,17 +1145,33 @@ impl InvocationService {
             .args(&queued.request.startup_arguments)
             .arg(queued.request.command.as_str());
         if queued.request.command.class() == CommandClass::BuildLike {
-            command
-                .arg(format!("--invocation_id={}", queued.request.id))
-                .arg(format!("--build_event_binary_file={}", paths.bep.display()))
-                .args([
-                    "--build_event_binary_file_path_conversion=false",
-                    "--tool_tag=bazel-mcp",
-                    "--color=no",
-                    "--curses=no",
-                    "--show_progress=false",
-                    "--show_result=0",
-                ]);
+            command.arg(format!("--invocation_id={}", queued.request.id));
+            match self.config.bep_transport {
+                BepTransport::Tail => {
+                    command
+                        .arg(format!("--build_event_binary_file={}", paths.bep.display()))
+                        .arg("--build_event_binary_file_path_conversion=false");
+                }
+                BepTransport::Bes => {
+                    let endpoint = self
+                        .bes
+                        .as_ref()
+                        .ok_or(RunnerError::InvalidConfiguration(
+                            "BES transport was not initialized",
+                        ))?
+                        .endpoint();
+                    command
+                        .arg(format!("--bes_backend={endpoint}"))
+                        .arg("--bes_upload_mode=wait_for_upload_complete");
+                }
+            }
+            command.args([
+                "--tool_tag=bazel-mcp",
+                "--color=no",
+                "--curses=no",
+                "--show_progress=false",
+                "--show_result=0",
+            ]);
             if matches!(
                 queued.request.command,
                 BazelCommand::Test | BazelCommand::Coverage
@@ -1208,6 +1292,25 @@ impl InvocationService {
         };
         process_group.disarm();
         let bazel_wall_ms = duration_millis(started.elapsed());
+        if let Some(capture) = bes_capture {
+            match capture.finish(BES_COMPLETION_GRACE).await {
+                Ok(stats) => {
+                    tracing::debug!(
+                        invocation_id = %queued.request.id,
+                        events = stats.event_count,
+                        bytes = stats.bep_bytes,
+                        "completed BES capture"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        invocation_id = %queued.request.id,
+                        %error,
+                        "BES capture did not complete cleanly; reducing retained prefix"
+                    );
+                }
+            }
+        }
         let postprocess: Result<InvocationRecord, RunnerError> = async {
             let reduction_started = Instant::now();
             let (query_row_count, query_sample) =
@@ -2293,6 +2396,13 @@ fn bound_json_strings(value: &mut serde_json::Value, maximum_bytes: usize) {
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
+}
+
+fn is_flag(argument: &str, flag: &str) -> bool {
+    argument == flag
+        || argument
+            .strip_prefix(flag)
+            .is_some_and(|suffix| suffix.starts_with('='))
 }
 
 fn finish_from_status(status: ExitStatus) -> (Option<ExitStatus>, Termination, InvocationState) {

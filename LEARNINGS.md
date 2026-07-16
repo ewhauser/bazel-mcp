@@ -49,3 +49,13 @@ efficiency. Do not include secrets or raw sensitive output.
   updates require less repository-wide discovery and cannot drift silently.
 - The matrix consumed smoke output through process substitution and hid producer
   failures; complete the MCP client first so encoding regressions fail CI.
+- A real BES-backed `bazel.run build //:bazel-mcp` retained hundreds of events,
+  but transport counts were available only in stderr tracing. Add transport,
+  event-count, and retained-byte metrics to an opt-in diagnostic view so future
+  investigations avoid reading raw evidence.
+- Warm `bazel.run` responses expose millisecond invocation duration, which was
+  enough to show tail/BES parity but not isolated capture costs. Keep the
+  repeatable BEP transport benchmark for microsecond-resolution regressions.
+- Exercise both `tail` and `bes` across the Bazel version matrix; the same
+  reducer fixtures can validate identical summaries without model-visible raw
+  BEP output.

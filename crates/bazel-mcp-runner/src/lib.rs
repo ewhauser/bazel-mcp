@@ -6,6 +6,6 @@ mod service;
 mod version;
 
 pub use service::{
-    CancelResult, InspectRequest, InspectResult, InspectView, InvocationService, RunnerConfig,
-    RunnerError,
+    BepTransport, CancelResult, InspectRequest, InspectResult, InspectView, InvocationService,
+    RunnerConfig, RunnerError,
 };

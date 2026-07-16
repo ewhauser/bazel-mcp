@@ -430,7 +430,8 @@ command.
 
 ### 11.1 Internal flags
 
-For build-like commands, the server owns and injects flags equivalent to:
+For build-like commands in `tail` transport, the server owns and injects flags
+equivalent to:
 
 ```text
 --invocation_id=<uuid>
@@ -441,6 +442,13 @@ For build-like commands, the server owns and injects flags equivalent to:
 --curses=no
 --show_progress=false
 --show_result=0
+```
+
+In `bes` transport, the two binary-file flags are replaced by:
+
+```text
+--bes_backend=grpc://127.0.0.1:<ephemeral-port>
+--bes_upload_mode=wait_for_upload_complete
 ```
 
 For test-like commands, the server additionally applies terminal-output policy
@@ -482,7 +490,10 @@ The server MUST NOT silently inject or change:
 
 An agent-oriented `--remote_download_outputs=minimal` profile MAY be added later,
 but it must be explicit because it changes local artifact availability. Existing
-`--bes_backend` and BuildBuddy configuration MUST continue to operate.
+`--bes_backend` and BuildBuddy configuration MUST continue to operate in the
+default `tail` transport. Selecting `bes` is explicit and rejects a
+caller-supplied remote BES endpoint rather than silently forwarding or
+overriding it.
 
 ## 12. Invocation lifecycle
 
@@ -550,12 +561,16 @@ It MUST reap every child and MUST NOT leave an untracked Bazel client running.
 
 ### 13.1 Capture format
 
-- Build-like commands write a binary, varint-length-delimited BEP file.
+- Build-like commands retain a binary, varint-length-delimited BEP file.
+- `tail` transport asks Bazel to write the file directly. `bes` transport runs
+  a loopback gRPC `PublishBuildEvent` service, acknowledges ordered events only
+  after writing their payload, and reconstructs the same file.
 - The complete file is retained for the configured retention period.
 - The MVP MAY parse after process completion. Incremental file tailing is an
   optimization, not a requirement for initial token savings.
-- A later local Build Event Service MUST NOT replace an existing remote BES
-  without an explicit, tested forwarding design.
+- The local Build Event Service MUST NOT replace an existing remote BES unless
+  the operator explicitly selects `bes`; remote coexistence uses `tail` until a
+  tested forwarding design exists.
 
 ### 13.2 Protobuf management
 
@@ -740,8 +755,9 @@ user cache directory and MUST NOT be placed inside the Bazel workspace.
   awaited filesystem I/O.
 - Startup removes committed trash, discards uncommitted temporary files,
   rebuilds bounded indexes, and terminalizes orphaned nonterminal records.
-- Stdout, stderr, and BEP are written directly by Bazel to their final evidence
-  files. Query inspection scans `stdout.log` with opaque byte-offset cursors.
+- Stdout and stderr are written directly by Bazel. BEP is written directly in
+  `tail` transport or streamed through the loopback BES into its final evidence
+  file. Query inspection scans `stdout.log` with opaque byte-offset cursors.
 - BEP parsing is frame-streaming and retains only bounded reducer state.
 - Cursors encode stable ordering keys and are opaque to clients.
 

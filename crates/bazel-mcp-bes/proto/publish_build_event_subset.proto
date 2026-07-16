@@ -1,0 +1,46 @@
+// Wire-compatible subset of google.devtools.build.v1 PublishBuildEvent.
+syntax = "proto3";
+
+package google.devtools.build.v1;
+
+message Empty {}
+
+message Any {
+  string type_url = 1;
+  bytes value = 2;
+}
+
+message StreamId {
+  string build_id = 1;
+  int32 component = 3;
+  string invocation_id = 6;
+}
+
+message BuildComponentStreamFinished {
+  int32 type = 1;
+}
+
+message BuildEvent {
+  oneof event {
+    BuildComponentStreamFinished component_stream_finished = 59;
+    Any bazel_event = 60;
+  }
+}
+
+message OrderedBuildEvent {
+  StreamId stream_id = 1;
+  int64 sequence_number = 2;
+  BuildEvent event = 3;
+}
+
+// Lifecycle contents are intentionally ignored by the local capture service.
+message PublishLifecycleEventRequest {}
+
+message PublishBuildToolEventStreamRequest {
+  OrderedBuildEvent ordered_build_event = 4;
+}
+
+message PublishBuildToolEventStreamResponse {
+  StreamId stream_id = 1;
+  int64 sequence_number = 2;
+}

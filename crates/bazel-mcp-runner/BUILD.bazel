@@ -8,6 +8,7 @@ rust_library(
     crate_name = "bazel_mcp_runner",
     deps = [
         "//crates/bazel-mcp-bep:bazel_mcp_bep",
+        "//crates/bazel-mcp-bes:bazel_mcp_bes",
         "//crates/bazel-mcp-policy:bazel_mcp_policy",
         "//crates/bazel-mcp-reducer:bazel_mcp_reducer",
         "//crates/bazel-mcp-store:bazel_mcp_store",

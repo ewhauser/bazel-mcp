@@ -13,10 +13,12 @@ cargo-fuzz = true
 arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
 bazel-mcp-bep = { path = "../crates/bazel-mcp-bep" }
+bazel-mcp-bes = { path = "../crates/bazel-mcp-bes" }
 bazel-mcp-policy = { path = "../crates/bazel-mcp-policy" }
 bazel-mcp-reducer = { path = "../crates/bazel-mcp-reducer" }
 bazel-mcp-store = { path = "../crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "../crates/bazel-mcp-types" }
+buffa = "=0.8.1"
 
 [[bin]]
 name = "bep_framing"
@@ -27,6 +29,12 @@ doc = false
 [[bin]]
 name = "bep_event_stream"
 path = "fuzz_targets/bep_event_stream.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bes_request_decode"
+path = "fuzz_targets/bes_request_decode.rs"
 test = false
 doc = false
 
