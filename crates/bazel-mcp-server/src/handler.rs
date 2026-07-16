@@ -61,8 +61,10 @@ pub struct RunParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct InspectParams {
     /// UUID returned by bazel.run.
-    pub invocation_id: String,
-    /// summary, diagnostics, tests, coverage, artifacts, query_results, log, or test_log.
+    pub invocation_id: Option<String>,
+    /// Optional absolute workspace path used to scope retained invocation listings.
+    pub workspace: Option<String>,
+    /// summary, diagnostics, tests, coverage, artifacts, query_results, log, test_log, or invocations.
     pub view: String,
     /// Optional literal substring or label glob filter.
     pub filter: Option<String>,
@@ -214,13 +216,12 @@ impl BazelMcpServer {
 
     #[tool(
         name = "bazel.inspect",
-        description = "Read one bounded, filtered view of a retained Bazel invocation."
+        description = "Read bounded retained invocation evidence or list recent invocations."
     )]
     async fn bazel_inspect(
         &self,
         Parameters(params): Parameters<InspectParams>,
     ) -> Result<CallToolResult, String> {
-        let id = parse_id(&params.invocation_id)?;
         let view = match params.view.as_str() {
             "summary" => InspectView::Summary,
             "diagnostics" => InspectView::Diagnostics,
@@ -230,16 +231,33 @@ impl BazelMcpServer {
             "coverage" => InspectView::Coverage,
             "artifacts" => InspectView::Artifacts,
             "query_results" => InspectView::QueryResults,
+            "invocations" => InspectView::Invocations,
             other => return Err(format!("unsupported inspection view: {other}")),
         };
+        let id = if view == InspectView::Invocations {
+            if params.invocation_id.is_some() {
+                return Err("invocation_id is not supported for the invocations view".into());
+            }
+            None
+        } else {
+            let value = params
+                .invocation_id
+                .as_deref()
+                .ok_or_else(|| "invocation_id is required for this view".to_owned())?;
+            Some(parse_id(value)?)
+        };
+        let workspace = params.workspace.map(PathBuf::from);
+        if workspace.is_some() && view != InspectView::Invocations {
+            return Err("workspace is supported only for the invocations view".into());
+        }
         let visible_budget = 8 * 1024;
         let mut representation_budget = self.single_representation_budget(visible_budget);
         loop {
             let result = self
                 .runner
                 .inspect(InspectRequest {
-                    invocation_id: Some(id),
-                    workspace: None,
+                    invocation_id: id,
+                    workspace: workspace.clone(),
                     view,
                     cursor: params.cursor.clone(),
                     filter: params.filter.clone(),
@@ -266,10 +284,11 @@ impl BazelMcpServer {
                 }
                 continue;
             }
-            if let Err(error) = self
-                .runner
-                .record_model_visible_result(id, bytes, true)
-                .await
+            if let Some(id) = id
+                && let Err(error) = self
+                    .runner
+                    .record_model_visible_result(id, bytes, true)
+                    .await
             {
                 tracing::warn!(
                     invocation_id = %id,
@@ -1207,6 +1226,40 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn invocation_ledger_can_be_scoped_to_a_workspace() {
+        let root = tempdir().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let workspace = PathBuf::from("/workspace/ledger-scope");
+        let record = InvocationRecord::queued(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Info,
+            vec!["release".to_owned()],
+        ));
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        let runner = InvocationService::new(store, RunnerConfig::default()).unwrap();
+        let server = BazelMcpServer::new(runner, ResultEncoding::Text);
+
+        let result = server
+            .bazel_inspect(Parameters(InspectParams {
+                invocation_id: None,
+                workspace: Some(workspace.to_string_lossy().into_owned()),
+                view: "invocations".to_owned(),
+                filter: None,
+                limit: Some(20),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("ledger result did not contain one text block");
+        };
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["view"], "invocations");
+        assert_eq!(value["items"][0]["request"]["id"], id.to_string());
+    }
 
     #[tokio::test]
     async fn result_encodings_charge_their_model_visible_representations() {
