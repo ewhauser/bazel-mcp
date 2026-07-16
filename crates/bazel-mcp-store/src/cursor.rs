@@ -70,9 +70,18 @@ impl DeferredCursor {
 }
 
 impl InvocationCursor {
-    pub fn new(workspace: Option<&str>, requested_at_ms: i64, id: String) -> Self {
+    pub fn new(
+        workspace: Option<&str>,
+        state: Option<&str>,
+        requested_at_ms: i64,
+        id: String,
+    ) -> Self {
         Self {
-            context: cursor_context(&["invocations", workspace.unwrap_or_default()]),
+            context: cursor_context(&[
+                "invocations",
+                workspace.unwrap_or_default(),
+                state.unwrap_or_default(),
+            ]),
             requested_at_ms,
             id,
         }
@@ -96,9 +105,19 @@ impl InvocationCursor {
         })
     }
 
-    pub fn decode_for(value: &str, workspace: Option<&str>) -> Result<Self, StoreError> {
+    pub fn decode_for(
+        value: &str,
+        workspace: Option<&str>,
+        state: Option<&str>,
+    ) -> Result<Self, StoreError> {
         let cursor = Self::decode(value)?;
-        if cursor.context != cursor_context(&["invocations", workspace.unwrap_or_default()]) {
+        if cursor.context
+            != cursor_context(&[
+                "invocations",
+                workspace.unwrap_or_default(),
+                state.unwrap_or_default(),
+            ])
+        {
             return Err(StoreError::InvalidCursor);
         }
         Ok(cursor)
@@ -292,10 +311,13 @@ mod tests {
     #[test]
     fn cursors_reject_versions_lengths_and_cross_context_use() {
         let id = Uuid::now_v7().to_string();
-        let cursor = InvocationCursor::new(Some("/workspace"), 123, id);
+        let cursor = InvocationCursor::new(Some("/workspace"), Some("failed"), 123, id);
         let encoded = cursor.encode().unwrap();
-        assert!(InvocationCursor::decode_for(&encoded, Some("/workspace")).is_ok());
-        assert!(InvocationCursor::decode_for(&encoded, Some("/other")).is_err());
+        assert!(InvocationCursor::decode_for(&encoded, Some("/workspace"), Some("failed")).is_ok());
+        assert!(InvocationCursor::decode_for(&encoded, Some("/other"), Some("failed")).is_err());
+        assert!(
+            InvocationCursor::decode_for(&encoded, Some("/workspace"), Some("succeeded")).is_err()
+        );
 
         let mut bytes = URL_SAFE_NO_PAD.decode(&encoded).unwrap();
         bytes[0] = VERSION + 1;

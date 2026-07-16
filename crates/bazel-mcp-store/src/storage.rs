@@ -791,14 +791,16 @@ impl Store {
     pub async fn list_invocations(
         &self,
         workspace: Option<&Path>,
+        state: Option<InvocationState>,
         page: PageRequest,
     ) -> Result<Page<InvocationRecord>, StoreError> {
         let limit = page.limit.clamp(1, 200) as usize;
         let workspace_text = workspace.map(|path| path.to_string_lossy().into_owned());
+        let state_text = state.map(InvocationState::as_str);
         let cursor = page
             .cursor
             .as_deref()
-            .map(|value| InvocationCursor::decode_for(value, workspace_text.as_deref()))
+            .map(|value| InvocationCursor::decode_for(value, workspace_text.as_deref(), state_text))
             .transpose()?;
         let index = self.inner.index.read().await;
         let collect = |ordered: &BTreeSet<(i64, InvocationId)>| {
@@ -812,7 +814,9 @@ impl Store {
                                 && id.to_string() < cursor.id)
                     })
                 })
-                .filter_map(|(_, id)| index.entries.get(id).map(|entry| entry.record.clone()))
+                .filter_map(|(_, id)| index.entries.get(id))
+                .filter(|entry| state.is_none_or(|state| entry.record.state == state))
+                .map(|entry| entry.record.clone())
                 .take(limit + 1)
                 .collect::<Vec<_>>()
         };
@@ -832,6 +836,7 @@ impl Store {
                 .map(|record| {
                     InvocationCursor::new(
                         workspace_text.as_deref(),
+                        state_text,
                         record.request.requested_at_ms,
                         record.request.id.to_string(),
                     )
@@ -2223,6 +2228,7 @@ mod tests {
         let store = Store::open(root.path()).await.unwrap();
         let mut first = record(&workspace_a);
         first.request.requested_at_ms = 100;
+        first.state = InvocationState::Failed;
         let first_id = first.request.id;
         store.create_invocation(&first).await.unwrap();
         let mut second = record(&workspace_b);
@@ -2241,6 +2247,7 @@ mod tests {
         let workspace_page = store
             .list_invocations(
                 Some(&workspace_a),
+                None,
                 PageRequest {
                     cursor: None,
                     limit: 10,
@@ -2257,6 +2264,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![third_id, first_id]
         );
+        let failed_page = store
+            .list_invocations(
+                Some(&workspace_a),
+                Some(InvocationState::Failed),
+                PageRequest::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed_page.items.len(), 1);
+        assert_eq!(failed_page.items[0].request.id, first_id);
         let deferred_page = store
             .list_deferred_results(DeferredRetrieval::InlineResult, 301, PageRequest::default())
             .await
@@ -2266,7 +2283,7 @@ mod tests {
 
         let reopened = Store::open(root.path()).await.unwrap();
         let rebuilt = reopened
-            .list_invocations(Some(&workspace_a), PageRequest::default())
+            .list_invocations(Some(&workspace_a), None, PageRequest::default())
             .await
             .unwrap();
         assert_eq!(rebuilt.items[0].request.id, third_id);

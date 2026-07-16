@@ -159,6 +159,7 @@ pub enum InspectView {
 pub struct InspectRequest {
     pub invocation_id: Option<InvocationId>,
     pub workspace: Option<PathBuf>,
+    pub state: Option<InvocationState>,
     pub view: InspectView,
     pub cursor: Option<String>,
     pub filter: Option<String>,
@@ -782,6 +783,7 @@ impl InvocationService {
                 .store
                 .list_invocations(
                     request.workspace.as_deref(),
+                    request.state,
                     PageRequest {
                         cursor: request.cursor,
                         limit: request.limit.clamp(1, 100),
@@ -2424,6 +2426,7 @@ mod tests {
         let mut request = InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
             view: InspectView::Log,
             cursor: None,
             filter: None,

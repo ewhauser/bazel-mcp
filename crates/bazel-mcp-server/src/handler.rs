@@ -64,6 +64,8 @@ pub struct InspectParams {
     pub invocation_id: Option<String>,
     /// Optional absolute workspace path used to scope retained invocation listings.
     pub workspace: Option<String>,
+    /// Optional invocation state used to filter retained invocation listings.
+    pub state: Option<String>,
     /// summary, diagnostics, tests, coverage, artifacts, query_results, log, test_log, or invocations.
     pub view: String,
     /// Optional literal substring or label glob filter.
@@ -252,6 +254,14 @@ impl BazelMcpServer {
         if workspace.is_some() && view != InspectView::Invocations {
             return Err("workspace is supported only for the invocations view".into());
         }
+        let state = params
+            .state
+            .as_deref()
+            .map(parse_inspect_state)
+            .transpose()?;
+        if state.is_some() && view != InspectView::Invocations {
+            return Err("state is supported only for the invocations view".into());
+        }
         let visible_budget = inspect_visible_budget(params.max_bytes);
         let mut representation_budget = self.single_representation_budget(visible_budget);
         loop {
@@ -260,6 +270,7 @@ impl BazelMcpServer {
                 .inspect(InspectRequest {
                     invocation_id: id,
                     workspace: workspace.clone(),
+                    state,
                     view,
                     cursor: params.cursor.clone(),
                     filter: params.filter.clone(),
@@ -1221,6 +1232,20 @@ fn parse_id(value: &str) -> Result<InvocationId, String> {
         .map_err(|_| "invocation_id must be a UUID".to_owned())
 }
 
+fn parse_inspect_state(value: &str) -> Result<InvocationState, String> {
+    match value {
+        "queued" => Ok(InvocationState::Queued),
+        "starting" => Ok(InvocationState::Starting),
+        "running" => Ok(InvocationState::Running),
+        "succeeded" => Ok(InvocationState::Succeeded),
+        "failed" => Ok(InvocationState::Failed),
+        "cancelled" => Ok(InvocationState::Cancelled),
+        "timed_out" => Ok(InvocationState::TimedOut),
+        "interrupted" => Ok(InvocationState::Interrupted),
+        _ => Err(format!("unsupported invocation state: {value}")),
+    }
+}
+
 fn inspect_visible_budget(requested: Option<u32>) -> usize {
     requested.unwrap_or(8 * 1024).clamp(512, 8 * 1024) as usize
 }
@@ -1238,13 +1263,21 @@ mod tests {
         let root = tempdir().unwrap();
         let store = Store::open(root.path()).await.unwrap();
         let workspace = PathBuf::from("/workspace/ledger-scope");
-        let record = InvocationRecord::queued(InvocationRequest::new(
+        let mut record = InvocationRecord::queued(InvocationRequest::new(
             workspace.clone(),
             BazelCommand::Info,
             vec!["release".to_owned()],
         ));
+        record.state = InvocationState::Failed;
         let id = record.request.id;
         store.create_invocation(&record).await.unwrap();
+        let mut succeeded = InvocationRecord::queued(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Build,
+            vec!["//...".to_owned()],
+        ));
+        succeeded.state = InvocationState::Succeeded;
+        store.create_invocation(&succeeded).await.unwrap();
         let runner = InvocationService::new(store, RunnerConfig::default()).unwrap();
         let server = BazelMcpServer::new(runner, ResultEncoding::Text);
 
@@ -1252,6 +1285,7 @@ mod tests {
             .bazel_inspect(Parameters(InspectParams {
                 invocation_id: None,
                 workspace: Some(workspace.to_string_lossy().into_owned()),
+                state: Some("failed".to_owned()),
                 view: "invocations".to_owned(),
                 filter: None,
                 limit: Some(20),
@@ -1266,6 +1300,7 @@ mod tests {
         assert!(content.text.len() <= 2_048);
         let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
         assert_eq!(value["view"], "invocations");
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
         assert_eq!(value["items"][0]["request"]["id"], id.to_string());
     }
 
