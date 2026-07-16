@@ -10,11 +10,12 @@ use bazel_mcp_policy::PolicyConfig;
 use bazel_mcp_runner::{InspectRequest, InspectView, InvocationService, RunnerConfig};
 use bazel_mcp_store::Store;
 use bazel_mcp_types::{
-    Artifact, ArtifactKind, BazelCommand, Diagnostic, DiagnosticCategory, InvocationRecord,
-    InvocationRequest, InvocationState, InvocationSummary, Severity, Termination, TestCase,
-    TestResult, TestStatus,
+    Artifact, ArtifactKind, BazelCommand, DeferredRetrieval, Diagnostic, DiagnosticCategory,
+    InvocationRecord, InvocationRequest, InvocationState, InvocationSummary, ResultDisposition,
+    Severity, Termination, TestCase, TestResult, TestStatus,
 };
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 async fn wait_for_path(path: &Path) {
     for _ in 0..500 {
@@ -24,6 +25,16 @@ async fn wait_for_path(path: &Path) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("timed out waiting for {}", path.display());
+}
+
+async fn wait_for_invocation(service: &InvocationService, id: bazel_mcp_types::InvocationId) {
+    for _ in 0..500 {
+        if service.store().get_invocation(id).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for invocation {id}");
 }
 
 async fn service(root: &TempDir, workspace: &Path, script: &str) -> InvocationService {
@@ -270,13 +281,102 @@ async fn cancellation_stops_a_running_process_group() {
         let service = service.clone();
         async move { service.run(request).await.unwrap() }
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_for_invocation(&service, id).await;
     assert!(service.cancel(id).await.unwrap().cancellation_requested);
     let record = tokio::time::timeout(Duration::from_secs(3), running)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(record.state, InvocationState::Cancelled);
+}
+
+#[tokio::test]
+async fn deferred_submission_commits_before_completion_and_survives_wait_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let launches = root.path().join("launches");
+    let service = service(
+        &root,
+        &workspace,
+        &format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = //:warm ] && exit 0; done\necho run >> '{}'\nsleep 0.4\nexit 0\n",
+            launches.display()
+        ),
+    )
+    .await;
+    service
+        .run(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Build,
+            vec!["//:warm".into()],
+        ))
+        .await
+        .unwrap();
+    let request = InvocationRequest::new(
+        workspace.clone(),
+        BazelCommand::Build,
+        vec!["//:deferred".into()],
+    );
+    let id = request.id;
+    let started = Instant::now();
+    let accepted = service
+        .submit(
+            request,
+            ResultDisposition::Deferred {
+                retrieval: DeferredRetrieval::InlineResult,
+                expires_at_ms: bazel_mcp_types::unix_timestamp_ms() + 60_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted, id);
+    assert!(started.elapsed() < Duration::from_millis(300));
+    let visible = service
+        .deferred_result(id, DeferredRetrieval::InlineResult)
+        .await
+        .unwrap();
+    assert!(!visible.invocation.state.is_terminal());
+
+    let cancelled_wait = CancellationToken::new();
+    cancelled_wait.cancel();
+    assert!(matches!(
+        service.wait(id, cancelled_wait).await,
+        Err(bazel_mcp_runner::RunnerError::WaitCancelled(found)) if found == id
+    ));
+
+    let completed = tokio::time::timeout(
+        Duration::from_secs(3),
+        service.wait(id, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(completed.state, InvocationState::Succeeded);
+    assert_eq!(
+        tokio::fs::read_to_string(&launches)
+            .await
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+
+    let rejected = InvocationRequest::new(workspace, BazelCommand::Clean, Vec::new());
+    let rejected_id = rejected.id;
+    assert!(
+        service
+            .submit(
+                rejected,
+                ResultDisposition::Deferred {
+                    retrieval: DeferredRetrieval::InlineResult,
+                    expires_at_ms: bazel_mcp_types::unix_timestamp_ms() + 60_000,
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(service.store().get_invocation(rejected_id).await.is_err());
 }
 
 #[tokio::test]
@@ -354,7 +454,9 @@ async fn bounds_hundreds_of_pending_requests_with_an_explicit_queue_limit() {
             }),
         ));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for (id, _) in &accepted {
+        wait_for_invocation(&service, *id).await;
+    }
     for index in 8..300 {
         let error = service
             .run(InvocationRequest::new(
@@ -367,6 +469,7 @@ async fn bounds_hundreds_of_pending_requests_with_an_explicit_queue_limit() {
         assert!(matches!(error, bazel_mcp_runner::RunnerError::QueueFull(8)));
     }
     for (id, task) in accepted {
+        wait_for_invocation(&service, id).await;
         service.cancel(id).await.unwrap();
         let record = tokio::time::timeout(Duration::from_secs(3), task)
             .await
@@ -428,7 +531,7 @@ async fn queued_cancellation_returns_a_complete_terminal_summary() {
         let service = service.clone();
         async move { service.run(queued_request).await.unwrap() }
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_invocation(&service, queued_id).await;
     assert!(
         service
             .cancel(queued_id)
@@ -459,6 +562,15 @@ async fn scheduler_uses_effective_output_base_and_never_evaluates_arguments() {
         .await
         .unwrap();
     let service = service(&root, &first, "#!/bin/sh\nsleep 0.3\nexit 0\n").await;
+
+    service
+        .run(InvocationRequest::new(
+            first.clone(),
+            BazelCommand::Build,
+            vec!["//:warm-version-cache".into()],
+        ))
+        .await
+        .unwrap();
 
     let shell_marker = root.path().join("shell-evaluated");
     let literal_argument = format!("$(touch {})", shell_marker.display());

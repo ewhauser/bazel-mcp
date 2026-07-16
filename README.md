@@ -108,6 +108,201 @@ and selected informational commands. Successful results are limited to 2 KiB
 and unsuccessful results to 8 KiB. Follow-up `bazel.inspect` calls are also
 bounded and paginated, so an agent only retrieves the evidence it needs.
 
+Long calls can be returned as durable task handles when the MCP client declares
+task support. With the default `auto` policy, the server discovers the
+negotiated protocol and chooses synchronous execution, MCP `2025-11-25` legacy
+tasks, or the `io.modelcontextprotocol/tasks` extension at runtime. This does
+not add tools: task status, result, and cancellation are protocol methods.
+
+## MCP protocol shape
+
+MCP clients normally produce these messages on an agent's behalf, but the wire
+shape is useful when integrating or debugging a host. `bazel-mcp` uses
+newline-delimited JSON-RPC 2.0 over stdio; the examples below are formatted
+across lines for readability and omit unrelated response fields.
+
+| Flow | Client signal | Initial result | Final result |
+| --- | --- | --- | --- |
+| Synchronous | No task capability, or `sync_only` policy | `CallToolResult` | Same `tools/call` response |
+| Legacy tasks | MCP `2025-11-25` plus `params.task` | Nested `result.task` | Separate `tasks/result` call |
+| Tasks extension | Extension capability in request `_meta` | Flat `resultType: "task"` | Inline in terminal `tasks/get` |
+
+<details>
+<summary>Show representative JSON-RPC messages</summary>
+
+### Synchronous call
+
+A basic call is an ordinary MCP tool request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "bazel.run",
+    "arguments": {
+      "workspace": "/src/project",
+      "command": "build",
+      "args": ["//app:server"]
+    }
+  }
+}
+```
+
+Without a compatible task opt-in, the request remains attached and returns a
+normal `CallToolResult`. The default `text` encoding places the bounded logical
+result in one text content block:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"invocation_id\":\"019f...\",\"state\":\"succeeded\",\"command\":\"build\",\"exit_code\":0,\"headline\":\"Build succeeded\",\"more_available\":true}"
+    }],
+    "isError": false
+  }
+}
+```
+
+That `invocation_id` can be passed to `bazel.inspect` or `bazel.cancel`.
+Different result encodings change the content representation, not the logical
+result or its byte budget.
+
+### Legacy MCP tasks
+
+A client negotiating MCP `2025-11-25` sees
+`bazel.run.execution.taskSupport = "optional"`. It opts into detached execution
+by adding `params.task` to the same tool call:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "bazel.run",
+    "arguments": {
+      "workspace": "/src/project",
+      "command": "test",
+      "args": ["//services/..."]
+    },
+    "task": {}
+  }
+}
+```
+
+The response contains a nested task. Its `taskId` is also the Bazel invocation
+ID, and it is readable as soon as the handle is returned:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "task": {
+      "taskId": "019f...",
+      "status": "working",
+      "ttl": 86400000,
+      "pollInterval": 2000
+    },
+    "_meta": {
+      "io.modelcontextprotocol/related-task": {
+        "taskId": "019f..."
+      }
+    }
+  }
+}
+```
+
+The client polls `tasks/get`, waits for the original `CallToolResult` with
+`tasks/result`, lists durable handles with `tasks/list`, or requests
+`tasks/cancel`.
+
+### Tasks extension
+
+Modern extension-aware clients can discover the capability with
+`server/discover`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "server/discover",
+  "params": {}
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "capabilities": {
+      "extensions": {
+        "io.modelcontextprotocol/tasks": {}
+      }
+    }
+  }
+}
+```
+
+After negotiating the extension's `2026-06-30` base protocol, each participating
+request declares the extension in `_meta`. The initial result is flat rather
+than nested:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "bazel.run",
+    "arguments": {
+      "workspace": "/src/project",
+      "command": "build",
+      "args": ["//app:server"]
+    },
+    "_meta": {
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": {
+          "io.modelcontextprotocol/tasks": {}
+        }
+      }
+    }
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "resultType": "task",
+    "taskId": "019f...",
+    "status": "working",
+    "ttlMs": 86400000,
+    "pollIntervalMs": 2000
+  }
+}
+```
+
+Here the client polls `tasks/get`; once terminal, that response contains the
+original `CallToolResult` inline in its `result` field. The extension has no
+`tasks/result` or `tasks/list` methods. Both task dialects are durable across a
+server restart, while clients that declare neither continue to use the simpler
+synchronous shape.
+
+</details>
+
+See [specification 003](specs/003-configurable-mcp-task-execution.md) for the
+complete negotiation matrix, cancellation semantics, error codes, and pinned
+protocol revisions.
+
 ## Security and local data
 
 `bazel-mcp` executes Bazel with the permissions of the user who started the MCP
@@ -164,9 +359,16 @@ their defaults.
 | Platforms | macOS and Linux |
 | Transport | Local MCP over stdio |
 | Bazel discovery | `tools/bazel`, then Bazelisk, then Bazel on `PATH` |
+| Task execution | Synchronous fallback, MCP `2025-11-25` legacy tasks, and the SEP-2663 Tasks extension |
 
 Other Bazel major versions are rejected before an invocation is created unless
 they are explicitly enabled in the configuration.
+
+Use `mcp_execution_policy = "sync_only"` if a host cannot consume task-shaped
+results. Use `tasks_required` only when detached execution is mandatory; calls
+from clients without compatible capabilities are then rejected before Bazel
+starts. See the [configuration reference](docs/configuration.md#configure-negotiated-task-execution)
+for TTL and polling settings.
 
 ## Performance
 

@@ -1,22 +1,26 @@
-use std::{path::PathBuf, str::FromStr};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr, time::Duration};
 
 use bazel_mcp_runner::{InspectRequest, InspectView, InvocationService};
 use bazel_mcp_types::{
-    BazelCommand, Diagnostic, InvocationId, InvocationRequest, QueryRow, TargetCounts, Termination,
-    TestCounts,
+    BazelCommand, DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic,
+    InvocationId, InvocationRecord, InvocationRequest, InvocationState, PageRequest, QueryRow,
+    ResultDisposition, TargetCounts, Termination, TestCounts,
 };
 use rmcp::{
-    RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Meta, ProgressNotificationParam},
+    ErrorData, RoleServer,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::*,
     schemars,
-    service::Peer,
-    tool, tool_handler, tool_router,
+    service::{NotificationContext, Peer, RequestContext, Service, ServiceRole},
+    tool, tool_router,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ResultEncoding;
+use crate::{McpExecutionPolicy, ResultEncoding};
+
+const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
+const IMMEDIATE_RESPONSE: &str = "io.modelcontextprotocol/model-immediate-response";
 
 #[derive(Clone)]
 pub struct BazelMcpServer {
@@ -24,10 +28,9 @@ pub struct BazelMcpServer {
     result_encoding: ResultEncoding,
     progress_initial_delay: std::time::Duration,
     progress_interval: std::time::Duration,
-    #[expect(
-        dead_code,
-        reason = "the rmcp tool_handler macro reads this router field"
-    )]
+    execution_policy: McpExecutionPolicy,
+    task_ttl: Duration,
+    task_poll_interval_ms: u64,
     tool_router: ToolRouter<Self>,
 }
 
@@ -105,6 +108,9 @@ impl BazelMcpServer {
             result_encoding,
             progress_initial_delay: std::time::Duration::from_secs(30),
             progress_interval: std::time::Duration::from_secs(60),
+            execution_policy: McpExecutionPolicy::Auto,
+            task_ttl: Duration::from_secs(24 * 60 * 60),
+            task_poll_interval_ms: 2_000,
             tool_router: Self::tool_router(),
         }
     }
@@ -117,6 +123,19 @@ impl BazelMcpServer {
     ) -> Self {
         self.progress_initial_delay = initial_delay;
         self.progress_interval = interval;
+        self
+    }
+
+    #[must_use]
+    pub fn with_task_execution(
+        mut self,
+        policy: McpExecutionPolicy,
+        ttl: Duration,
+        poll_interval_ms: u64,
+    ) -> Self {
+        self.execution_policy = policy;
+        self.task_ttl = ttl;
+        self.task_poll_interval_ms = poll_interval_ms;
         self
     }
 }
@@ -192,76 +211,7 @@ impl BazelMcpServer {
                 .record_progress_notifications(id, progress_notifications)
                 .await;
         }
-        let exit_code = match &record.termination {
-            Some(Termination::Exit { code }) => Some(*code),
-            _ => None,
-        };
-        let summary = record
-            .summary
-            .as_ref()
-            .ok_or_else(|| "completed invocation has no summary".to_owned())?;
-        let mut diagnostic_count = summary.diagnostics.len();
-        let mut query_sample_count = summary.query_sample.len();
-        loop {
-            let result = RunResult {
-                invocation_id: record.request.id.to_string(),
-                state: record.state,
-                command: record.request.command.as_str(),
-                exit_code,
-                duration_ms: record.metrics.bazel_wall_ms,
-                stdout_bytes: record.metrics.raw_stdout_bytes,
-                stderr_bytes: record.metrics.raw_stderr_bytes,
-                headline: &summary.headline,
-                targets: summary.target_counts.clone(),
-                tests: summary.test_counts.clone(),
-                diagnostics: &summary.diagnostics[..diagnostic_count],
-                query_result_count: summary.query_result_count,
-                query_sample: (query_sample_count > 0)
-                    .then_some(&summary.query_sample[..query_sample_count]),
-                truncated: summary.truncated
-                    || diagnostic_count < summary.diagnostics.len()
-                    || query_sample_count < summary.query_sample.len(),
-                available_views: &[
-                    "summary",
-                    "diagnostics",
-                    "tests",
-                    "coverage",
-                    "artifacts",
-                    "query_results",
-                    "log",
-                ],
-                more_available: summary.truncated
-                    || diagnostic_count < summary.diagnostics.len()
-                    || query_sample_count < summary.query_sample.len()
-                    || !summary.targets.is_empty()
-                    || !summary.tests.is_empty()
-                    || summary.inspect_hint.is_some(),
-            };
-            let value = serde_json::to_value(&result).map_err(|error| error.to_string())?;
-            let limit = if summary.success { 2 * 1024 } else { 8 * 1024 };
-            let bytes = self.model_visible_bytes(&value)?;
-            if bytes <= limit {
-                if let Err(error) = self
-                    .runner
-                    .record_model_visible_result(record.request.id, bytes, false)
-                    .await
-                {
-                    tracing::warn!(
-                        invocation_id = %record.request.id,
-                        %error,
-                        "could not persist model-visible response metrics"
-                    );
-                }
-                return self.encode(value);
-            }
-            if query_sample_count > 0 {
-                query_sample_count -= 1;
-            } else if diagnostic_count > 0 {
-                diagnostic_count -= 1;
-            } else {
-                return Err("bounded bazel.run response could not fit its hard byte limit".into());
-            }
-        }
+        self.build_run_result(&record, false).await
     }
 
     #[tool(
@@ -351,6 +301,87 @@ impl BazelMcpServer {
 }
 
 impl BazelMcpServer {
+    async fn build_run_result(
+        &self,
+        record: &InvocationRecord,
+        tool_error: bool,
+    ) -> Result<CallToolResult, String> {
+        let exit_code = match &record.termination {
+            Some(Termination::Exit { code }) => Some(*code),
+            _ => None,
+        };
+        let summary = record
+            .summary
+            .as_ref()
+            .ok_or_else(|| "completed invocation has no summary".to_owned())?;
+        let mut diagnostic_count = summary.diagnostics.len();
+        let mut query_sample_count = summary.query_sample.len();
+        loop {
+            let result = RunResult {
+                invocation_id: record.request.id.to_string(),
+                state: record.state,
+                command: record.request.command.as_str(),
+                exit_code,
+                duration_ms: record.metrics.bazel_wall_ms,
+                stdout_bytes: record.metrics.raw_stdout_bytes,
+                stderr_bytes: record.metrics.raw_stderr_bytes,
+                headline: &summary.headline,
+                targets: summary.target_counts.clone(),
+                tests: summary.test_counts.clone(),
+                diagnostics: &summary.diagnostics[..diagnostic_count],
+                query_result_count: summary.query_result_count,
+                query_sample: (query_sample_count > 0)
+                    .then_some(&summary.query_sample[..query_sample_count]),
+                truncated: summary.truncated
+                    || diagnostic_count < summary.diagnostics.len()
+                    || query_sample_count < summary.query_sample.len(),
+                available_views: &[
+                    "summary",
+                    "diagnostics",
+                    "tests",
+                    "coverage",
+                    "artifacts",
+                    "query_results",
+                    "log",
+                ],
+                more_available: summary.truncated
+                    || diagnostic_count < summary.diagnostics.len()
+                    || query_sample_count < summary.query_sample.len()
+                    || !summary.targets.is_empty()
+                    || !summary.tests.is_empty()
+                    || summary.inspect_hint.is_some(),
+            };
+            let value = serde_json::to_value(&result).map_err(|error| error.to_string())?;
+            let limit = if summary.success { 2 * 1024 } else { 8 * 1024 };
+            let bytes = self.model_visible_bytes(&value)?;
+            if bytes <= limit {
+                if let Err(error) = self
+                    .runner
+                    .record_model_visible_result(record.request.id, bytes, false)
+                    .await
+                {
+                    tracing::warn!(
+                        invocation_id = %record.request.id,
+                        %error,
+                        "could not persist model-visible response metrics"
+                    );
+                }
+                let mut encoded = self.encode(value)?;
+                if tool_error {
+                    encoded.is_error = Some(true);
+                }
+                return Ok(encoded);
+            }
+            if query_sample_count > 0 {
+                query_sample_count -= 1;
+            } else if diagnostic_count > 0 {
+                diagnostic_count -= 1;
+            } else {
+                return Err("bounded bazel.run response could not fit its hard byte limit".into());
+            }
+        }
+    }
+
     fn single_representation_budget(&self, visible_budget: usize) -> usize {
         match self.result_encoding {
             ResultEncoding::Text | ResultEncoding::Toon | ResultEncoding::Structured => {
@@ -395,12 +426,771 @@ impl BazelMcpServer {
     }
 }
 
-#[tool_handler(
-    name = "bazel-mcp",
-    version = "0.1.0",
-    instructions = "Run Bazel through bazel.run; use bazel.inspect only for bounded follow-up evidence."
-)]
-impl ServerHandler for BazelMcpServer {}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtocolFamily {
+    Earlier,
+    LegacyTasks,
+    TasksExtension,
+}
+
+impl ProtocolFamily {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Earlier => "synchronous",
+            Self::LegacyTasks => "legacy_tasks",
+            Self::TasksExtension => "tasks_extension",
+        }
+    }
+}
+
+impl BazelMcpServer {
+    fn protocol_family(version: Option<&ProtocolVersion>) -> ProtocolFamily {
+        match version {
+            Some(version) if version == &ProtocolVersion::V_2025_11_25 => {
+                ProtocolFamily::LegacyTasks
+            }
+            Some(version) if version.as_str() >= "2026-06-30" => ProtocolFamily::TasksExtension,
+            _ => ProtocolFamily::Earlier,
+        }
+    }
+
+    fn initialize_result(&self, version: ProtocolVersion) -> InitializeResult {
+        let family = Self::protocol_family(Some(&version));
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(ToolsCapability::default());
+        match family {
+            ProtocolFamily::LegacyTasks => {
+                let tasks = if self.execution_policy == McpExecutionPolicy::SyncOnly {
+                    let mut tasks = TasksCapability::default();
+                    tasks.list = Some(JsonObject::new());
+                    tasks.cancel = Some(JsonObject::new());
+                    tasks
+                } else {
+                    TasksCapability::server_default()
+                };
+                capabilities.tasks = Some(tasks);
+            }
+            ProtocolFamily::TasksExtension => {
+                capabilities.extensions = Some(BTreeMap::from([(
+                    TASKS_EXTENSION.to_owned(),
+                    JsonObject::new(),
+                )]));
+            }
+            ProtocolFamily::Earlier => {}
+        }
+        let mut result = InitializeResult::new(capabilities)
+            .with_server_info(Implementation::new("bazel-mcp", env!("CARGO_PKG_VERSION")))
+            .with_instructions(
+                "Run Bazel through bazel.run; use bazel.inspect only for bounded follow-up evidence.",
+            );
+        result.protocol_version = version;
+        result
+    }
+
+    fn tools_for(&self, family: ProtocolFamily) -> Vec<Tool> {
+        let mut tools = self.tool_router.list_all();
+        if family == ProtocolFamily::LegacyTasks {
+            for tool in &mut tools {
+                if tool.name == "bazel.run" {
+                    tool.execution = match self.execution_policy {
+                        McpExecutionPolicy::Auto => {
+                            Some(ToolExecution::new().with_task_support(TaskSupport::Optional))
+                        }
+                        McpExecutionPolicy::SyncOnly => None,
+                        McpExecutionPolicy::TasksRequired => {
+                            Some(ToolExecution::new().with_task_support(TaskSupport::Required))
+                        }
+                    };
+                }
+            }
+        }
+        tools
+    }
+
+    fn extension_capable(meta: &Meta) -> bool {
+        meta.client_capabilities()
+            .and_then(|capabilities| capabilities.extensions)
+            .is_some_and(|extensions| extensions.contains_key(TASKS_EXTENSION))
+    }
+
+    fn trace_task_call(family: ProtocolFamily, method: &'static str) {
+        tracing::info!(
+            target: "bazel_mcp::metrics",
+            metric = "task_protocol_calls_total",
+            increment = 1_u64,
+            protocol_family = family.as_str(),
+            method,
+            "handled task protocol call"
+        );
+    }
+
+    fn trace_task_response<T: Serialize>(
+        family: ProtocolFamily,
+        phase: &'static str,
+        response: &T,
+    ) {
+        if let Ok(response) = serde_json::to_vec(response) {
+            tracing::info!(
+                target: "bazel_mcp::metrics",
+                metric = "task_protocol_response_bytes",
+                protocol_family = family.as_str(),
+                phase,
+                observe_bytes = response.len(),
+                "observed task protocol response size"
+            );
+        }
+    }
+
+    fn missing_extension_capability() -> ErrorData {
+        tracing::info!(
+            target: "bazel_mcp::metrics",
+            metric = "task_capability_mismatch_total",
+            increment = 1_u64,
+            protocol_family = ProtocolFamily::TasksExtension.as_str(),
+            "rejected request missing the task extension capability"
+        );
+        ErrorData::new(
+            ErrorCode(-32_003),
+            "Missing Required Client Capability",
+            Some(serde_json::json!({
+                "requiredCapabilities": {
+                    "extensions": { (TASKS_EXTENSION): {} }
+                }
+            })),
+        )
+    }
+
+    fn method_not_found(message: impl Into<String>) -> ErrorData {
+        ErrorData::new(ErrorCode::METHOD_NOT_FOUND, message.into(), None)
+    }
+
+    fn task_not_found(id: &str) -> ErrorData {
+        tracing::info!(
+            target: "bazel_mcp::metrics",
+            metric = "task_unknown_or_expired_id_total",
+            increment = 1_u64,
+            "rejected unknown or expired deferred result identifier"
+        );
+        ErrorData::invalid_params(format!("unknown or expired task ID: {id}"), None)
+    }
+
+    fn decode_run_request(arguments: Option<JsonObject>) -> Result<InvocationRequest, String> {
+        let params: RunParams =
+            serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
+                .map_err(|error| format!("invalid bazel.run arguments: {error}"))?;
+        let command = match BazelCommand::from_str(&params.command) {
+            Ok(command) => command,
+            Err(never) => match never {},
+        };
+        let mut request =
+            InvocationRequest::new(PathBuf::from(params.workspace), command, params.args);
+        request.startup_arguments = params.startup_args;
+        request.timeout_ms = params
+            .timeout_seconds
+            .map(|seconds| seconds.saturating_mul(1_000));
+        Ok(request)
+    }
+
+    async fn submit_deferred(
+        &self,
+        arguments: Option<JsonObject>,
+        retrieval: DeferredRetrieval,
+    ) -> Result<DeferredResultView, CallToolResult> {
+        let started = std::time::Instant::now();
+        let request = Self::decode_run_request(arguments).map_err(tool_error)?;
+        let ttl_ms = i64::try_from(self.task_ttl.as_millis()).unwrap_or(i64::MAX);
+        let expires_at_ms = bazel_mcp_types::unix_timestamp_ms().saturating_add(ttl_ms);
+        let id = self
+            .runner
+            .submit(
+                request,
+                ResultDisposition::Deferred {
+                    retrieval,
+                    expires_at_ms,
+                },
+            )
+            .await
+            .map_err(|error| tool_error(error.to_string()))?;
+        let mut view = self
+            .runner
+            .deferred_result(id, retrieval)
+            .await
+            .map_err(|error| tool_error(error.to_string()))?;
+        let minimum_expiry = view.deferred.created_at_ms.saturating_add(ttl_ms);
+        if view.deferred.expires_at_ms < minimum_expiry {
+            self.runner
+                .extend_deferred_expiry(id, minimum_expiry)
+                .await
+                .map_err(|error| tool_error(error.to_string()))?;
+            view = self
+                .runner
+                .deferred_result(id, retrieval)
+                .await
+                .map_err(|error| tool_error(error.to_string()))?;
+        }
+        tracing::info!(
+            target: "bazel_mcp::metrics",
+            metric = "deferred_invocations_accepted_total",
+            increment = 1_u64,
+            retrieval = retrieval.as_str(),
+            "deferred invocation accepted"
+        );
+        tracing::info!(
+            target: "bazel_mcp::metrics",
+            metric = "task_creation_acknowledgement_latency_ms",
+            observe_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            retrieval = retrieval.as_str(),
+            "observed task creation acknowledgement latency"
+        );
+        Ok(view)
+    }
+
+    fn legacy_task(&self, view: &DeferredResultView) -> Task {
+        let status = if view.deferred.terminal_override == Some(DeferredTerminalState::Cancelled) {
+            TaskStatus::Cancelled
+        } else if view.deferred.failure.is_some() {
+            TaskStatus::Failed
+        } else if view.invocation.state.is_terminal() {
+            TaskStatus::Completed
+        } else {
+            TaskStatus::Working
+        };
+        self.task_object(view, status)
+    }
+
+    fn extension_status(&self, view: &DeferredResultView) -> TaskStatus {
+        if view
+            .deferred
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.kind == bazel_mcp_types::DeferredFailureKind::Internal)
+        {
+            TaskStatus::Failed
+        } else if view.invocation.state == InvocationState::Cancelled {
+            TaskStatus::Cancelled
+        } else if view.invocation.state.is_terminal() {
+            TaskStatus::Completed
+        } else {
+            TaskStatus::Working
+        }
+    }
+
+    fn task_object(&self, view: &DeferredResultView, status: TaskStatus) -> Task {
+        let elapsed_ms = bazel_mcp_types::unix_timestamp_ms()
+            .saturating_sub(view.deferred.created_at_ms)
+            .max(0);
+        let status_name = match status {
+            TaskStatus::Working => "working",
+            TaskStatus::InputRequired => "input_required",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
+            _ => "unknown",
+        };
+        Task::new(
+            view.deferred.invocation_id.to_string(),
+            status,
+            format_timestamp(view.deferred.created_at_ms),
+            format_timestamp(view.deferred.updated_at_ms),
+        )
+        .with_status_message(format!("state={status_name} elapsed_ms={elapsed_ms}"))
+        .with_ttl(view.deferred.advertised_ttl_ms())
+        .with_poll_interval(self.task_poll_interval_ms)
+    }
+
+    fn extension_task_value(&self, view: &DeferredResultView) -> serde_json::Value {
+        let status = self.extension_status(view);
+        serde_json::json!({
+            "resultType": "task",
+            "taskId": view.deferred.invocation_id.to_string(),
+            "status": task_status_name(&status),
+            "createdAt": format_timestamp(view.deferred.created_at_ms),
+            "lastUpdatedAt": format_timestamp(view.deferred.updated_at_ms),
+            "ttlMs": view.deferred.advertised_ttl_ms(),
+            "pollIntervalMs": self.task_poll_interval_ms,
+        })
+    }
+
+    async fn extension_get_value(
+        &self,
+        view: &DeferredResultView,
+    ) -> Result<serde_json::Value, ErrorData> {
+        let status = self.extension_status(view);
+        let mut value = serde_json::json!({
+            "resultType": "complete",
+            "taskId": view.deferred.invocation_id.to_string(),
+            "status": task_status_name(&status),
+            "createdAt": format_timestamp(view.deferred.created_at_ms),
+            "lastUpdatedAt": format_timestamp(view.deferred.updated_at_ms),
+            "ttlMs": view.deferred.advertised_ttl_ms(),
+            "pollIntervalMs": self.task_poll_interval_ms,
+        });
+        if status == TaskStatus::Completed {
+            let tool_error = view.deferred.failure.is_some();
+            let result = self
+                .build_run_result(&view.invocation, tool_error)
+                .await
+                .map_err(|error| ErrorData::internal_error(error, None))?;
+            value["result"] = serde_json::to_value(result)
+                .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        } else if status == TaskStatus::Failed {
+            let message = view
+                .deferred
+                .failure
+                .as_ref()
+                .map_or("Deferred invocation failed", |failure| {
+                    failure.redacted_message.as_str()
+                });
+            value["error"] = serde_json::json!({
+                "code": ErrorCode::INTERNAL_ERROR.0,
+                "message": message,
+            });
+        }
+        Ok(value)
+    }
+
+    async fn call_tool_request(
+        &self,
+        params: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ServerResult, ErrorData> {
+        let family = Self::protocol_family(context.protocol_version().as_ref());
+        let is_run = params.name == "bazel.run";
+        match family {
+            ProtocolFamily::LegacyTasks => {
+                if self.execution_policy != McpExecutionPolicy::SyncOnly && params.task.is_some() {
+                    if !is_run {
+                        return Err(Self::method_not_found(
+                            "task execution is not supported for this tool",
+                        ));
+                    }
+                    Self::trace_task_call(ProtocolFamily::LegacyTasks, "tools/call");
+                    let view = match self
+                        .submit_deferred(params.arguments, DeferredRetrieval::SeparateResult)
+                        .await
+                    {
+                        Ok(view) => view,
+                        Err(result) => return Ok(ServerResult::CallToolResult(result)),
+                    };
+                    let task = self.legacy_task(&view);
+                    let mut meta = Meta::new();
+                    meta.0.insert(
+                        IMMEDIATE_RESPONSE.to_owned(),
+                        serde_json::Value::String(format!(
+                            "Bazel invocation {} is running.",
+                            view.deferred.invocation_id
+                        )),
+                    );
+                    meta.0.insert(
+                        RelatedTaskMetadata::META_KEY.to_owned(),
+                        serde_json::json!({"taskId": view.deferred.invocation_id.to_string()}),
+                    );
+                    let result = CreateTaskResult::new(task).with_meta(meta);
+                    Self::trace_task_response(ProtocolFamily::LegacyTasks, "creation", &result);
+                    return Ok(ServerResult::CreateTaskResult(result));
+                }
+                if is_run
+                    && self.execution_policy == McpExecutionPolicy::TasksRequired
+                    && params.task.is_none()
+                {
+                    tracing::info!(
+                        target: "bazel_mcp::metrics",
+                        metric = "task_capability_mismatch_total",
+                        increment = 1_u64,
+                        protocol_family = ProtocolFamily::LegacyTasks.as_str(),
+                        "rejected request missing legacy task augmentation"
+                    );
+                    return Err(Self::method_not_found(
+                        "bazel.run requires task-based invocation",
+                    ));
+                }
+            }
+            ProtocolFamily::TasksExtension => {
+                if is_run && self.execution_policy != McpExecutionPolicy::SyncOnly {
+                    if !Self::extension_capable(&context.meta) {
+                        if self.execution_policy == McpExecutionPolicy::TasksRequired {
+                            return Err(Self::missing_extension_capability());
+                        }
+                    } else {
+                        Self::trace_task_call(ProtocolFamily::TasksExtension, "tools/call");
+                        let view = match self
+                            .submit_deferred(params.arguments, DeferredRetrieval::InlineResult)
+                            .await
+                        {
+                            Ok(view) => view,
+                            Err(result) => return Ok(ServerResult::CallToolResult(result)),
+                        };
+                        let result = CustomResult::new(self.extension_task_value(&view));
+                        Self::trace_task_response(
+                            ProtocolFamily::TasksExtension,
+                            "creation",
+                            &result,
+                        );
+                        return Ok(ServerResult::CustomResult(result));
+                    }
+                }
+            }
+            ProtocolFamily::Earlier => {
+                if is_run && self.execution_policy == McpExecutionPolicy::TasksRequired {
+                    tracing::info!(
+                        target: "bazel_mcp::metrics",
+                        metric = "task_capability_mismatch_total",
+                        increment = 1_u64,
+                        protocol_family = ProtocolFamily::Earlier.as_str(),
+                        "rejected request on a protocol without task support"
+                    );
+                    return Err(Self::method_not_found(
+                        "task execution is unavailable for the negotiated protocol",
+                    ));
+                }
+            }
+        }
+        self.tool_router
+            .call(ToolCallContext::new(self, params, context))
+            .await
+            .map(ServerResult::CallToolResult)
+    }
+
+    async fn legacy_get_task(&self, task_id: &str) -> Result<GetTaskResult, ErrorData> {
+        let id = parse_task_id(task_id)?;
+        let view = self
+            .runner
+            .deferred_result(id, DeferredRetrieval::SeparateResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        let result = GetTaskResult::new(self.legacy_task(&view));
+        Self::trace_task_response(ProtocolFamily::LegacyTasks, "polling", &result);
+        Ok(result)
+    }
+
+    async fn legacy_task_result(
+        &self,
+        task_id: &str,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<GetTaskPayloadResult, ErrorData> {
+        let id = parse_task_id(task_id)?;
+        self.runner
+            .deferred_result(id, DeferredRetrieval::SeparateResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        let record = self
+            .runner
+            .wait(id, cancellation)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let view = self
+            .runner
+            .deferred_result(id, DeferredRetrieval::SeparateResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        let mut result = self
+            .build_run_result(&record, view.deferred.failure.is_some())
+            .await
+            .map_err(|error| ErrorData::internal_error(error, None))?;
+        let mut meta = result.meta.take().unwrap_or_default();
+        meta.0.insert(
+            RelatedTaskMetadata::META_KEY.to_owned(),
+            serde_json::json!({"taskId": task_id}),
+        );
+        result.meta = Some(meta);
+        let result = serde_json::to_value(result)
+            .map(GetTaskPayloadResult::new)
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        Self::trace_task_response(ProtocolFamily::LegacyTasks, "final_result", &result);
+        Ok(result)
+    }
+
+    async fn legacy_cancel_task(
+        &self,
+        task_id: &str,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<CancelTaskResult, ErrorData> {
+        let id = parse_task_id(task_id)?;
+        let view = self
+            .runner
+            .deferred_result(id, DeferredRetrieval::SeparateResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        if view.invocation.state.is_terminal()
+            || view.deferred.terminal_override == Some(DeferredTerminalState::Cancelled)
+        {
+            return Err(ErrorData::invalid_params("task is already terminal", None));
+        }
+        self.runner
+            .record_deferred_cancellation(id)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        self.runner
+            .cancel(id)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let finalizer = self.runner.clone();
+        tokio::spawn(async move {
+            if finalizer
+                .wait(id, tokio_util::sync::CancellationToken::new())
+                .await
+                .is_ok()
+            {
+                let _ = finalizer.set_deferred_cancelled(id).await;
+            }
+        });
+        self.runner
+            .wait(id, cancellation)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        self.runner
+            .set_deferred_cancelled(id)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let view = self
+            .runner
+            .deferred_result(id, DeferredRetrieval::SeparateResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        let result = CancelTaskResult::new(self.legacy_task(&view));
+        Self::trace_task_response(ProtocolFamily::LegacyTasks, "control", &result);
+        Ok(result)
+    }
+
+    async fn extension_get_task(&self, task_id: &str) -> Result<CustomResult, ErrorData> {
+        let id = parse_task_id(task_id)?;
+        let view = self
+            .runner
+            .deferred_result(id, DeferredRetrieval::InlineResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        let terminal = self.extension_status(&view) != TaskStatus::Working;
+        let result = self
+            .extension_get_value(&view)
+            .await
+            .map(CustomResult::new)?;
+        Self::trace_task_response(
+            ProtocolFamily::TasksExtension,
+            if terminal { "final_result" } else { "polling" },
+            &result,
+        );
+        Ok(result)
+    }
+
+    async fn extension_cancel_task(&self, task_id: &str) -> Result<CustomResult, ErrorData> {
+        let id = parse_task_id(task_id)?;
+        self.runner
+            .deferred_result(id, DeferredRetrieval::InlineResult)
+            .await
+            .map_err(|_| Self::task_not_found(task_id))?;
+        self.runner
+            .record_deferred_cancellation(id)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        self.runner
+            .cancel(id)
+            .await
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let result = CustomResult::new(serde_json::json!({"resultType": "complete"}));
+        Self::trace_task_response(ProtocolFamily::TasksExtension, "control", &result);
+        Ok(result)
+    }
+
+    async fn custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ServerResult, ErrorData> {
+        match request.method.as_str() {
+            "server/discover" => Ok(ServerResult::CustomResult(CustomResult::new(
+                serde_json::json!({
+                    "capabilities": {
+                        "extensions": { (TASKS_EXTENSION): {} }
+                    }
+                }),
+            ))),
+            "tasks/update"
+                if Self::protocol_family(context.protocol_version().as_ref())
+                    == ProtocolFamily::TasksExtension =>
+            {
+                Self::trace_task_call(ProtocolFamily::TasksExtension, "tasks/update");
+                if !Self::extension_capable(&context.meta) {
+                    return Err(Self::missing_extension_capability());
+                }
+                let task_id = request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("taskId"))
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| ErrorData::invalid_params("taskId is required", None))?;
+                let id = parse_task_id(task_id)?;
+                self.runner
+                    .deferred_result(id, DeferredRetrieval::InlineResult)
+                    .await
+                    .map_err(|_| Self::task_not_found(task_id))?;
+                let result = CustomResult::new(serde_json::json!({"resultType": "complete"}));
+                Self::trace_task_response(ProtocolFamily::TasksExtension, "control", &result);
+                Ok(ServerResult::CustomResult(result))
+            }
+            _ => Err(Self::method_not_found(request.method)),
+        }
+    }
+}
+
+impl Service<RoleServer> for BazelMcpServer {
+    async fn handle_request(
+        &self,
+        request: <RoleServer as ServiceRole>::PeerReq,
+        context: RequestContext<RoleServer>,
+    ) -> Result<<RoleServer as ServiceRole>::Resp, ErrorData> {
+        match request {
+            ClientRequest::InitializeRequest(request) => {
+                let requested = request.params.protocol_version.clone();
+                let negotiated = if ProtocolVersion::KNOWN_VERSIONS.contains(&requested)
+                    || requested.as_str() == "2026-06-30"
+                {
+                    requested
+                } else {
+                    ProtocolVersion::LATEST
+                };
+                let mut peer_info = request.params;
+                peer_info.protocol_version = negotiated.clone();
+                context.peer.set_peer_info(peer_info);
+                tracing::info!(
+                    protocol_family = Self::protocol_family(Some(&negotiated)).as_str(),
+                    protocol_version = negotiated.as_str(),
+                    "negotiated MCP protocol family"
+                );
+                Ok(ServerResult::InitializeResult(
+                    self.initialize_result(negotiated),
+                ))
+            }
+            ClientRequest::PingRequest(_) => Ok(ServerResult::empty(())),
+            ClientRequest::ListToolsRequest(_) => {
+                let family = Self::protocol_family(context.protocol_version().as_ref());
+                Ok(ServerResult::ListToolsResult(
+                    ListToolsResult::with_all_items(self.tools_for(family)),
+                ))
+            }
+            ClientRequest::CallToolRequest(request) => {
+                self.call_tool_request(request.params, context).await
+            }
+            ClientRequest::GetTaskRequest(request) => {
+                let family = Self::protocol_family(context.protocol_version().as_ref());
+                Self::trace_task_call(family, "tasks/get");
+                match family {
+                    ProtocolFamily::LegacyTasks => self
+                        .legacy_get_task(&request.params.task_id)
+                        .await
+                        .map(ServerResult::GetTaskResult),
+                    ProtocolFamily::TasksExtension => {
+                        if !Self::extension_capable(&context.meta) {
+                            return Err(Self::missing_extension_capability());
+                        }
+                        self.extension_get_task(&request.params.task_id)
+                            .await
+                            .map(ServerResult::CustomResult)
+                    }
+                    ProtocolFamily::Earlier => Err(Self::method_not_found("tasks/get")),
+                }
+            }
+            ClientRequest::ListTasksRequest(request) => {
+                let family = Self::protocol_family(context.protocol_version().as_ref());
+                Self::trace_task_call(family, "tasks/list");
+                if family != ProtocolFamily::LegacyTasks {
+                    return Err(Self::method_not_found("tasks/list"));
+                }
+                let cursor = request.params.and_then(|params| params.cursor);
+                let page = self
+                    .runner
+                    .list_deferred_results(
+                        DeferredRetrieval::SeparateResult,
+                        PageRequest { cursor, limit: 100 },
+                    )
+                    .await
+                    .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+                let mut result = ListTasksResult::new(
+                    page.items
+                        .iter()
+                        .map(|view| self.legacy_task(view))
+                        .collect(),
+                );
+                result.next_cursor = page.next_cursor;
+                Self::trace_task_response(ProtocolFamily::LegacyTasks, "polling", &result);
+                Ok(ServerResult::ListTasksResult(result))
+            }
+            ClientRequest::GetTaskPayloadRequest(request) => {
+                let family = Self::protocol_family(context.protocol_version().as_ref());
+                Self::trace_task_call(family, "tasks/result");
+                if family != ProtocolFamily::LegacyTasks {
+                    return Err(Self::method_not_found("tasks/result"));
+                }
+                self.legacy_task_result(&request.params.task_id, context.ct)
+                    .await
+                    .map(ServerResult::GetTaskPayloadResult)
+            }
+            ClientRequest::CancelTaskRequest(request) => {
+                let family = Self::protocol_family(context.protocol_version().as_ref());
+                Self::trace_task_call(family, "tasks/cancel");
+                match family {
+                    ProtocolFamily::LegacyTasks => self
+                        .legacy_cancel_task(&request.params.task_id, context.ct)
+                        .await
+                        .map(ServerResult::CancelTaskResult),
+                    ProtocolFamily::TasksExtension => {
+                        if !Self::extension_capable(&context.meta) {
+                            return Err(Self::missing_extension_capability());
+                        }
+                        self.extension_cancel_task(&request.params.task_id)
+                            .await
+                            .map(ServerResult::CustomResult)
+                    }
+                    ProtocolFamily::Earlier => Err(Self::method_not_found("tasks/cancel")),
+                }
+            }
+            ClientRequest::CustomRequest(request) => self.custom_request(request, context).await,
+            other => Err(Self::method_not_found(other.method())),
+        }
+    }
+
+    async fn handle_notification(
+        &self,
+        _notification: <RoleServer as ServiceRole>::PeerNot,
+        _context: NotificationContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        Ok(())
+    }
+
+    fn get_info(&self) -> <RoleServer as ServiceRole>::Info {
+        self.initialize_result(ProtocolVersion::LATEST)
+    }
+}
+
+fn tool_error(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message.into())])
+}
+
+fn parse_task_id(value: &str) -> Result<InvocationId, ErrorData> {
+    parse_id(value).map_err(|_| ErrorData::invalid_params("taskId must be a UUID", None))
+}
+
+fn task_status_name(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Working => "working",
+        TaskStatus::InputRequired => "input_required",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+        _ => "unknown",
+    }
+}
+
+fn format_timestamp(timestamp_ms: i64) -> String {
+    let nanos = i128::from(timestamp_ms).saturating_mul(1_000_000);
+    time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        .ok()
+        .and_then(|timestamp| {
+            timestamp
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
+}
 
 fn parse_id(value: &str) -> Result<InvocationId, String> {
     Uuid::parse_str(value)
@@ -448,5 +1238,83 @@ mod tests {
         let both = BazelMcpServer::new(runner, ResultEncoding::Both);
         assert_eq!(both.model_visible_bytes(&value).unwrap(), one * 2);
         assert_eq!(both.single_representation_budget(8_192), 4_096);
+    }
+
+    #[tokio::test]
+    async fn negotiated_capabilities_and_tool_metadata_do_not_mix_dialects() {
+        let root = tempdir().unwrap();
+        let runner = InvocationService::new(
+            Store::open(root.path()).await.unwrap(),
+            RunnerConfig::default(),
+        )
+        .unwrap();
+        let server = BazelMcpServer::new(runner, ResultEncoding::Text).with_task_execution(
+            McpExecutionPolicy::Auto,
+            Duration::from_secs(60),
+            500,
+        );
+
+        let legacy = serde_json::to_value(
+            server
+                .initialize_result(ProtocolVersion::V_2025_11_25)
+                .capabilities,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy,
+            serde_json::json!({
+                "tools": {},
+                "tasks": {
+                    "list": {},
+                    "cancel": {},
+                    "requests": {"tools": {"call": {}}}
+                }
+            })
+        );
+        let legacy_tools = server.tools_for(ProtocolFamily::LegacyTasks);
+        assert_eq!(legacy_tools.len(), 3);
+        assert_eq!(
+            legacy_tools
+                .iter()
+                .find(|tool| tool.name == "bazel.run")
+                .unwrap()
+                .task_support(),
+            TaskSupport::Optional
+        );
+        assert!(
+            legacy_tools
+                .iter()
+                .filter(|tool| tool.name != "bazel.run")
+                .all(|tool| tool.execution.is_none())
+        );
+
+        let extension_version: ProtocolVersion = serde_json::from_str("\"2026-06-30\"").unwrap();
+        let extension =
+            serde_json::to_value(server.initialize_result(extension_version).capabilities).unwrap();
+        assert_eq!(
+            extension,
+            serde_json::json!({
+                "tools": {},
+                "extensions": {(TASKS_EXTENSION): {}}
+            })
+        );
+        assert!(
+            server
+                .tools_for(ProtocolFamily::TasksExtension)
+                .iter()
+                .all(|tool| tool.execution.is_none())
+        );
+        assert_eq!(
+            serde_json::to_value(BazelMcpServer::missing_extension_capability()).unwrap(),
+            serde_json::json!({
+                "code": -32003,
+                "message": "Missing Required Client Capability",
+                "data": {
+                    "requiredCapabilities": {
+                        "extensions": {(TASKS_EXTENSION): {}}
+                    }
+                }
+            })
+        );
     }
 }

@@ -1,0 +1,2 @@
+{"sequence":0,"adapter":"synchronous","scenario":"successful_build","kind":"tool_call","role":"assistant","model_visible":true,"content":"bazel.run //:fixture"}
+{"sequence":1,"adapter":"synchronous","scenario":"successful_build","kind":"tool_result","role":"tool","model_visible":true,"content":"{\"command\":\"build\",\"headline\":\"Build completed successfully\",\"state\":\"succeeded\"}"}

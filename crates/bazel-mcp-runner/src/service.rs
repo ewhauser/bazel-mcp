@@ -21,16 +21,18 @@ use bazel_mcp_reducer::{
 };
 use bazel_mcp_store::{InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
-    ArtifactKind, BazelCommand, CommandClass, Diagnostic, DiagnosticCategory, InvocationId,
-    InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState, PageRequest, QueryRow,
-    Severity, Termination, TestStatus,
+    ArtifactKind, BazelCommand, CommandClass, DeferredFailure, DeferredFailureKind,
+    DeferredResultRecord, DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic,
+    DiagnosticCategory, InvocationId, InvocationMetrics, InvocationRecord, InvocationRequest,
+    InvocationState, Page, PageRequest, QueryRow, ResultDisposition, Severity, Termination,
+    TestStatus,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
     process::Command,
-    sync::{Mutex, Semaphore},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -103,6 +105,10 @@ pub enum RunnerError {
     InvalidOffset,
     #[error("inspect response cannot fit the requested {0}-byte limit")]
     ResponseTooLarge(usize),
+    #[error("invocation was cancelled before it was accepted")]
+    CancelledBeforeAcceptance,
+    #[error("wait for invocation {0} was cancelled")]
+    WaitCancelled(InvocationId),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
@@ -124,6 +130,16 @@ struct VersionCacheKey {
     executable: PathBuf,
     workspace: PathBuf,
     environment: Vec<(String, String)>,
+}
+
+struct PreparedSubmission {
+    queued: InvocationRecord,
+    paths: InvocationPaths,
+    lock_key: PathBuf,
+    executable: PathBuf,
+    cancellation: CancellationToken,
+    _pending_permit: OwnedSemaphorePermit,
+    deferred: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -260,14 +276,156 @@ impl InvocationService {
 
     pub async fn run_with_cancellation(
         &self,
-        mut request: InvocationRequest,
+        request: InvocationRequest,
         cancellation: CancellationToken,
     ) -> Result<InvocationRecord, RunnerError> {
+        let prepared = self
+            .prepare_submission(request, ResultDisposition::Attached, cancellation)
+            .await?;
+        let id = prepared.queued.request.id;
+        let result = self.run_prepared(prepared).await;
+        self.live.lock().await.remove(&id);
+        result
+    }
+
+    /// Durably accept an invocation and execute it independently of the caller.
+    pub async fn submit(
+        &self,
+        request: InvocationRequest,
+        disposition: ResultDisposition,
+    ) -> Result<InvocationId, RunnerError> {
+        let prepared = self
+            .prepare_submission(request, disposition, CancellationToken::new())
+            .await?;
+        let id = prepared.queued.request.id;
+        let deferred = prepared.deferred;
+        let worker_service = self.clone();
+        let worker = tokio::spawn(async move { worker_service.run_prepared(prepared).await });
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            let error = match worker.await {
+                Ok(Ok(record)) => {
+                    if deferred {
+                        tracing::info!(
+                            target: "bazel_mcp::metrics",
+                            metric = "deferred_invocations_terminal_total",
+                            increment = 1_u64,
+                            state = ?record.state,
+                            "deferred invocation reached a terminal state"
+                        );
+                    }
+                    None
+                }
+                Ok(Err(error)) => Some(error),
+                Err(error) => Some(RunnerError::Join(error)),
+            };
+            if let Some(error) = error {
+                tracing::warn!(invocation_id = %id, %error, "accepted Bazel invocation worker failed");
+                supervisor
+                    .materialize_worker_failure(id, deferred, &error)
+                    .await;
+                if deferred {
+                    tracing::info!(
+                        target: "bazel_mcp::metrics",
+                        metric = "deferred_invocations_terminal_total",
+                        increment = 1_u64,
+                        state = "accepted_execution_error",
+                        "deferred invocation failure was materialized"
+                    );
+                }
+            }
+            supervisor.live.lock().await.remove(&id);
+        });
+        Ok(id)
+    }
+
+    /// Wait for completion without coupling cancellation of this wait to Bazel.
+    pub async fn wait(
+        &self,
+        id: InvocationId,
+        cancellation: CancellationToken,
+    ) -> Result<InvocationRecord, RunnerError> {
+        loop {
+            let record = self.store.get_invocation(id).await?;
+            if record.state.is_terminal() {
+                return Ok(record);
+            }
+            tokio::select! {
+                () = cancellation.cancelled() => return Err(RunnerError::WaitCancelled(id)),
+                () = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+        }
+    }
+
+    pub async fn deferred_result(
+        &self,
+        id: InvocationId,
+        retrieval: DeferredRetrieval,
+    ) -> Result<DeferredResultView, RunnerError> {
+        self.store
+            .get_deferred_result(id, retrieval, bazel_mcp_types::unix_timestamp_ms())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn list_deferred_results(
+        &self,
+        retrieval: DeferredRetrieval,
+        page: PageRequest,
+    ) -> Result<Page<DeferredResultView>, RunnerError> {
+        self.store
+            .list_deferred_results(retrieval, bazel_mcp_types::unix_timestamp_ms(), page)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn record_deferred_cancellation(&self, id: InvocationId) -> Result<(), RunnerError> {
+        self.store
+            .record_deferred_cancellation(id, bazel_mcp_types::unix_timestamp_ms())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_deferred_cancelled(&self, id: InvocationId) -> Result<(), RunnerError> {
+        self.store
+            .set_deferred_terminal_override(
+                id,
+                DeferredTerminalState::Cancelled,
+                bazel_mcp_types::unix_timestamp_ms(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn extend_deferred_expiry(
+        &self,
+        id: InvocationId,
+        minimum_expires_at_ms: i64,
+    ) -> Result<(), RunnerError> {
+        self.store
+            .extend_deferred_expiry(
+                id,
+                minimum_expires_at_ms,
+                bazel_mcp_types::unix_timestamp_ms(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn prepare_submission(
+        &self,
+        mut request: InvocationRequest,
+        disposition: ResultDisposition,
+        cancellation: CancellationToken,
+    ) -> Result<PreparedSubmission, RunnerError> {
+        if cancellation.is_cancelled() {
+            return Err(RunnerError::CancelledBeforeAcceptance);
+        }
         validate_command(&self.config.policy, &request.command)?;
         validate_arguments(&request.startup_arguments)?;
         validate_arguments(&request.arguments)?;
         validate_query_arguments(&request.command, &request.arguments)?;
-        let _pending_permit = self
+        let pending_permit = self
             .pending
             .clone()
             .try_acquire_owned()
@@ -277,14 +435,60 @@ impl InvocationService {
             .unwrap_or_else(|| workspace.clone());
         let executable = resolve_bazel_executable(&workspace, &self.config.policy)?;
         self.validate_bazel_version(&executable, &workspace).await?;
+        if cancellation.is_cancelled() {
+            return Err(RunnerError::CancelledBeforeAcceptance);
+        }
         request.workspace = workspace.clone();
         let id = request.id;
         let queued = InvocationRecord::queued(request);
         let stored = InvocationRecord::queued(self.redacted_request(&queued.request));
-        let paths = self.store.create_invocation(&stored).await?;
+        let deferred = match disposition {
+            ResultDisposition::Attached => None,
+            ResultDisposition::Deferred {
+                retrieval,
+                expires_at_ms,
+            } => {
+                let now_ms = bazel_mcp_types::unix_timestamp_ms();
+                Some(DeferredResultRecord::new(
+                    id,
+                    retrieval,
+                    now_ms,
+                    expires_at_ms,
+                ))
+            }
+        };
+        let paths = self
+            .store
+            .create_invocation_with_deferred(&stored, deferred.as_ref())
+            .await?;
         self.live.lock().await.insert(id, cancellation.clone());
 
-        let result = async {
+        Ok(PreparedSubmission {
+            queued,
+            paths,
+            lock_key,
+            executable,
+            cancellation,
+            _pending_permit: pending_permit,
+            deferred: deferred.is_some(),
+        })
+    }
+
+    async fn run_prepared(
+        &self,
+        prepared: PreparedSubmission,
+    ) -> Result<InvocationRecord, RunnerError> {
+        let PreparedSubmission {
+            queued,
+            paths,
+            lock_key,
+            executable,
+            cancellation,
+            _pending_permit,
+            deferred: _,
+        } = prepared;
+        let id = queued.request.id;
+        async {
             let workspace_lock = self.workspace_lock(&lock_key).await;
             let workspace_guard = tokio::select! {
                 guard = workspace_lock.lock() => guard,
@@ -352,9 +556,55 @@ impl InvocationService {
             drop(permit);
             result
         }
-        .await;
-        self.live.lock().await.remove(&id);
-        result
+        .await
+    }
+
+    async fn materialize_worker_failure(
+        &self,
+        id: InvocationId,
+        deferred: bool,
+        error: &RunnerError,
+    ) {
+        let message = self.redactor.redact_bounded(
+            &format!("accepted invocation worker failed: {error}"),
+            1_000,
+        );
+        if deferred {
+            let _ = self
+                .store
+                .persist_deferred_failure(
+                    id,
+                    &DeferredFailure {
+                        kind: DeferredFailureKind::Execution,
+                        redacted_message: message.clone(),
+                    },
+                    bazel_mcp_types::unix_timestamp_ms(),
+                )
+                .await;
+        }
+        if self
+            .store
+            .get_invocation(id)
+            .await
+            .is_ok_and(|record| !record.state.is_terminal())
+        {
+            let _ = self
+                .store
+                .transition(
+                    id,
+                    InvocationState::Failed,
+                    Some(Termination::SpawnFailure {
+                        message: message.clone(),
+                    }),
+                    Some(bazel_mcp_types::InvocationSummary {
+                        success: false,
+                        headline: "Accepted Bazel invocation could not be executed".to_owned(),
+                        truncated: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
     }
 
     async fn validate_bazel_version(

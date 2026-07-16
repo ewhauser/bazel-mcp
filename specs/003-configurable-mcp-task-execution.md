@@ -1,33 +1,30 @@
-# 003: Configurable MCP Task Execution
+# 003: Negotiated MCP Task Execution
 
 | Field | Value |
 | --- | --- |
-| Status | Proposed |
+| Status | Implemented |
 | Specification | 003 |
 | Product | `bazel-mcp` |
 | Last updated | 2026-07-15 |
 
 ## Summary
 
-Add a deployment-level `mcp_execution_mode` setting with exactly three values:
-`sync`, `tasks_legacy`, and `tasks`. The selected value determines the MCP
-capabilities, `tools/list` metadata, `bazel.run` response shape, task methods,
-and cancellation semantics exposed by one server process.
+Add negotiated task execution for `bazel.run`. One server supports synchronous
+execution, the experimental task protocol from MCP `2025-11-25`, and the
+`io.modelcontextprotocol/tasks` extension defined by SEP-2663. It selects the
+wire contract at runtime from the negotiated protocol version and the client
+capabilities carried by the request.
 
-The modes are intentionally exclusive:
+A deployment-level `mcp_execution_policy` setting has exactly three values:
+`auto`, `sync_only`, and `tasks_required`. The policy controls whether a
+compatible request is deferred; it does not select or translate a task
+dialect.
 
-- `sync` preserves the current long-running `tools/call` contract and is the
-  default.
-- `tasks_legacy` implements the experimental task protocol from MCP
-  `2025-11-25`, including the request `task` field and `tasks/result`.
-- `tasks` implements the `io.modelcontextprotocol/tasks` extension defined by
-  SEP-2663, including per-request extension capabilities, polymorphic results,
-  and terminal results in `tasks/get`.
-
-The two task protocols are not wire-compatible and MUST NOT be advertised
-together. A mode that requires task execution MUST return a capability or
-protocol error to an incompatible client; it MUST NOT silently fall back to a
-synchronous result.
+The two task protocols are not wire-compatible and MUST NOT be advertised in
+the same negotiated protocol context. A server process MAY support both and
+dispatch between them as required by SEP-2663's backward-compatibility
+guidance. A task response is emitted only when the request declares support for
+the selected dialect.
 
 Task support does not add MCP tools. The server continues to expose exactly
 `bazel.run`, `bazel.inspect`, and `bazel.cancel`. Task methods are MCP protocol
@@ -36,8 +33,8 @@ methods, not tools.
 ## Relationship to specifications 001 and 002
 
 This specification amends the `bazel.run` execution behavior in specification
-001. The statement that task support is optional is replaced by the configured
-mode behavior in this document. All tool inputs, logical run results, response
+001. The statement that task support is optional is replaced by the negotiated
+policy behavior in this document. All tool inputs, logical run results, response
 budgets, evidence retention, command policy, cancellation escalation, and the
 three-tool limit remain unchanged.
 
@@ -57,15 +54,19 @@ handle lets the host release the original request, continue other work, and
 retrieve the bounded result later. It also makes a disconnect less likely to
 discard the invocation identity.
 
-MCP currently has two materially different task designs. Claude Code has
-implementation-level support for the legacy design, while newer MCP work moves
-tasks into an extension with a different negotiation and result flow. Treating
-the protocols as one feature flag would produce ambiguous response types and
-host-specific failures.
+MCP currently has two materially different task designs. The MCP SDK embedded
+in Claude Code recognizes the legacy schema, but the pinned Claude Code host
+does not opt into task execution. Newer MCP work moves tasks into an extension
+with a different negotiation and result flow. The protocol already provides
+enough information to distinguish the wire contracts: legacy tasks are selected
+by protocol `2025-11-25`, initialization capabilities, tool metadata, and
+`params.task`; extension tasks are selected by a newer protocol version and the
+per-request extension capability.
 
-The implementation therefore needs an operator-selected wire contract. This
-also leaves synchronous execution available for hosts that only accept a
-`CallToolResult` from `tools/call`.
+The implementation therefore negotiates the wire contract and leaves
+configuration to express operator policy. This permits one deployment to serve
+legacy, extension-aware, and synchronous-only hosts without guessing from host
+names or silently translating between protocols.
 
 Task support must remain storage-efficient. It does not require a second copy of
 stdout, stderr, BEP, or the final model-visible response. A small deferred-result
@@ -73,8 +74,8 @@ record points at the existing durable invocation and its bounded summary.
 
 ## Goals
 
-- Make the server's asynchronous response shape explicit and stable for a
-  deployment.
+- Select the asynchronous response shape deterministically from negotiated
+  protocol information.
 - Implement both the `2025-11-25` legacy protocol and the SEP-2663 extension
   according to their distinct wire contracts.
 - Return a task handle only after `tasks/get` can resolve it durably.
@@ -82,14 +83,15 @@ record points at the existing durable invocation and its bounded summary.
 - Reconstruct the same bounded `CallToolResult` used by synchronous execution.
 - Keep task status, results, and cancellation available across a server restart.
 - Keep task metadata compact and independent from raw evidence retention.
-- Test every mode at the stdio wire boundary.
-- Test `sync` and `tasks_legacy` through a pinned Claude Code executable, not
-  only through an SDK client.
+- Test every policy and negotiated flow at the stdio wire boundary.
+- Test synchronous fallback and task-policy rejection through a pinned Claude
+  Code executable, not only through an SDK client.
 
 ## Non-goals
 
-- Automatically choosing a mode from the connected client.
-- Advertising legacy and extension tasks from the same server process.
+- Choosing behavior from host names, executable paths, or undocumented client
+  heuristics.
+- Translating a task handle from one wire dialect into the other.
 - Adding `bazel.task_status`, `bazel.task_result`, or any other MCP tool.
 - Resuming the Bazel child process after the server process itself crashes.
 - Supporting task-hosted sampling, elicitation, or arbitrary task input in the
@@ -117,21 +119,21 @@ record points at the existing durable invocation and its bounded summary.
   may return a task handle and the invocation will continue independently of the
   original request.
 
-The implementation MUST pin the MCP schema or upstream commit used for both
-task dialects in protocol fixtures. It MUST NOT derive extension behavior from
-`rmcp::ProtocolVersion::LATEST`. Before implementation, the accepted SEP-2663
-schema's base protocol version and extension revision are recorded in a
-repository fixture. Any upstream date or schema change requires a reviewed
-golden diff.
+The implementation pins both task dialects in
+`specs/fixtures/mcp-task-protocols.json`. The accepted SEP-2663 baseline is the
+final Tasks extension at its `2026-06-30` base protocol and the exact upstream
+schema commit recorded there. Extension behavior is never derived from
+`rmcp::ProtocolVersion::LATEST`. Any upstream date or schema change requires a
+reviewed golden diff.
 
 ## Configuration
 
-### Primary setting
+### Execution policy
 
 `ServerConfig` gains:
 
 ```toml
-mcp_execution_mode = "sync"
+mcp_execution_policy = "auto"
 ```
 
 The Rust type is:
@@ -139,16 +141,35 @@ The Rust type is:
 ```rust
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum McpExecutionMode {
+pub enum McpExecutionPolicy {
     #[default]
-    Sync,
-    TasksLegacy,
-    Tasks,
+    Auto,
+    SyncOnly,
+    TasksRequired,
 }
 ```
 
-The setting is read only at startup. Changing it requires a server restart.
-There is no per-call override and no automatic host detection.
+The policy is read only at startup. Changing it requires a server restart.
+There is no per-call policy override. Protocol version and capability
+negotiation are inputs to the policy, not host detection.
+
+- `auto` is the default. A compatible extension request is deferred. A legacy
+  request is deferred when it includes `params.task`. Other requests execute
+  synchronously.
+- `sync_only` never creates a new task and always returns the ordinary
+  synchronous result. Previously accepted, unexpired task handles remain
+  readable and cancellable after a policy change.
+- `tasks_required` requires a compatible task capability for `bazel.run` and
+  returns the dialect-specific capability or protocol error when it is absent.
+
+The server advertises task read and cancellation surfaces that are valid for the
+negotiated protocol version even when `sync_only` prevents new task creation.
+This keeps existing durable handles usable after restart. Under the legacy
+protocol, `auto` and `tasks_required` advertise
+`capabilities.tasks.requests.tools.call`; `sync_only` omits it but MAY continue
+to advertise `tasks.list` and `tasks.cancel`. Correspondingly,
+`bazel.run.execution.taskSupport` is `optional`, absent, or `required` for
+`auto`, `sync_only`, or `tasks_required`.
 
 Unknown values are startup errors. The error is written to stderr and the
 process exits nonzero before writing any MCP frame to stdout.
@@ -166,10 +187,10 @@ task_poll_interval_ms = 2000
   defaults to 24 hours and MUST be greater than zero.
 - `task_poll_interval_ms` is returned as the suggested poll interval. It
   defaults to 2,000 ms and MUST be between 100 and 60,000 inclusive.
-- Both fields are validated in every mode so a configuration can be promoted
-  between environments without discovering an invalid value only after a mode
-  switch.
-- In `sync` they have no wire effect.
+- Both fields are validated under every policy so a configuration can be
+  promoted between environments without discovering an invalid value only
+  after a policy switch.
+- They have no effect on newly executed calls under `sync_only`.
 - A legacy caller's requested `task.ttl` is advisory. The server returns and
   persists its configured actual TTL instead of accepting a shorter retention
   window that could expire a queued build.
@@ -178,59 +199,57 @@ task_poll_interval_ms = 2000
   `task_ttl_seconds`. The advertised TTL is updated to the actual duration from
   creation.
 
-The example configuration and README MUST document the mode, compatibility
+The example configuration and README MUST document the policy, compatibility
 expectations, TTL, and poll interval.
 
-## Mode contract
+## Negotiated execution contract
 
-| Behavior | `sync` | `tasks_legacy` | `tasks` |
+| Negotiated flow | Selection | `bazel.run` response | Result retrieval |
 | --- | --- | --- | --- |
-| Default | Yes | No | No |
-| `bazel.run` response | `CallToolResult` | nested `CreateTaskResult.task` | flat `CreateTaskResult` with `resultType: "task"` |
-| Client opt-in | none | `params.task` | per-request `io.modelcontextprotocol/clientCapabilities` |
-| Server advertisement | no task capability | legacy `capabilities.tasks` | `server/discover` extension capability |
-| Tool metadata | task support absent/forbidden | `bazel.run.execution.taskSupport = "required"` | no legacy task-support metadata |
-| Result retrieval | original `tools/call` | `tasks/result` | terminal `tasks/get.result` |
-| `tasks/list` | method not found | supported and paginated | method not found |
-| `tasks/update` | method not found | method not found | recognized; no input is currently requested |
-| Cancellation response | not applicable | cancelled Task object | empty acknowledged result |
-| Incompatible `bazel.run` client | synchronous result | `-32601` | `-32003` |
+| Synchronous | no compatible task request, or `sync_only` | `CallToolResult` | original `tools/call` |
+| Legacy tasks | protocol `2025-11-25` plus `params.task` | nested `CreateTaskResult.task` | `tasks/result` |
+| Tasks extension | extension-capable protocol plus per-request `io.modelcontextprotocol/clientCapabilities` | flat `CreateTaskResult` with `resultType: "task"` | terminal `tasks/get.result` |
+
+| Request | `auto` | `sync_only` | `tasks_required` |
+| --- | --- | --- | --- |
+| Extension-capable `bazel.run` | extension task | synchronous | extension task |
+| Modern request without extension capability | synchronous | synchronous | `-32003` |
+| Legacy `bazel.run` with `params.task` | legacy task | synchronous | legacy task |
+| Legacy `bazel.run` without `params.task` | synchronous | synchronous | `-32601` |
+| Earlier protocol without task support | synchronous | synchronous | `-32601` |
 
 `bazel.inspect` and `bazel.cancel` always return ordinary synchronous
-`CallToolResult` values. They never create tasks in any mode.
+`CallToolResult` values. They never create tasks under any policy or negotiated
+flow.
 
-### `sync`
+### Synchronous execution
 
-The server advertises no legacy task capability and no Tasks extension.
-`tools/list` omits `execution.taskSupport`, which has the legacy meaning
-`forbidden`.
-
-`bazel.run` performs the current flow:
+When policy negotiation selects synchronous execution, `bazel.run` performs the
+current flow:
 
 1. validate and durably create the invocation;
 2. wait for its terminal record while servicing bounded progress
    notifications; and
 3. return the encoded `CallToolResult`.
 
-For compatibility with the legacy specification's non-declaring receiver rule,
-a stray legacy `params.task` value is ignored in this mode and does not change
-the response shape. A client extension capability does not force task creation;
-the server still returns a normal result.
+Under `sync_only`, a legacy `params.task` value is ignored under the legacy
+specification's non-declaring receiver rule because the server omits
+`capabilities.tasks.requests.tools.call`. A client extension capability also
+does not force task creation. The server returns a normal result.
 
 Cancellation of the original `tools/call` maps to the invocation cancellation
 token as it does today.
 
-### `tasks_legacy`
+### Legacy tasks
 
-This mode implements only the MCP `2025-11-25` task design.
+This flow implements the MCP `2025-11-25` task design.
 
 #### Negotiation and tool discovery
 
-The server requires negotiation of protocol `2025-11-25`. A client requesting a
-protocol version that cannot express the legacy task capability is rejected
-during initialization rather than being given a different `bazel.run` shape.
+The legacy adapter is active only after negotiation of protocol `2025-11-25`.
+Other protocol versions never receive legacy task response shapes.
 
-The initialize result advertises:
+Under `auto` and `tasks_required`, the initialize result advertises:
 
 ```json
 {
@@ -248,24 +267,29 @@ The initialize result advertises:
 }
 ```
 
-`tools/list` contains exactly the existing three tools. `bazel.run` includes:
+`tools/list` contains exactly the existing three tools. Under `auto`,
+`bazel.run` includes:
 
 ```json
 {
   "execution": {
-    "taskSupport": "required"
+    "taskSupport": "optional"
   }
 }
 ```
 
-`bazel.inspect` and `bazel.cancel` omit task support. A task-augmented call to
-either is rejected with `-32601 Method not found`.
+`bazel.inspect` and `bazel.cancel` omit task support. Under `auto` and
+`tasks_required`, a task-augmented call to either is rejected with
+`-32601 Method not found`. Under `sync_only`, the server has not declared task
+support for `tools/call`, so it ignores task augmentation metadata and processes
+either tool normally.
 
 #### Creating and reading a task
 
-A `bazel.run` call MUST include `params.task`. Absence is rejected with
-`-32601 Method not found`. After validation and the acceptance commit point, the
-response is:
+A `bazel.run` call creates a legacy task only when it includes `params.task`.
+Under `auto`, absence selects synchronous execution. Under `tasks_required`,
+absence is rejected with `-32601 Method not found`. After validation and the
+acceptance commit point, the deferred response is:
 
 ```json
 {
@@ -317,11 +341,12 @@ Correctness relies on polling. `notifications/tasks/status` MAY be added as a
 best-effort optimization after polling conformance passes, but it is not part of
 the initial acceptance criteria.
 
-### `tasks`
+### Tasks extension
 
-This mode implements only the `io.modelcontextprotocol/tasks` extension from
-SEP-2663. It MUST NOT advertise any legacy `capabilities.tasks` fields or
-`execution.taskSupport` values.
+This flow implements the `io.modelcontextprotocol/tasks` extension from
+SEP-2663. In a protocol context where the extension is defined, the server MUST
+NOT advertise legacy `capabilities.tasks` fields or `execution.taskSupport`
+values.
 
 #### Discovery and per-request capability
 
@@ -351,11 +376,14 @@ Every extension request MUST carry:
 }
 ```
 
-`bazel.run` always elects to create a task in this mode. If the client omits
-the per-request capability, the server returns `-32003 Missing Required Client
+Under `auto` and `tasks_required`, `bazel.run` elects to create a task when the
+request carries the extension capability. Under `sync_only`, it returns a
+synchronous result even when the capability is present, which SEP-2663 permits.
+
+If the client omits the per-request capability, `auto` and `sync_only` return a
+synchronous result. `tasks_required` returns `-32003 Missing Required Client
 Capability` with `requiredCapabilities.extensions.io.modelcontextprotocol/tasks`
-in the error data. It MUST NOT run Bazel and MUST NOT return a synchronous
-result.
+in the error data and MUST NOT run Bazel.
 
 A legacy `params.task` field is treated as an unknown field and ignored. It does
 not opt the request into the extension.
@@ -401,10 +429,10 @@ not implemented initially. Clients poll `tasks/get`.
 
 ### Progress and task association
 
-`sync` retains the existing bounded `notifications/progress` behavior when the
-caller supplies a progress token.
+Synchronous execution retains the existing bounded `notifications/progress`
+behavior when the caller supplies a progress token.
 
-`tasks_legacy` does not emit progress notifications in the first milestone.
+The legacy task flow does not emit progress notifications in the first milestone.
 Status is available through `tasks/get`. If progress is enabled later, the
 original progress token remains valid for the task lifetime and every
 task-associated message MUST include the legacy
@@ -412,9 +440,9 @@ task-associated message MUST include the legacy
 specification. `tasks/get`, `tasks/list`, and `tasks/cancel` use their explicit
 task IDs and do not add redundant related-task metadata.
 
-`tasks` does not emit `notifications/progress` for task execution. The extension
-uses `tasks/get` and, in a future notification milestone,
-`notifications/tasks`.
+The extension task flow does not emit `notifications/progress` for task
+execution. The extension uses `tasks/get` and, in a future notification
+milestone, `notifications/tasks`.
 
 ## Shared invocation lifecycle
 
@@ -448,13 +476,13 @@ pub async fn deferred_result(
 are domain concepts in `bazel-mcp-types`; they contain no `rmcp` types or MCP
 field names.
 
-`tasks_legacy` submissions use `SeparateResult` and `tasks` submissions use
+Legacy task submissions use `SeparateResult` and extension task submissions use
 `InlineResult`. Each adapter treats the other retrieval kind as an unknown task.
-This makes the same-mode restart guarantee enforceable and prevents translating
-an existing handle into a different wire dialect after a configuration change.
+The retrieval kind, not the current execution policy, selects the read adapter
+after restart and prevents translating an existing handle into another dialect.
 
 The existing synchronous `run_with_cancellation` becomes a convenience
-composition of `submit(Attached)` and `wait`. Both task modes call
+composition of `submit(Attached)` and `wait`. Both task flows call
 `submit(Deferred)` and return after the durable commit.
 
 Submission performs all request parsing, workspace and policy validation, and
@@ -498,10 +526,10 @@ Deferred metadata and terminal summaries survive restart. On startup:
   `state: "interrupted"` rather than rerunning Bazel; and
 - no task causes an automatic second Bazel invocation.
 
-A handle is guaranteed across restart only when the server restarts in the same
-`mcp_execution_mode`. Operators MUST drain active tasks before changing modes.
-After a mode change, old invocations remain available through `bazel.inspect`,
-but protocol handles from the prior dialect are not translated or advertised.
+A handle remains available across restart until expiry regardless of an
+`mcp_execution_policy` change. The policy controls creation only. Task reads and
+cancellation dispatch from the negotiated protocol and the stored retrieval
+kind. Protocol handles are never translated between dialects.
 
 ## Durable data model
 
@@ -586,7 +614,8 @@ Task support stores only compact lifecycle metadata. It MUST NOT copy stdout,
 stderr, BEP, artifacts, or `CallToolResult` payloads.
 
 The final result is deterministically reconstructed from the retained invocation
-record and summary through the same server-side result builder used by `sync`.
+record and summary through the same server-side result builder used by
+synchronous execution.
 The configured `result_encoding` applies when the result is retrieved.
 
 An unexpired deferred result protects the small invocation record and bounded
@@ -606,7 +635,7 @@ summary.
 One pure `RunResultBuilder` in `bazel-mcp-server` converts an
 `InvocationRecord` into the logical JSON result, applies the existing success or
 failure byte ceiling, records model-visible byte metrics, and encodes the
-configured `CallToolResult`. `sync`, `tasks/result`, and terminal
+configured `CallToolResult`. Synchronous execution, `tasks/result`, and terminal
 `tasks/get.result` all use it.
 
 | Invocation/deferred condition | Legacy Task | Extension Task | Final tool result |
@@ -663,14 +692,14 @@ The following races have explicit outcomes:
 
 | Condition | Response |
 | --- | --- |
-| `tasks_legacy` `bazel.run` without `params.task` | `-32601 Method not found` |
-| Legacy task metadata on `bazel.inspect` or `bazel.cancel` | `-32601 Method not found` |
-| `tasks` `bazel.run` without per-request extension capability | `-32003 Missing Required Client Capability` |
+| `tasks_required` legacy `bazel.run` without `params.task` | `-32601 Method not found` |
+| Legacy task metadata on `bazel.inspect` or `bazel.cancel` under `auto` or `tasks_required` | `-32601 Method not found` |
+| `tasks_required` modern `bazel.run` without per-request extension capability | `-32003 Missing Required Client Capability` |
 | Extension task method without per-request capability | `-32003 Missing Required Client Capability` |
 | Unknown or expired task ID | `-32602 Invalid params` |
-| `tasks/result` in `tasks` | `-32601 Method not found` |
-| `tasks/update` in `tasks_legacy` | `-32601 Method not found` |
-| `tasks/list` in `tasks` | `-32601 Method not found` |
+| `tasks/result` in an extension protocol context | `-32601 Method not found` |
+| `tasks/update` in a legacy protocol context | `-32601 Method not found` |
+| `tasks/list` in an extension protocol context | `-32601 Method not found` |
 | Second legacy cancellation of a terminal task | `-32602 Invalid params` |
 | Extension cancellation of a known terminal task | empty acknowledged result |
 | Invalid `bazel.run` arguments before acceptance | ordinary immediate tool error; no task |
@@ -681,24 +710,28 @@ persistence in Turso text fields, or telemetry.
 
 ## Server architecture
 
-### Mode-specific adapters
+### Negotiated adapters
 
-`bazel-mcp-server` constructs one of three server adapters at startup:
+`bazel-mcp-server` keeps three response adapters behind a protocol dispatcher:
 
 ```text
-                 shared tool catalog
-                        |
-                shared result builder
-                        |
-        +---------------+----------------+
-        |               |                |
-   SyncAdapter   LegacyTasksAdapter  TasksExtensionAdapter
-        |               |                |
-     rmcp I/O       legacy methods      extension methods
+          negotiated protocol + request capabilities
+                            |
+                    policy evaluator
+                            |
+                   protocol dispatcher
+                            |
+          +-----------------+------------------+
+          |                 |                  |
+     SyncAdapter   LegacyTasksAdapter  TasksExtensionAdapter
+          |                 |                  |
+     attached wait      legacy methods      extension methods
 ```
 
-The adapters share parameter validation, tool descriptions, schemas, result
-building, and `InvocationService`. They own their own:
+The dispatcher selects an adapter per request; it does not construct one
+deployment-wide wire mode at startup. The adapters share parameter validation,
+tool descriptions, schemas, result building, and `InvocationService`. They own
+their own:
 
 - protocol version gate;
 - server capability shape;
@@ -707,9 +740,9 @@ building, and `InvocationService`. They own their own:
 - task-method dispatch; and
 - task status/result conversion.
 
-This separation prevents a runtime boolean from accidentally emitting a legacy
-field in extension mode. Golden wire tests compare the entire capability,
-tool-list, creation, polling, cancellation, and result envelopes.
+This separation prevents policy evaluation from accidentally emitting a legacy
+field in an extension protocol context. Golden wire tests compare the entire
+capability, tool-list, creation, polling, cancellation, and result envelopes.
 
 ### `rmcp` dependency strategy
 
@@ -718,10 +751,10 @@ task flow. Its task types and handler hooks may be used for
 `LegacyTasksAdapter` only after its emitted errors and fields pass the golden
 tests.
 
-The `tasks` adapter requires a version of `rmcp` that implements the accepted
-SEP-2663 schema, including `server/discover`, per-request capabilities, flat
-polymorphic results, `tasks/update`, and ack-only cancellation. Implementation
-must proceed in this order:
+The Tasks extension adapter requires a version of `rmcp` that implements the
+accepted SEP-2663 schema, including `server/discover`, per-request capabilities,
+flat polymorphic results, `tasks/update`, and ack-only cancellation.
+Implementation must proceed in this order:
 
 1. check whether a stable `rmcp` release implements the pinned extension
    revision;
@@ -732,7 +765,7 @@ must proceed in this order:
 4. do not fork protocol types into the runner, store, or domain crates.
 
 An `rmcp` upgrade is not accepted merely because it compiles. It requires
-reviewed schema diffs, all three mode transcripts, `make check`, `make test`,
+reviewed schema diffs, all negotiated-flow transcripts, `make check`, `make test`,
 `make mcp-conformance`, and the Claude Code compatibility job.
 
 ## Implementation changes by crate
@@ -765,9 +798,9 @@ reviewed schema diffs, all three mode transcripts, `make check`, `make test`,
 
 ### `bazel-mcp-server`
 
-- Add and validate `McpExecutionMode` and lifecycle settings.
+- Add and validate `McpExecutionPolicy` and lifecycle settings.
 - Extract the shared `RunResultBuilder` from `bazel_run`.
-- Build one mode-specific adapter.
+- Build the negotiated protocol dispatcher and three response adapters.
 - Implement all wire behavior and errors defined above.
 - Keep tracing and compatibility diagnostics on stderr.
 - Record protocol response-byte and lifecycle metrics without logging payloads.
@@ -779,7 +812,7 @@ reviewed schema diffs, all three mode transcripts, `make check`, `make test`,
 - Count only host/model-visible task messages as model-visible output, but report
   protocol polling bytes separately.
 - Verify that the final logical result and diagnostic fidelity are identical
-  across modes.
+  across negotiated flows.
 
 No changes are required in `bazel-mcp-bep` or `bazel-mcp-reducer` beyond
 possible test plumbing. Task protocol code MUST NOT enter either crate.
@@ -790,8 +823,8 @@ possible test plumbing. Task protocol code MUST NOT enter either crate.
 
 Configuration tests cover:
 
-- the default `sync` mode;
-- all three accepted snake-case values;
+- the default `auto` policy;
+- all three accepted snake-case policy values;
 - unknown values;
 - zero and out-of-range TTL/poll settings; and
 - serialization round trips.
@@ -806,6 +839,7 @@ Domain, store, and runner tests cover:
 - legacy terminal cancellation override;
 - extension cancellation race outcomes;
 - result survival across server restart;
+- existing task handles remaining readable after an execution-policy change;
 - no automatic rerun after recovery;
 - expiry extension on terminal transition;
 - expired-row deletion without raw-log duplication;
@@ -815,27 +849,28 @@ Domain, store, and runner tests cover:
 ### Stdio protocol conformance
 
 Extend `scripts/test-mcp-conformance.py` or replace it with a structured
-`scripts/mcp-conformance/` harness that launches a fresh server per mode and
-records newline-delimited JSON transcripts.
+`scripts/mcp-conformance/` harness that launches fresh servers across policies
+and negotiates every supported flow while recording newline-delimited JSON
+transcripts.
 
 Every transcript asserts:
 
 - stdout contains only valid MCP JSON-RPC messages;
 - stderr contains diagnostics but no secret fixture value;
 - exactly three tools are listed in stable order;
-- tool schemas and descriptions are identical across modes except for permitted
-  execution metadata;
+- tool schemas and descriptions are identical across negotiated flows except
+  for permitted legacy execution metadata;
 - the selected capability shape is exact;
 - the task ID equals the invocation ID;
 - the task handle arrives before a deliberately delayed Bazel wrapper exits;
 - `tasks/get` resolves immediately after handle creation;
 - the final `CallToolResult` is byte-budgeted and logically identical to
-  `sync`; and
+  synchronous execution; and
 - the fake Bazel wrapper records one direct argv invocation.
 
-Required mode cases:
+Required negotiated-flow cases:
 
-| Case | `sync` | `tasks_legacy` | `tasks` |
+| Case | Synchronous | Legacy tasks | Tasks extension |
 | --- | ---: | ---: | ---: |
 | successful build | yes | yes | yes |
 | nonzero Bazel exit | yes | yes | yes |
@@ -843,22 +878,32 @@ Required mode cases:
 | cancellation | attached | immediate terminal task | acknowledged/raced |
 | server restart after task creation | n/a | yes | yes |
 | unknown/expired ID | n/a | yes | yes |
-| missing task capability/opt-in | ignore/normal | `-32601` | `-32003` |
+| missing task capability/opt-in under `tasks_required` | earlier protocol `-32601` | `-32601` | `-32003` |
 | result retrieval method mismatch | n/a | yes | yes |
 | legacy list pagination | n/a | yes | method not found |
 | extension update acknowledgement | n/a | method not found | yes |
+
+Policy coverage additionally asserts that `auto` falls back synchronously when
+the request lacks task support, `sync_only` returns synchronously even for a
+capable request, and `tasks_required` never starts Bazel for an incompatible
+request. The harness MUST demonstrate legacy and extension dispatch under the
+same server configuration in separate negotiated sessions without changing
+deployment policy.
 
 Golden fixtures normalize timestamps, UUIDs, absolute paths, and durations.
 Updates require reviewed diffs and are never automatically accepted.
 
 ### Claude Code integration
 
-Claude Code is a compatibility target for `sync` and `tasks_legacy`. Its public
-MCP documentation does not make legacy Tasks a stable API guarantee, so the
-test pins and exercises the actual host executable.
+Claude Code is a compatibility target for synchronous fallback and policy
+enforcement. Although the MCP SDK code in Claude Code `2.1.204` recognizes the
+legacy Tasks schema, the pinned host does not send `params.task`. The raw stdio
+suite is therefore authoritative for the positive legacy task flow. The host
+test pins and exercises the actual executable so a future behavior change is
+detected instead of inferred from SDK support.
 
 The initial compatibility lock is Claude Code `2.1.204`, the version verified
-while drafting this specification. Store the accepted versions and platform
+while implementing this specification. Store the accepted version and platform
 checksums in `scripts/compat/claude-code.lock`. The test MUST reject a different
 binary unless an explicit update workflow is used; it MUST NOT silently test a
 floating `latest`.
@@ -897,7 +942,7 @@ and does not patch or introspect the process.
 The stdio proxy forwards bytes unchanged. Its own stdout is protocol-only, it
 writes normalized traces to a temporary file, and diagnostics go to stderr.
 
-The `sync` Claude case asserts:
+The `sync_only` Claude case asserts:
 
 - Claude Code discovers exactly the three MCP tools;
 - `bazel.run` receives no legacy task opt-in requirement;
@@ -905,21 +950,25 @@ The `sync` Claude case asserts:
 - Claude Code consumes one ordinary `CallToolResult`; and
 - the wrapper ran once.
 
-The `tasks_legacy` Claude cases assert:
+The `auto` Claude case asserts:
 
-- Claude Code negotiates `2025-11-25` legacy task support;
-- it observes `bazel.run.execution.taskSupport = "required"`;
-- it sends `tools/call.params.task`;
-- it accepts the nested `CreateTaskResult` before wrapper completion;
-- it polls `tasks/get` without creating additional model turns;
-- it retrieves the final value through `tasks/result`;
-- a nonzero Bazel exit is surfaced as a completed tool result with logical
-  `state: "failed"`; and
-- the wrapper ran exactly once in each case.
+- Claude Code observes `bazel.run.execution.taskSupport = "optional"`;
+- it does not send `tools/call.params.task`;
+- the server falls back to one attached invocation; and
+- Claude Code consumes the ordinary `CallToolResult`.
+
+The `tasks_required` Claude case asserts:
+
+- Claude Code observes `bazel.run.execution.taskSupport = "required"`;
+- it still does not send `tools/call.params.task` in the pinned version;
+- the server returns `-32601 Method not found` before acceptance; and
+- the Bazel wrapper is not launched.
 
 Cancellation and restart semantics remain mandatory in the raw stdio suite.
-They may be added to the Claude suite when the pinned host exposes a stable,
-scriptable cancellation path; they are not simulated through model prose.
+Positive legacy task execution may be added to the Claude suite when a pinned
+host release actually sends the task augmentation. Cancellation may be added
+when that host also exposes a stable, scriptable cancellation path; neither is
+simulated through model prose.
 
 `test-claude-code` fails clearly when the pinned binary is unavailable. It is
 not silently skipped and is not part of ordinary `make test`. The dedicated CI
@@ -931,10 +980,10 @@ version update requires reviewing the normalized protocol trace and lock file.
 provided credentials. It never runs in pull-request CI, never records provider
 responses or secrets in committed fixtures, and has a strict budget limit.
 
-The current Claude compatibility target does not establish support for the
-SEP-2663 `tasks` mode. That mode is gated by raw MCP extension conformance until
-a production host declares the extension; when Claude Code does so, the same
-host harness gains a third positive case.
+The current Claude compatibility target does not establish host support for
+either task dialect. Both positive task flows are gated by raw MCP conformance
+until a production host declares and uses the relevant capability. When Claude
+Code does so, the same host harness gains a positive task case.
 
 ### Make and CI integration
 
@@ -946,9 +995,9 @@ test-claude-code
 test-claude-code-live
 ```
 
-`mcp-conformance` runs all three credential-free protocol modes. It remains
-separate from ordinary unit tests because it builds and launches the production
-binary.
+`mcp-conformance` runs all three credential-free negotiated flows and the policy
+matrix. It remains separate from ordinary unit tests because it builds and
+launches the production binary.
 
 CI adds a required protocol-conformance job and a pinned Claude Code
 compatibility job. The live provider test and floating-latest compatibility
@@ -971,15 +1020,16 @@ The long Abseil benchmark is not run as an ordinary unit test.
 
 ## Observability
 
-Startup logs include the selected mode, task TTL, poll interval, and pinned
-protocol revision on stderr.
+Startup logs include the selected policy, task TTL, poll interval, and pinned
+protocol revisions on stderr. Connection diagnostics record the negotiated
+protocol family without client-provided payloads.
 
 Add counters and histograms for:
 
 - deferred invocations accepted, completed, failed, cancelled, interrupted, and
   expired;
 - task creation acknowledgement latency;
-- `tasks/get`, result, list, update, and cancellation calls by mode;
+- `tasks/get`, result, list, update, and cancellation calls by negotiated flow;
 - capability mismatch and unknown/expired-ID errors;
 - protocol response bytes for creation, polling, and final result separately;
 - lost-handle/orphaned deferred work when detectable; and
@@ -1000,8 +1050,8 @@ values, task-result payloads, or unredacted error strings.
 - Per-task status and immediate-response strings pass through secret redaction.
 - Turso failure text is redacted before insertion.
 - Task polling cannot request arbitrary files or bypass `bazel.inspect` policy.
-- Task mode never changes argv construction: Bazel is still launched directly
-  with a string vector and never through a shell.
+- Task execution never changes argv construction: Bazel is still launched
+  directly with a string vector and never through a shell.
 - The Claude mock-provider test uses only a temporary allowlisted workspace and
   dummy credentials, denies non-loopback access, and disables nonessential
   network activity.
@@ -1010,48 +1060,57 @@ values, task-result payloads, or unredacted error strings.
 
 As of this specification's drafting:
 
-| Host/version | `sync` | `tasks_legacy` | `tasks` |
+| Host/version | Synchronous | Legacy tasks | Tasks extension |
 | --- | --- | --- | --- |
 | Codex CLI 0.144.4 | compatibility target | not supported by current client result handling | no verified support |
-| Claude Code 2.1.204 | compatibility target | pinned integration target | no verified support |
+| Claude Code 2.1.204 | pinned integration target | schema recognized, host opt-in disabled | no verified support |
 | protocol harness | required | required | required |
 
 This table is empirical, versioned test evidence rather than a permanent vendor
-claim. README guidance points users to `sync` for unknown hosts,
-`tasks_legacy` for the pinned Claude Code path, and `tasks` only for clients that
-declare the SEP-2663 extension.
+claim. README guidance recommends the default `auto` policy for mixed or unknown
+hosts, `sync_only` as a compatibility escape hatch, and `tasks_required` only
+when the deployment requires detached execution. The server, not the operator,
+derives the task dialect from protocol negotiation.
 
 Implementation is delivered in these stages:
 
 1. Pin protocol schemas and add redacted golden transcripts for all three
-   modes.
+   negotiated flows.
 2. Add configuration, domain types, Turso migration, and retention behavior.
-3. Refactor `InvocationService` into submit/wait without changing `sync`
+3. Refactor `InvocationService` into submit/wait without changing synchronous
    behavior.
-4. Land `tasks_legacy` and its raw protocol tests.
-5. Land the pinned Claude Code `sync` and `tasks_legacy` integration job.
-6. Select or adapt `rmcp` and land the `tasks` extension adapter.
+4. Land legacy task negotiation and its raw protocol tests.
+5. Land the pinned Claude Code `sync_only` and `tasks_required` integration job.
+6. Select or adapt `rmcp` and land extension discovery plus the Tasks extension
+   adapter.
 7. Add benchmark transcripts, documentation, and release gates.
 
-`sync` remains the default throughout rollout. No release changes the default
-until a separate specification and host adoption evidence justify it.
+`auto` is the default throughout rollout. It preserves synchronous behavior for
+clients that do not declare a compatible task capability, so enabling task
+support does not require host-specific configuration.
 
 ## Acceptance criteria
 
 This specification is complete when:
 
-- `ServerConfig` accepts exactly `sync`, `tasks_legacy`, and `tasks` and defaults
-  to `sync`.
-- Each mode emits only its specified capability, tool metadata, result, and
-  task-method shapes.
+- `ServerConfig` accepts exactly `auto`, `sync_only`, and `tasks_required` and
+  defaults to `auto`.
+- The server derives legacy versus extension wire behavior from negotiated
+  protocol version and request capabilities, never from host identity or
+  deployment policy.
+- Each negotiated protocol context emits only its specified capability, tool
+  metadata, result, and task-method shapes.
+- `auto` falls back synchronously for non-declaring clients, `sync_only` creates
+  no new tasks, and `tasks_required` rejects incompatible calls before Bazel
+  starts.
 - The server still lists exactly `bazel.run`, `bazel.inspect`, and
   `bazel.cancel`.
-- `tasks_legacy` passes the MCP `2025-11-25` golden flow, including
+- Legacy tasks pass the MCP `2025-11-25` golden flow, including
   `tasks/result`, list pagination, and immediate cancellation semantics.
-- `tasks` passes the pinned SEP-2663 golden flow, including per-request
-  capability enforcement, flat polymorphic creation, inlined terminal results,
-  update acknowledgement, ack-only cancellation, and rejection of
-  `tasks/result`.
+- The Tasks extension passes the pinned SEP-2663 golden flow, including
+  per-request capability enforcement, flat polymorphic creation, inlined
+  terminal results, update acknowledgement, ack-only cancellation, and
+  rejection of `tasks/result`.
 - A task handle is never returned before its durable record is readable.
 - Task and invocation IDs are identical and one accepted call launches Bazel
   once.
@@ -1059,14 +1118,17 @@ This specification is complete when:
 - Nonzero Bazel exits are completed tool results, not protocol failures.
 - Task records and minimal summaries survive restart, while Bazel is never
   automatically rerun.
+- Previously accepted task handles remain readable and cancellable after an
+  execution-policy change until they expire.
 - Task metadata adds no copy of raw logs, BEP, artifacts, or final response
   payloads.
 - Expiry, cancellation races, unknown IDs, protocol mismatch errors, and restart
   recovery have deterministic tests.
 - MCP stdout remains protocol-only and all diagnostic output remains on stderr.
 - Redaction occurs before status text, Turso text fields, and telemetry.
-- The pinned Claude Code executable passes both `sync` and `tasks_legacy` host
-  integration cases with one wrapper execution per call.
+- The pinned Claude Code executable passes `sync_only` and `auto` synchronous
+  host cases with one wrapper execution per call, and the `tasks_required`
+  incompatibility case rejects before launching the wrapper.
 - `make build`, `make test`, `make check`, `make mcp-conformance`,
   `make test-claude-code`, `make test-bazel-matrix`, `make fuzz-smoke`, and the
   explicit token integration target pass.

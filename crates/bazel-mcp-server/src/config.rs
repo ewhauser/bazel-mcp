@@ -18,6 +18,15 @@ pub enum ResultEncoding {
     Both,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpExecutionPolicy {
+    #[default]
+    Auto,
+    SyncOnly,
+    TasksRequired,
+}
+
 #[derive(Clone, Debug, Parser)]
 #[command(name = "bazel-mcp", version, about)]
 pub struct Cli {
@@ -62,6 +71,9 @@ pub struct ServerConfig {
     pub maximum_pending_invocations: usize,
     pub retention_cleanup_interval_seconds: u64,
     pub isolated_bazel_server_idle_seconds: u64,
+    pub mcp_execution_policy: McpExecutionPolicy,
+    pub task_ttl_seconds: u64,
+    pub task_poll_interval_ms: u64,
 }
 
 impl Default for ServerConfig {
@@ -92,6 +104,9 @@ impl Default for ServerConfig {
             maximum_pending_invocations: 256,
             retention_cleanup_interval_seconds: 60 * 60,
             isolated_bazel_server_idle_seconds: 60,
+            mcp_execution_policy: McpExecutionPolicy::Auto,
+            task_ttl_seconds: 24 * 60 * 60,
+            task_poll_interval_ms: 2_000,
         }
     }
 }
@@ -139,6 +154,12 @@ impl ServerConfig {
         }
         if config.isolated_bazel_server_idle_seconds == 0 {
             anyhow::bail!("isolated Bazel server idle timeout must be greater than zero");
+        }
+        if config.task_ttl_seconds == 0 {
+            anyhow::bail!("task TTL must be greater than zero");
+        }
+        if !(100..=60_000).contains(&config.task_poll_interval_ms) {
+            anyhow::bail!("task poll interval must be between 100 and 60000 milliseconds");
         }
         if !config.allow_unsupported_bazel_versions
             && config.supported_bazel_major_versions.is_empty()
@@ -371,6 +392,57 @@ mod tests {
             );
             let config = ServerConfig::load(&cli(path)).unwrap();
             assert_eq!(config.result_encoding, expected);
+        }
+    }
+
+    #[test]
+    fn task_configuration_defaults_and_round_trips() {
+        let config = ServerConfig::default();
+        assert_eq!(config.mcp_execution_policy, McpExecutionPolicy::Auto);
+        assert_eq!(config.task_ttl_seconds, 86_400);
+        assert_eq!(config.task_poll_interval_ms, 2_000);
+
+        for (name, expected) in [
+            ("auto", McpExecutionPolicy::Auto),
+            ("sync_only", McpExecutionPolicy::SyncOnly),
+            ("tasks_required", McpExecutionPolicy::TasksRequired),
+        ] {
+            let encoded = serde_json::to_string(&expected).unwrap();
+            let decoded: McpExecutionPolicy = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, expected, "policy {name}");
+        }
+        assert!(serde_json::from_str::<McpExecutionPolicy>("\"detached\"").is_err());
+    }
+
+    #[test]
+    fn validates_task_lifecycle_settings_for_every_policy() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+
+        for extra in [
+            "task_ttl_seconds = 0\n",
+            "task_poll_interval_ms = 99\n",
+            "task_poll_interval_ms = 60001\n",
+        ] {
+            let path = write_config(root.path(), &workspace, extra);
+            assert!(ServerConfig::load(&cli(path)).is_err(), "accepted {extra}");
+        }
+
+        for (name, expected) in [
+            ("auto", McpExecutionPolicy::Auto),
+            ("sync_only", McpExecutionPolicy::SyncOnly),
+            ("tasks_required", McpExecutionPolicy::TasksRequired),
+        ] {
+            let path = write_config(
+                root.path(),
+                &workspace,
+                &format!(
+                    "mcp_execution_policy = {name:?}\ntask_ttl_seconds = 1\ntask_poll_interval_ms = 100\n"
+                ),
+            );
+            let config = ServerConfig::load(&cli(path)).unwrap();
+            assert_eq!(config.mcp_execution_policy, expected);
         }
     }
 }

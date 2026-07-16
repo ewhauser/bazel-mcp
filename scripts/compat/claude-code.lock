@@ -1,0 +1,13 @@
+{
+  "package": "@anthropic-ai/claude-code",
+  "version": "2.1.204",
+  "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.204.tgz",
+  "sha1": "b34139bd500ec82f463568ec8933c296d568c1c5",
+  "integrity": "sha512-DmU1s/YJVvbdTAYiv9YTdA06qaD27otG5OJ2VVGGguQPMiyvfcoPP+//JJACbmBDcxMm121aqBssOXDp+4UXeQ==",
+  "platforms": [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64"
+  ]
+}

@@ -3,6 +3,7 @@
 mod artifact;
 mod command;
 mod coverage;
+mod deferred;
 mod diagnostic;
 mod invocation;
 mod pagination;
@@ -13,6 +14,10 @@ mod test;
 pub use artifact::{Artifact, ArtifactKind};
 pub use command::{BazelCommand, CommandClass};
 pub use coverage::{CoverageFile, CoverageSummary};
+pub use deferred::{
+    DeferredFailure, DeferredFailureKind, DeferredResultRecord, DeferredResultView,
+    DeferredRetrieval, DeferredTerminalState, ResultDisposition,
+};
 pub use diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
 pub use invocation::{
     InvocationId, InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState,

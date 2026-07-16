@@ -3,7 +3,7 @@
 	bench-compare bench-token bench-token-live publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
 	fuzz-run harden-release check-release-security \
-	mcp-conformance generate-sbom
+	mcp-conformance test-claude-code test-claude-code-live generate-sbom
 
 ARGS ?= --help
 FUZZ_TARGET ?= bep_framing
@@ -95,6 +95,14 @@ check-release-security: harden-release
 mcp-conformance:
 	cargo build -p bazel-mcp-server --bin bazel-mcp
 	python3 ./scripts/test-mcp-conformance.py
+
+test-claude-code:
+	cargo build -p bazel-mcp-server --bin bazel-mcp
+	python3 ./scripts/compat/test-claude-code.py
+
+test-claude-code-live:
+	cargo build -p bazel-mcp-server --bin bazel-mcp
+	python3 ./scripts/compat/test-claude-code.py --live
 
 generate-sbom:
 	./scripts/generate-release-sbom.sh

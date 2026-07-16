@@ -1,0 +1,4 @@
+{"sequence":0,"adapter":"tasks_extension","scenario":"successful_build","kind":"tool_call","role":"assistant","model_visible":true,"content":"bazel.run //:fixture capability=io.modelcontextprotocol/tasks"}
+{"sequence":1,"adapter":"tasks_extension","scenario":"successful_build","kind":"progress","role":"host","model_visible":false,"content":"{\"method\":\"tasks/get\",\"resultType\":\"complete\",\"status\":\"working\"}"}
+{"sequence":2,"adapter":"tasks_extension","scenario":"successful_build","kind":"progress","role":"host","model_visible":false,"content":"{\"method\":\"tasks/get\",\"resultType\":\"complete\",\"status\":\"completed\"}"}
+{"sequence":3,"adapter":"tasks_extension","scenario":"successful_build","kind":"tool_result","role":"tool","model_visible":true,"content":"{\"command\":\"build\",\"headline\":\"Build completed successfully\",\"state\":\"succeeded\"}"}
