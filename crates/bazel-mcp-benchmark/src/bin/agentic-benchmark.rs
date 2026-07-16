@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .proxy_executable
         .unwrap_or_else(|| repository_root.join("target/debug/bazel-agentic-shell"));
     let adapters = if args.adapters.is_empty() {
-        vec![AgenticAdapter::ShellDefault, AgenticAdapter::BazelMcp]
+        vec![AgenticAdapter::ShellDefault, AgenticAdapter::BazelMcpToon]
     } else {
         args.adapters
     };
