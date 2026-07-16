@@ -61,13 +61,21 @@ pub struct RunParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct InspectParams {
     /// UUID returned by bazel.run.
-    pub invocation_id: String,
-    /// summary, diagnostics, tests, coverage, artifacts, query_results, log, or test_log.
+    pub invocation_id: Option<String>,
+    /// Optional absolute workspace path used to scope retained invocation listings.
+    pub workspace: Option<String>,
+    /// Optional invocation state used to filter retained invocation listings.
+    pub state: Option<String>,
+    /// Optional Bazel command used to filter retained invocation listings.
+    pub command: Option<String>,
+    /// summary, metrics, diagnostics, tests, coverage, artifacts, query_results, log, test_log, or invocations.
     pub view: String,
     /// Optional literal substring or label glob filter.
     pub filter: Option<String>,
     /// Maximum items, from 1 through 100.
     pub limit: Option<u32>,
+    /// Maximum model-visible response bytes, clamped from 512 through 8192.
+    pub max_bytes: Option<u32>,
     /// Opaque continuation cursor.
     pub cursor: Option<String>,
 }
@@ -214,15 +222,15 @@ impl BazelMcpServer {
 
     #[tool(
         name = "bazel.inspect",
-        description = "Read one bounded, filtered view of a retained Bazel invocation."
+        description = "Read bounded retained invocation evidence or list recent invocations."
     )]
     async fn bazel_inspect(
         &self,
         Parameters(params): Parameters<InspectParams>,
     ) -> Result<CallToolResult, String> {
-        let id = parse_id(&params.invocation_id)?;
         let view = match params.view.as_str() {
             "summary" => InspectView::Summary,
+            "metrics" => InspectView::Metrics,
             "diagnostics" => InspectView::Diagnostics,
             "tests" => InspectView::Tests,
             "log" => InspectView::Log,
@@ -230,16 +238,53 @@ impl BazelMcpServer {
             "coverage" => InspectView::Coverage,
             "artifacts" => InspectView::Artifacts,
             "query_results" => InspectView::QueryResults,
+            "invocations" => InspectView::Invocations,
             other => return Err(format!("unsupported inspection view: {other}")),
         };
-        let visible_budget = 8 * 1024;
+        let id = if view == InspectView::Invocations {
+            if params.invocation_id.is_some() {
+                return Err("invocation_id is not supported for the invocations view".into());
+            }
+            None
+        } else {
+            let value = params
+                .invocation_id
+                .as_deref()
+                .ok_or_else(|| "invocation_id is required for this view".to_owned())?;
+            Some(parse_id(value)?)
+        };
+        let workspace = params.workspace.map(PathBuf::from);
+        if workspace.is_some() && view != InspectView::Invocations {
+            return Err("workspace is supported only for the invocations view".into());
+        }
+        let state = params
+            .state
+            .as_deref()
+            .map(parse_inspect_state)
+            .transpose()?;
+        if state.is_some() && view != InspectView::Invocations {
+            return Err("state is supported only for the invocations view".into());
+        }
+        let command = params
+            .command
+            .as_deref()
+            .map(|value| match BazelCommand::from_str(value) {
+                Ok(command) => command,
+                Err(never) => match never {},
+            });
+        if command.is_some() && view != InspectView::Invocations {
+            return Err("command is supported only for the invocations view".into());
+        }
+        let visible_budget = inspect_visible_budget(params.max_bytes);
         let mut representation_budget = self.single_representation_budget(visible_budget);
         loop {
             let result = self
                 .runner
                 .inspect(InspectRequest {
-                    invocation_id: Some(id),
-                    workspace: None,
+                    invocation_id: id,
+                    workspace: workspace.clone(),
+                    state,
+                    command: command.clone(),
                     view,
                     cursor: params.cursor.clone(),
                     filter: params.filter.clone(),
@@ -249,7 +294,7 @@ impl BazelMcpServer {
                 .await
                 .map_err(|error| error.to_string())?;
             let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-            let bytes = self.model_visible_bytes(&value)?;
+            let (encoded, bytes) = self.encode_with_size(value)?;
             if bytes > visible_budget {
                 let proportional_budget = representation_budget
                     .saturating_mul(visible_budget)
@@ -266,10 +311,11 @@ impl BazelMcpServer {
                 }
                 continue;
             }
-            if let Err(error) = self
-                .runner
-                .record_model_visible_result(id, bytes, true)
-                .await
+            if let Some(id) = id
+                && let Err(error) = self
+                    .runner
+                    .record_model_visible_result(id, bytes, true)
+                    .await
             {
                 tracing::warn!(
                     invocation_id = %id,
@@ -277,7 +323,7 @@ impl BazelMcpServer {
                     "could not persist model-visible inspection metrics"
                 );
             }
-            return self.encode(value);
+            return Ok(encoded);
         }
     }
 
@@ -334,6 +380,7 @@ impl BazelMcpServer {
                     || query_sample_count < summary.query_sample.len(),
                 available_views: &[
                     "summary",
+                    "metrics",
                     "diagnostics",
                     "tests",
                     "test_log",
@@ -351,7 +398,7 @@ impl BazelMcpServer {
             };
             let value = serde_json::to_value(&result).map_err(|error| error.to_string())?;
             let limit = if summary.success { 2 * 1024 } else { 8 * 1024 };
-            let bytes = self.model_visible_bytes(&value)?;
+            let (mut encoded, bytes) = self.encode_with_size(value)?;
             if bytes <= limit {
                 if let Err(error) = self
                     .runner
@@ -364,7 +411,6 @@ impl BazelMcpServer {
                         "could not persist model-visible response metrics"
                     );
                 }
-                let mut encoded = self.encode(value)?;
                 if tool_error {
                     encoded.is_error = Some(true);
                 }
@@ -389,33 +435,52 @@ impl BazelMcpServer {
         }
     }
 
+    #[cfg(test)]
     fn model_visible_bytes(&self, value: &serde_json::Value) -> Result<usize, String> {
-        match self.result_encoding {
-            ResultEncoding::Text | ResultEncoding::Structured => serde_json::to_vec(value)
-                .map(|bytes| bytes.len())
-                .map_err(|error| error.to_string()),
-            ResultEncoding::Toon => Self::encode_toon(value).map(|text| text.len()),
-            ResultEncoding::Both => serde_json::to_vec(value)
-                .map(|bytes| bytes.len().saturating_mul(2))
-                .map_err(|error| error.to_string()),
-        }
+        self.encode_with_size(value.clone()).map(|(_, bytes)| bytes)
     }
 
     fn encode(&self, value: serde_json::Value) -> Result<CallToolResult, String> {
+        self.encode_with_size(value).map(|(result, _)| result)
+    }
+
+    fn encode_with_size(
+        &self,
+        value: serde_json::Value,
+    ) -> Result<(CallToolResult, usize), String> {
         Ok(match self.result_encoding {
             ResultEncoding::Text => {
-                CallToolResult::success(vec![ContentBlock::text(value.to_string())])
+                let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+                let bytes = text.len();
+                (
+                    CallToolResult::success(vec![ContentBlock::text(text)]),
+                    bytes,
+                )
             }
             ResultEncoding::Toon => {
-                CallToolResult::success(vec![ContentBlock::text(Self::encode_toon(&value)?)])
+                let text = Self::encode_toon(&value)?;
+                let bytes = text.len();
+                (
+                    CallToolResult::success(vec![ContentBlock::text(text)]),
+                    bytes,
+                )
             }
             ResultEncoding::Structured => {
+                let bytes = serde_json::to_vec(&value)
+                    .map_err(|error| error.to_string())?
+                    .len();
                 let mut result = CallToolResult::default();
                 result.structured_content = Some(value);
                 result.is_error = Some(false);
-                result
+                (result, bytes)
             }
-            ResultEncoding::Both => CallToolResult::structured(value),
+            ResultEncoding::Both => {
+                let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+                let bytes = text.len().saturating_mul(2);
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+                result.structured_content = Some(value);
+                (result, bytes)
+            }
         })
     }
 
@@ -1200,6 +1265,24 @@ fn parse_id(value: &str) -> Result<InvocationId, String> {
         .map_err(|_| "invocation_id must be a UUID".to_owned())
 }
 
+fn parse_inspect_state(value: &str) -> Result<InvocationState, String> {
+    match value {
+        "queued" => Ok(InvocationState::Queued),
+        "starting" => Ok(InvocationState::Starting),
+        "running" => Ok(InvocationState::Running),
+        "succeeded" => Ok(InvocationState::Succeeded),
+        "failed" => Ok(InvocationState::Failed),
+        "cancelled" => Ok(InvocationState::Cancelled),
+        "timed_out" => Ok(InvocationState::TimedOut),
+        "interrupted" => Ok(InvocationState::Interrupted),
+        _ => Err(format!("unsupported invocation state: {value}")),
+    }
+}
+
+fn inspect_visible_budget(requested: Option<u32>) -> usize {
+    requested.unwrap_or(8 * 1024).clamp(512, 8 * 1024) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use bazel_mcp_runner::RunnerConfig;
@@ -1207,6 +1290,103 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn invocation_ledger_can_be_scoped_to_a_workspace() {
+        let root = tempdir().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let workspace = PathBuf::from("/workspace/ledger-scope");
+        let mut record = InvocationRecord::queued(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Info,
+            vec!["release".to_owned()],
+        ));
+        record.state = InvocationState::Failed;
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        let mut succeeded = InvocationRecord::queued(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Build,
+            vec!["//...".to_owned()],
+        ));
+        succeeded.state = InvocationState::Succeeded;
+        store.create_invocation(&succeeded).await.unwrap();
+        let runner = InvocationService::new(store, RunnerConfig::default()).unwrap();
+        let server = BazelMcpServer::new(runner, ResultEncoding::Text);
+
+        let result = server
+            .bazel_inspect(Parameters(InspectParams {
+                invocation_id: None,
+                workspace: Some(workspace.to_string_lossy().into_owned()),
+                state: Some("failed".to_owned()),
+                command: None,
+                view: "invocations".to_owned(),
+                filter: None,
+                limit: Some(20),
+                max_bytes: Some(2_048),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("ledger result did not contain one text block");
+        };
+        assert!(content.text.len() <= 2_048);
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["view"], "invocations");
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["invocation_id"], id.to_string());
+
+        let result = server
+            .bazel_inspect(Parameters(InspectParams {
+                invocation_id: None,
+                workspace: Some(workspace.to_string_lossy().into_owned()),
+                state: None,
+                command: Some("build".to_owned()),
+                view: "invocations".to_owned(),
+                filter: None,
+                limit: Some(20),
+                max_bytes: Some(2_048),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("command-filtered ledger result did not contain one text block");
+        };
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["command"], "build");
+
+        let result = server
+            .bazel_inspect(Parameters(InspectParams {
+                invocation_id: Some(id.to_string()),
+                workspace: None,
+                state: None,
+                command: None,
+                view: "metrics".to_owned(),
+                filter: None,
+                limit: Some(20),
+                max_bytes: Some(2_048),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("metrics result did not contain one text block");
+        };
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["view"], "metrics");
+        assert_eq!(value["items"][0]["state"], "failed");
+    }
+
+    #[test]
+    fn inspection_byte_budget_is_bounded() {
+        assert_eq!(inspect_visible_budget(None), 8_192);
+        assert_eq!(inspect_visible_budget(Some(1)), 512);
+        assert_eq!(inspect_visible_budget(Some(2_048)), 2_048);
+        assert_eq!(inspect_visible_budget(Some(20_000)), 8_192);
+    }
 
     #[tokio::test]
     async fn result_encodings_charge_their_model_visible_representations() {

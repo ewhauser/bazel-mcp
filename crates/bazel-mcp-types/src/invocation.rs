@@ -95,6 +95,20 @@ pub enum InvocationState {
 
 impl InvocationState {
     #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,

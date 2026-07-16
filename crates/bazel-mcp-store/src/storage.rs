@@ -14,10 +14,10 @@ use std::{
 use std::sync::atomic::AtomicBool;
 
 use bazel_mcp_types::{
-    Artifact, CoverageFile, DeferredFailure, DeferredResultRecord, DeferredResultView,
-    DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId, InvocationMetrics,
-    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow,
-    TargetResult, Termination, TestResult,
+    Artifact, BazelCommand, CoverageFile, DeferredFailure, DeferredResultRecord,
+    DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId,
+    InvocationMetrics, InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest,
+    QueryRow, TargetResult, Termination, TestResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -712,6 +712,21 @@ impl Store {
         Ok(())
     }
 
+    pub async fn flush_pending_telemetry(&self) -> Result<usize, StoreError> {
+        let ids = {
+            let index = self.inner.index.read().await;
+            index
+                .entries
+                .iter()
+                .filter_map(|(id, entry)| entry.telemetry_flush_scheduled.then_some(*id))
+                .collect::<Vec<_>>()
+        };
+        for id in &ids {
+            while !self.flush_telemetry_once(*id).await? {}
+        }
+        Ok(ids.len())
+    }
+
     fn schedule_telemetry_flush(&self, id: InvocationId) {
         let inner = Arc::downgrade(&self.inner);
         let cache_root = self.cache_root.clone();
@@ -791,14 +806,25 @@ impl Store {
     pub async fn list_invocations(
         &self,
         workspace: Option<&Path>,
+        state: Option<InvocationState>,
+        command: Option<&BazelCommand>,
         page: PageRequest,
     ) -> Result<Page<InvocationRecord>, StoreError> {
         let limit = page.limit.clamp(1, 200) as usize;
         let workspace_text = workspace.map(|path| path.to_string_lossy().into_owned());
+        let state_text = state.map(InvocationState::as_str);
+        let command_text = command.map(BazelCommand::as_str);
         let cursor = page
             .cursor
             .as_deref()
-            .map(|value| InvocationCursor::decode_for(value, workspace_text.as_deref()))
+            .map(|value| {
+                InvocationCursor::decode_for(
+                    value,
+                    workspace_text.as_deref(),
+                    state_text,
+                    command_text,
+                )
+            })
             .transpose()?;
         let index = self.inner.index.read().await;
         let collect = |ordered: &BTreeSet<(i64, InvocationId)>| {
@@ -812,7 +838,12 @@ impl Store {
                                 && id.to_string() < cursor.id)
                     })
                 })
-                .filter_map(|(_, id)| index.entries.get(id).map(|entry| entry.record.clone()))
+                .filter_map(|(_, id)| index.entries.get(id))
+                .filter(|entry| state.is_none_or(|state| entry.record.state == state))
+                .filter(|entry| {
+                    command.is_none_or(|command| entry.record.request.command == *command)
+                })
+                .map(|entry| entry.record.clone())
                 .take(limit + 1)
                 .collect::<Vec<_>>()
         };
@@ -832,6 +863,8 @@ impl Store {
                 .map(|record| {
                     InvocationCursor::new(
                         workspace_text.as_deref(),
+                        state_text,
+                        command_text,
                         record.request.requested_at_ms,
                         record.request.id.to_string(),
                     )
@@ -2223,6 +2256,8 @@ mod tests {
         let store = Store::open(root.path()).await.unwrap();
         let mut first = record(&workspace_a);
         first.request.requested_at_ms = 100;
+        first.request.command = BazelCommand::Test;
+        first.state = InvocationState::Failed;
         let first_id = first.request.id;
         store.create_invocation(&first).await.unwrap();
         let mut second = record(&workspace_b);
@@ -2241,6 +2276,8 @@ mod tests {
         let workspace_page = store
             .list_invocations(
                 Some(&workspace_a),
+                None,
+                None,
                 PageRequest {
                     cursor: None,
                     limit: 10,
@@ -2257,6 +2294,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![third_id, first_id]
         );
+        let failed_page = store
+            .list_invocations(
+                Some(&workspace_a),
+                Some(InvocationState::Failed),
+                None,
+                PageRequest::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed_page.items.len(), 1);
+        assert_eq!(failed_page.items[0].request.id, first_id);
+        let test_page = store
+            .list_invocations(
+                Some(&workspace_a),
+                None,
+                Some(&BazelCommand::Test),
+                PageRequest::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_page.items.len(), 1);
+        assert_eq!(test_page.items[0].request.id, first_id);
         let deferred_page = store
             .list_deferred_results(DeferredRetrieval::InlineResult, 301, PageRequest::default())
             .await
@@ -2266,7 +2325,7 @@ mod tests {
 
         let reopened = Store::open(root.path()).await.unwrap();
         let rebuilt = reopened
-            .list_invocations(Some(&workspace_a), PageRequest::default())
+            .list_invocations(Some(&workspace_a), None, None, PageRequest::default())
             .await
             .unwrap();
         assert_eq!(rebuilt.items[0].request.id, third_id);
@@ -2699,6 +2758,30 @@ mod tests {
         assert_eq!(durable.metrics.model_visible_bytes, 1_000);
         assert_eq!(durable.metrics.inspect_calls, 100);
         assert_eq!(durable.metrics.progress_notifications, 7);
+    }
+
+    #[tokio::test]
+    async fn pending_telemetry_can_be_flushed_before_shutdown() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        succeed(&store, id).await;
+        let before = store.io_stats().manifest_commits;
+        store
+            .record_model_visible_result(id, 321, true)
+            .await
+            .unwrap();
+        assert_eq!(store.io_stats().manifest_commits, before);
+        assert_eq!(store.flush_pending_telemetry().await.unwrap(), 1);
+        assert_eq!(store.io_stats().manifest_commits, before + 1);
+        drop(store);
+
+        let reopened = Store::open(root.path()).await.unwrap();
+        let durable = reopened.get_invocation(id).await.unwrap();
+        assert_eq!(durable.metrics.model_visible_bytes, 321);
+        assert_eq!(durable.metrics.inspect_calls, 1);
     }
 
     #[tokio::test]

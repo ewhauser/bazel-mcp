@@ -75,6 +75,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         extension_protocol = "2026-06-30",
         "configured negotiated MCP task execution"
     );
+    let shutdown_store = store.clone();
     let cleanup_store = store;
     let cleanup_age =
         std::time::Duration::from_secs(config.retention_days.saturating_mul(24 * 60 * 60));
@@ -140,6 +141,15 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
             Ok(())
         }
     };
+    match shutdown_store.flush_pending_telemetry().await {
+        Ok(flushed) if flushed > 0 => {
+            tracing::debug!(flushed, "flushed pending invocation telemetry");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not flush pending invocation telemetry");
+        }
+    }
     cleanup_task.abort();
     result
 }

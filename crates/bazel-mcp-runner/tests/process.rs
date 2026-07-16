@@ -193,6 +193,8 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
             .inspect(InspectRequest {
                 invocation_id: Some(id),
                 workspace: None,
+                state: None,
+                command: None,
                 view,
                 cursor: None,
                 filter: None,
@@ -207,6 +209,8 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Log,
             cursor: None,
             filter: Some("SUPERSECRET".into()),
@@ -235,6 +239,8 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Coverage,
             cursor: None,
             filter: None,
@@ -270,6 +276,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Log,
             cursor: None,
             filter: None,
@@ -286,6 +294,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Log,
             cursor: Some(cursor.clone()),
             filter: None,
@@ -305,6 +315,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
             .inspect(InspectRequest {
                 invocation_id: Some(other_id),
                 workspace: None,
+                state: None,
+                command: None,
                 view: InspectView::Log,
                 cursor: Some(cursor),
                 filter: None,
@@ -319,6 +331,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Log,
             cursor: Some("512".into()),
             filter: None,
@@ -332,6 +346,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Log,
             cursor: None,
             filter: Some("LINE-150".into()),
@@ -347,6 +363,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::Log,
             cursor: None,
             filter: Some("not-present".into()),
@@ -421,6 +439,8 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
         .inspect(InspectRequest {
             invocation_id: Some(failed.request.id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::TestLog,
             cursor: None,
             filter: Some("//PKG:FAILING".into()),
@@ -989,6 +1009,8 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
             .inspect(InspectRequest {
                 invocation_id: Some(id),
                 workspace: None,
+                state: None,
+                command: None,
                 view,
                 cursor: None,
                 filter: None,
@@ -1004,6 +1026,8 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
         .inspect(InspectRequest {
             invocation_id: Some(id),
             workspace: None,
+            state: None,
+            command: None,
             view: InspectView::TestLog,
             cursor: None,
             filter: Some("//PKG:TEST".into()),
