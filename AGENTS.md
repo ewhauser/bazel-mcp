@@ -18,8 +18,11 @@ Abseil benchmark as an ordinary unit test. Use Conventional Commits; Release
 Please owns versions and the changelog.
 
 Always use the Bazel MCP tools instead of invoking Bazel or Bazelisk directly.
-When work involves Bazel, create or update the repository-root `LEARNINGS.md`
-with concrete potential improvements and opportunities to use the Bazel MCP
-server more token-efficiently. Keep entries concise, actionable, and grounded
-in observations from the current work; do not record secrets or raw sensitive
-output.
+When using Bazel MCP reveals a performance issue, bug, or agent-workflow
+inefficiency caused by MCP behavior, create or update the repository-root
+`LEARNINGS.md`. Record the concrete MCP symptom, its impact on tool calls or
+model-visible tokens when applicable, and an actionable follow-up.
+Agent-workflow observations are especially valuable when they expose
+inefficient protocol behavior, result reduction, or inspection flows. Do not
+add general project, Bazel, CI, release, or unrelated workflow learnings. Do not
+record secrets or raw sensitive output.
