@@ -3,10 +3,10 @@
 Track concrete performance issues and bugs observed in the MCP server,
 especially MCP behavior that makes agents spend extra tokens or make avoidable
 tool calls. Each entry must identify the server or protocol symptom, its agent
-workflow impact when applicable, and an actionable follow-up. Do not record
-general project knowledge, successful behavior, Bazel usage, CI or release
-issues, or workflow advice unrelated to MCP efficiency. Do not include secrets
-or raw sensitive output.
+workflow impact when applicable, an actionable follow-up, and the Codex Thread
+ID where the observation occurred. Do not record general project knowledge,
+successful behavior, Bazel usage, CI or release issues, or workflow advice
+unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
 
 ## Entries
 
