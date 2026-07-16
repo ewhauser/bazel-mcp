@@ -35,6 +35,7 @@ rust_test(
     size = "small",
     deps = [
         ":bazel_mcp_runner",
+        "//crates/bazel-mcp-bep:bazel_mcp_bep",
         "//crates/bazel-mcp-policy:bazel_mcp_policy",
         "//crates/bazel-mcp-store:bazel_mcp_store",
         "//crates/bazel-mcp-types:bazel_mcp_types",
