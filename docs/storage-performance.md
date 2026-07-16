@@ -116,32 +116,32 @@ are checked in with the benchmark fixtures.
 
 | Workload | Filesystem before | Optimized | Result |
 | --- | ---: | ---: | ---: |
-| Query count + 3-row sample | 118.540 ms | 2.779 ms | 42.6x faster |
-| First 100-row page | 0.040 ms | 0.046 ms | +0.006 ms |
-| Continued 100-row page | not recorded | 0.036 ms | bounded seek |
-| Rare filtered million-row scan | 126.810 ms | 112.134 ms | 11.6% faster |
+| Query count + 3-row sample | 118.540 ms | 2.732 ms | 43.4x faster |
+| First 100-row page | 0.040 ms | 0.041 ms | unchanged |
+| Continued 100-row page | not recorded | 0.037 ms | bounded seek |
+| Rare filtered million-row scan | 126.810 ms | 114.390 ms | 9.8% faster |
 | Point lookup p95 | 0.167 us | 0.167 us | unchanged |
-| 2,000-record startup | 51.234 ms | 49.514 ms | 3.4% faster |
+| 2,000-record startup | 51.234 ms | 69.127 ms | 17.9 ms slower |
 | 2,000-record store bytes | 3.24 MB | 2.21 MB | 31.9% less |
-| Quota GC | 432.168 ms | 318.928 ms | 26.2% faster |
-| GC shared-index write time | not recorded | 1.668 ms | 0.52% of GC |
+| Quota GC | 432.168 ms | 366.204 ms | 15.3% faster |
+| GC shared-index write time | not recorded | 1.798 ms | 0.49% of GC |
 
 One representative invocation uses four manifest commits—acceptance, starting,
 running, and one coalesced terminal commit—writing 3,145 metadata bytes and
-recounting evidence twice. The terminal storage finalization measured 0.436 ms
-for build, 0.806 ms for 500 test results, and 3.158 ms for a million-row query
+recounting evidence twice. The terminal storage finalization measured 0.375 ms
+for build, 0.725 ms for 500 test results, and 3.143 ms for a million-row query
 count plus commit.
 
 | Writers | Throughput | p50 | p95 | p99 | Lookup p95 during writes | Inspect p95 during writes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1,002/s | 0.961 ms | 1.152 ms | 1.216 ms | 0.375 us | 0.459 us |
-| 8 | 1,513/s | 5.284 ms | 6.290 ms | 6.645 ms | 0.417 us | 0.500 us |
-| 32 | 946/s | 33.035 ms | 42.217 ms | 49.624 ms | 0.792 us | 0.958 us |
+| 1 | 991/s | 0.976 ms | 1.151 ms | 1.216 ms | 0.375 us | 0.459 us |
+| 8 | 1,524/s | 5.208 ms | 6.462 ms | 7.088 ms | 0.417 us | 0.459 us |
+| 32 | 959/s | 32.389 ms | 43.391 ms | 50.467 ms | 0.791 us | 0.917 us |
 
-At 20,000 retained records, startup took 643.273 ms: 230.300 ms traversing
-directories, 375.158 ms reading manifests, 20.950 ms decoding JSON, and
-16.366 ms building indexes. The expanded benchmark took 33.980 seconds and its
-storage workloads reached 83.8 MB peak RSS. The older schema did not record an
+At 20,000 retained records, startup took 648.282 ms: 227.689 ms traversing
+directories, 382.222 ms reading manifests, 21.050 ms decoding JSON, and
+16.838 ms building indexes. The expanded benchmark took 34.187 seconds and its
+storage workloads reached 80.4 MB peak RSS. The older schema did not record an
 equivalent expanded-harness wall time or RSS, so those two values are reported
 but are not used as comparative gates.
 
@@ -156,14 +156,14 @@ address only 1.7% of startup time.
 ## Tailing and protocol-buffer decisions
 
 Concurrent BEP tailing is not shipped. The largest checked Bazel fixture is
-65,322 bytes / 158 events and reduces after exit in 0.101 ms. The concurrent
-partial-frame experiment consumed all 158 events and finalized in 0.071 ms, a
-0.030 ms saving. Even a synthetic 67.1 MB / 162,266-event stream reduces in
-50.816 ms within the existing bounds. The representative saving is smaller than
+65,322 bytes / 158 events and reduces after exit in 0.111 ms. The concurrent
+partial-frame experiment consumed all 158 events and finalized in 0.038 ms, a
+0.073 ms saving. Even a synthetic 67.1 MB / 162,266-event stream reduces in
+50.096 ms within the existing bounds. The representative saving is smaller than
 the coordination, partial-frame, cancellation, and fallback complexity. The
 same decision applies to live query counting: the optimized million-row
-post-exit count is 2.779 ms, while the concurrent completed-line experiment
-finalized in 0.052 ms. A roughly 2.7 ms saving does not justify live counter
+post-exit count is 2.732 ms, while the concurrent completed-line experiment
+finalized in 0.050 ms. A roughly 2.7 ms saving does not justify live counter
 recovery and cancellation state; direct-to-disk stdout preserves the simpler
 design.
 
@@ -171,8 +171,8 @@ No new protobuf format is justified:
 
 - BEP is already the correct varint-delimited protobuf stream.
 - Raw logs and query stdout need cheap seeks and byte-offset cursors.
-- At 2,000 records JSON decode is 2.463 ms of 49.514 ms startup; at 20,000 it
-  is 20.950 ms of 643.273 ms. File reads and traversal, not JSON, dominate.
+- At 2,000 records JSON decode is 2.479 ms of 69.127 ms startup; at 20,000 it
+  is 21.050 ms of 648.282 ms. File reads and traversal, not JSON, dominate.
 - Fixed binary cursors already remove JSON/base64 token overhead where the
   representation is model-visible.
 - Detailed JSON sidecars are bounded and not read during startup. Framed

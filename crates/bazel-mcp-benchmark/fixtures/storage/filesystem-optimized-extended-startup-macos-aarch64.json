@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "label": "filesystem-optimized-extended-startup",
-  "revision": "working-tree",
+  "revision": "6b0f2d13ec74c8d879bc2331eaa6f174d4818280",
   "platform": "macos-aarch64",
   "parameters": {
     "query_rows": 100,
