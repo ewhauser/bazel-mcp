@@ -820,6 +820,19 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 
 fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
+    diagnostics.extend(parse_java_compiler_diagnostics(&normalized));
+    let mut java_parser = JavaTestDiagnosticParser::default();
+    let mut java_test_messages = BTreeSet::new();
+    for line in normalized.lines() {
+        if let Some(diagnostic) = java_parser.observe_line(line) {
+            java_test_messages.insert(diagnostic.message.clone());
+            diagnostics.push(diagnostic);
+        }
+    }
+    if let Some(diagnostic) = java_parser.finish() {
+        java_test_messages.insert(diagnostic.message.clone());
+        diagnostics.push(diagnostic);
+    }
     let mut starlark_parser = StarlarkDiagnosticParser::default();
     for line in normalized.lines() {
         if let Some(diagnostic) = starlark_parser.observe_line(line) {
@@ -828,6 +841,10 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     }
     let mut python_parser = PythonDiagnosticParser::default();
     for line in normalized.lines() {
+        if java_exception_message(line).is_some_and(|message| java_test_messages.contains(message))
+        {
+            continue;
+        }
         if let Some(diagnostic) = python_parser.observe_line(line) {
             diagnostics.push(diagnostic);
         }
@@ -853,6 +870,12 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
         if let Some(mut diagnostic) = parse_go_diagnostic(&line) {
             diagnostic.repetition_count = count;
             diagnostics.push(diagnostic);
+            continue;
+        }
+        if parse_java_compiler_diagnostic(&line).is_some()
+            || java_exception_message(&line)
+                .is_some_and(|message| java_test_messages.contains(message))
+        {
             continue;
         }
         if parse_starlark_inline_diagnostic(&line)
@@ -899,6 +922,223 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             repetition_count: count,
         });
     }
+}
+
+fn parse_java_compiler_diagnostics(input: &str) -> Vec<Diagnostic> {
+    const MAX_CONTEXT_LINES: usize = 8;
+    let lines = input.lines().collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(mut diagnostic) = parse_java_compiler_diagnostic(line) else {
+            continue;
+        };
+        if diagnostic
+            .message
+            .eq_ignore_ascii_case("cannot find symbol")
+        {
+            for context in lines.iter().skip(index + 1).take(MAX_CONTEXT_LINES) {
+                if parse_java_compiler_diagnostic(context).is_some()
+                    || context.trim_start().starts_with("ERROR:")
+                {
+                    break;
+                }
+                if let Some(symbol) = context.trim().strip_prefix("symbol:") {
+                    diagnostic.message = format!(
+                        "cannot find symbol: {}",
+                        symbol.split_whitespace().collect::<Vec<_>>().join(" ")
+                    );
+                    break;
+                }
+            }
+        }
+        diagnostics.push(diagnostic);
+    }
+    diagnostics
+}
+
+fn parse_java_compiler_diagnostic(line: &str) -> Option<Diagnostic> {
+    let marker = line.rfind(".java:")?;
+    let path_end = marker + ".java".len();
+    let path = line[..path_end]
+        .trim()
+        .strip_prefix("ERROR: ")
+        .unwrap_or_else(|| line[..path_end].trim());
+    let (line_number, remainder) = split_u32_prefix(&line[path_end + 1..])?;
+    let (column, message) = split_u32_prefix(remainder)
+        .map_or((None, remainder), |(column, message)| {
+            (Some(column), message)
+        });
+    let message = message.trim();
+    let (severity, message) = if let Some(message) = message.strip_prefix("error:") {
+        (Severity::Error, message.trim())
+    } else {
+        let message = message.strip_prefix("warning:")?;
+        (Severity::Warning, message.trim())
+    };
+    if message.is_empty() {
+        return None;
+    }
+    Some(Diagnostic {
+        severity,
+        category: DiagnosticCategory::Compilation,
+        message: message.to_owned(),
+        location: Some(DiagnosticLocation {
+            path: compact_java_path(path),
+            line: Some(line_number),
+            column,
+        }),
+        target: None,
+        action: None,
+        repetition_count: 1,
+    })
+}
+
+/// Stateful extractor for Java exceptions followed by JVM stack frames.
+#[derive(Debug, Default)]
+pub struct JavaTestDiagnosticParser {
+    pending: Option<Diagnostic>,
+    pending_is_explicit: bool,
+    frames_seen: usize,
+}
+
+impl JavaTestDiagnosticParser {
+    const MAX_STACK_FRAMES: usize = 64;
+
+    /// Observes one normalized test-log line and emits an exception once an
+    /// application frame, another exception, or the end of its stack is seen.
+    pub fn observe_line(&mut self, line: &str) -> Option<Diagnostic> {
+        if let Some((message, explicitly_java)) = parse_java_exception_line(line) {
+            let previous = self.take_confirmed();
+            self.pending = Some(Diagnostic {
+                severity: Severity::Error,
+                category: DiagnosticCategory::Test,
+                message: message.to_owned(),
+                location: None,
+                target: None,
+                action: None,
+                repetition_count: 1,
+            });
+            self.pending_is_explicit = explicitly_java;
+            self.frames_seen = 0;
+            return previous;
+        }
+        self.pending.as_ref()?;
+        if let Some((location, framework_frame)) = parse_java_stack_frame(line) {
+            self.frames_seen = self.frames_seen.saturating_add(1);
+            if !framework_frame {
+                let mut diagnostic = self.pending.take()?;
+                diagnostic.location = Some(location);
+                self.pending_is_explicit = false;
+                self.frames_seen = 0;
+                return Some(diagnostic);
+            }
+            if self.frames_seen >= Self::MAX_STACK_FRAMES {
+                return self.take_confirmed();
+            }
+            return None;
+        }
+        if line.trim().is_empty() {
+            return None;
+        }
+        self.take_confirmed()
+    }
+
+    /// Emits an exception that reached end-of-file without an application frame.
+    pub fn finish(&mut self) -> Option<Diagnostic> {
+        self.take_confirmed()
+    }
+
+    fn take_confirmed(&mut self) -> Option<Diagnostic> {
+        let confirmed = self.pending_is_explicit || self.frames_seen > 0;
+        self.pending_is_explicit = false;
+        self.frames_seen = 0;
+        if confirmed {
+            self.pending.take()
+        } else {
+            self.pending = None;
+            None
+        }
+    }
+}
+
+fn java_exception_message(line: &str) -> Option<&str> {
+    parse_java_exception_line(line).map(|(message, _)| message)
+}
+
+fn parse_java_exception_line(line: &str) -> Option<(&str, bool)> {
+    let mut line = line.trim();
+    let mut explicitly_java = false;
+    if let Some(remainder) = line.strip_prefix("Exception in thread \"") {
+        let (_, remainder) = remainder.split_once("\" ")?;
+        line = remainder;
+        explicitly_java = true;
+    } else if let Some(remainder) = line.strip_prefix("Caused by: ") {
+        line = remainder;
+        explicitly_java = true;
+    }
+    let exception_type = line.split_once(':').map_or(line, |(name, _)| name);
+    if exception_type.is_empty()
+        || exception_type
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$')))
+    {
+        return None;
+    }
+    let class_name = exception_type.rsplit('.').next()?;
+    let recognized = class_name.ends_with("Error")
+        || class_name.ends_with("Exception")
+        || class_name.ends_with("Failure");
+    (recognized && (explicitly_java || exception_type.contains('.')))
+        .then_some((line, explicitly_java))
+}
+
+fn parse_java_stack_frame(line: &str) -> Option<(DiagnosticLocation, bool)> {
+    let frame = line.trim().strip_prefix("at ")?;
+    let (callable, source) = frame.split_once('(')?;
+    let source = source.strip_suffix(')')?;
+    let (file, line_number) = source.rsplit_once(':')?;
+    if !file.ends_with(".java") {
+        return None;
+    }
+    let line_number = line_number.parse::<u32>().ok()?;
+    let callable = callable.rsplit_once('/').map_or(callable, |(_, name)| name);
+    let class_name = callable.rsplit_once('.')?.0;
+    let package = class_name.rsplit_once('.').map(|(package, _)| package);
+    let path = package.map_or_else(
+        || file.to_owned(),
+        |package| format!("{}/{}", package.replace('.', "/"), file),
+    );
+    let framework_frame = [
+        "java.",
+        "javax.",
+        "jdk.",
+        "sun.",
+        "junit.",
+        "org.junit.",
+        "org.hamcrest.",
+        "org.opentest4j.",
+        "com.google.testing.junit.",
+    ]
+    .iter()
+    .any(|prefix| callable.starts_with(prefix));
+    Some((
+        DiagnosticLocation {
+            path,
+            line: Some(line_number),
+            column: None,
+        },
+        framework_frame,
+    ))
+}
+
+fn compact_java_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
 }
 
 /// Stateful extractor for Bazel's Starlark source and traceback diagnostics.
@@ -1573,6 +1813,92 @@ ERROR: Build did NOT complete successfully
                 .map(|location| location.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["first.go", "second.go"]
+        );
+    }
+
+    #[test]
+    fn structures_java_compiler_errors_and_retains_symbol_details() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"mcp/java_fixture/MissingSymbol.java:5: error: cannot find symbol
+    MissingInvoiceCalculator calculator = new MissingInvoiceCalculator();
+    ^
+  symbol:   class MissingInvoiceCalculator
+  location: class MissingSymbol
+ERROR: Building mcp/java_fixture/libmissing_symbol.jar failed: error executing Javac command
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(
+            diagnostic.message,
+            "cannot find symbol: class MissingInvoiceCalculator"
+        );
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "mcp/java_fixture/MissingSymbol.java".into(),
+                line: Some(5),
+                column: None,
+            })
+        );
+    }
+
+    #[test]
+    fn structures_java_type_errors_without_context_lines() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: b"mcp/java_fixture/TypeMismatch.java:5: error: incompatible types: String cannot be converted to int\n",
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(
+            summary.diagnostics[0].message,
+            "incompatible types: String cannot be converted to int"
+        );
+        assert_eq!(
+            summary.diagnostics[0].location.as_ref().unwrap().line,
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn extracts_java_test_failures_from_the_first_application_frame() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"java.lang.AssertionError: invoice total mismatch
+    at org.junit.Assert.fail(Assert.java:89)
+    at org.junit.Assert.assertEquals(Assert.java:120)
+    at mcp.java_fixture.RuntimeFailure.assertInvoiceTotal(RuntimeFailure.java:9)
+    at mcp.java_fixture.RuntimeFailure.main(RuntimeFailure.java:5)
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(
+            diagnostic.message,
+            "java.lang.AssertionError: invoice total mismatch"
+        );
+        assert_eq!(diagnostic.category, DiagnosticCategory::Test);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "mcp/java_fixture/RuntimeFailure.java".into(),
+                line: Some(9),
+                column: None,
+            })
         );
     }
 
