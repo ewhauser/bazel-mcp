@@ -1,5 +1,6 @@
 /target/
 /bazel-*
+/user.bazelrc
 /scripts/compat/node_modules/
 /.cache/
 /.codex/
