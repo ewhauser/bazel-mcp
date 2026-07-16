@@ -1317,7 +1317,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
         assert_eq!(value["view"], "invocations");
         assert_eq!(value["items"].as_array().unwrap().len(), 1);
-        assert_eq!(value["items"][0]["request"]["id"], id.to_string());
+        assert_eq!(value["items"][0]["invocation_id"], id.to_string());
 
         let result = server
             .bazel_inspect(Parameters(InspectParams {
@@ -1338,7 +1338,7 @@ mod tests {
         };
         let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
         assert_eq!(value["items"].as_array().unwrap().len(), 1);
-        assert_eq!(value["items"][0]["request"]["command"], "build");
+        assert_eq!(value["items"][0]["command"], "build");
 
         let result = server
             .bazel_inspect(Parameters(InspectParams {

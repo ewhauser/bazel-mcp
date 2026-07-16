@@ -781,33 +781,37 @@ impl InvocationService {
 
     pub async fn inspect(&self, request: InspectRequest) -> Result<InspectResult, RunnerError> {
         if request.view == InspectView::Invocations {
-            let page = self
-                .store
-                .list_invocations(
-                    request.workspace.as_deref(),
-                    request.state,
-                    request.command.as_ref(),
-                    PageRequest {
-                        cursor: request.cursor,
-                        limit: request.limit.clamp(1, 100),
-                        max_bytes: Some(request.max_bytes.saturating_sub(512)),
-                    },
-                )
-                .await?;
-            let next_cursor = page.next_cursor.clone();
-            let truncated = page.truncated;
-            return enforce_inspect_budget(
-                InspectResult {
+            let mut limit = request.limit.clamp(1, 100);
+            loop {
+                let page = self
+                    .store
+                    .list_invocations(
+                        request.workspace.as_deref(),
+                        request.state,
+                        request.command.as_ref(),
+                        PageRequest {
+                            cursor: request.cursor.clone(),
+                            limit,
+                            max_bytes: None,
+                        },
+                    )
+                    .await?;
+                let result = InspectResult {
                     invocation_id: None,
                     view: request.view,
-                    items: serde_json::to_value(page.items)?,
+                    items: serde_json::Value::Array(
+                        page.items.iter().map(invocation_ledger_row).collect(),
+                    ),
                     total_count: None,
                     filtered_count: None,
-                    next_cursor,
-                    truncated,
-                },
-                request.max_bytes,
-            );
+                    next_cursor: page.next_cursor,
+                    truncated: page.truncated,
+                };
+                if serialized_len(&result)? <= request.max_bytes || limit == 1 {
+                    return enforce_inspect_budget(result, request.max_bytes);
+                }
+                limit = (limit / 2).max(1);
+            }
         }
 
         let id = request.invocation_id.ok_or(StoreError::InvalidCursor)?;
@@ -2165,6 +2169,41 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
         boundary -= 1;
     }
     format!("{}…", &value[..boundary])
+}
+
+fn invocation_ledger_row(record: &InvocationRecord) -> serde_json::Value {
+    let arguments = record
+        .request
+        .arguments
+        .iter()
+        .take(3)
+        .map(|argument| bounded_text(argument, 128))
+        .collect::<Vec<_>>();
+    let exit_code = match record.termination {
+        Some(Termination::Exit { code }) => Some(code),
+        _ => None,
+    };
+    serde_json::json!({
+        "invocation_id": record.request.id,
+        "workspace": bounded_text(&record.request.workspace.to_string_lossy(), 256),
+        "state": record.state,
+        "command": record.request.command,
+        "arguments": arguments,
+        "arguments_truncated": record.request.arguments.len() > 3,
+        "requested_at_ms": record.request.requested_at_ms,
+        "finished_at_ms": record.finished_at_ms,
+        "exit_code": exit_code,
+        "duration_ms": record.metrics.bazel_wall_ms,
+        "headline": record
+            .summary
+            .as_ref()
+            .map(|summary| bounded_text(&summary.headline, 256)),
+        "targets": record.summary.as_ref().map(|summary| &summary.target_counts),
+        "tests": record.summary.as_ref().map(|summary| &summary.test_counts),
+        "raw_output_bytes": record.metrics.raw_output_bytes,
+        "model_visible_bytes": record.metrics.model_visible_bytes,
+        "inspect_calls": record.metrics.inspect_calls,
+    })
 }
 
 fn enforce_inspect_budget(
