@@ -910,7 +910,7 @@ impl Store {
         let mut reclaimed = 0;
         let mut processed = BTreeSet::new();
         for (id, finished, protected) in &candidates {
-            if *finished < cutoff {
+            if retention_age_elapsed(*finished, cutoff) {
                 if self.reclaim_terminal(*id, *protected).await? {
                     reclaimed += 1;
                 }
@@ -1594,6 +1594,10 @@ async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<(),
         replace_index_entry(index, id, durable.index_entry(outcome.retained_bytes));
     }
     Ok(())
+}
+
+fn retention_age_elapsed(finished_at_ms: i64, cutoff_ms: i64) -> bool {
+    finished_at_ms <= cutoff_ms
 }
 
 async fn rename_to_trash(
@@ -2983,6 +2987,13 @@ mod tests {
             store.get_invocation(id).await,
             Err(StoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn retention_age_cutoff_is_inclusive() {
+        assert!(retention_age_elapsed(42, 42));
+        assert!(retention_age_elapsed(41, 42));
+        assert!(!retention_age_elapsed(43, 42));
     }
 
     #[tokio::test]

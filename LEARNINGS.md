@@ -8,4 +8,8 @@ efficiency. Do not include secrets or raw sensitive output.
 
 ## Entries
 
-No observations recorded yet.
+### 2026-07-15
+
+- CI diagnosis required scanning a full job log to isolate one failed Rust test;
+  prioritize the failing test name and assertion in initial Bazel MCP evidence so
+  agents can avoid fetching unrelated successful-test output.
