@@ -1623,7 +1623,12 @@ impl InvocationService {
         for diagnostic in &mut summary.diagnostics {
             diagnostic.message = sanitize(&diagnostic.message, 1_000);
             if let Some(location) = &mut diagnostic.location {
-                location.path = sanitize(&location.path, 1_000);
+                let path = location.path.replace(workspace.as_ref(), "<workspace>");
+                let path = path
+                    .strip_prefix("<workspace>/")
+                    .or_else(|| path.strip_prefix("<workspace>\\"))
+                    .unwrap_or(&path);
+                location.path = self.redactor.redact_bounded(path, 1_000);
             }
             diagnostic.target = diagnostic
                 .target

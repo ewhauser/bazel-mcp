@@ -69,3 +69,11 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   summary could replace richer test evidence; prefer located traceback causes
   and keep `test_log` as optional context. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- BUILD and `.bzl` syntax errors retained the parser message but lost its inline
+  location and ranked package-loading wrappers first; parse Starlark source
+  coordinates before diagnostic ranking. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Starlark macro and rule failures split the innermost `File` frame from the
+  terminal `Error in fail`, forcing log inspection or returning a large BEP
+  wrapper; pair them into a concise loading or analysis diagnostic. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
