@@ -160,6 +160,7 @@ def write_config(path, workspace, cache, wrapper, policy):
         f"cache_root = {json.dumps(str(cache))}\n"
         f"bazel_executable = {json.dumps(str(wrapper))}\n"
         f"mcp_execution_policy = {json.dumps(policy)}\n"
+        'result_encoding = "text"\n'
         "task_ttl_seconds = 3600\n"
         "task_poll_interval_ms = 100\n"
         "progress_initial_seconds = 1\n"

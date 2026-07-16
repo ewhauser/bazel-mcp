@@ -98,6 +98,8 @@ often as needed, and returns a structured final response. A host-side verifier
 then tests the patch without exposing its additional test package to the agent.
 The latest presentation run is preserved in the
 [checked-in agentic benchmark report](agentic-benchmark-report.md).
+The compact-JSON versus TOON comparison is preserved in the
+[checked-in TOON agentic benchmark report](toon-agentic-benchmark-report.md).
 
 Every task and sample is run against identical snapshots with these adapters:
 
@@ -105,8 +107,10 @@ Every task and sample is run against identical snapshots with these adapters:
 - `shell-optimized`: Codex uses the shell with output and polling guidance;
 - `shell-mcp-loaded`: Codex uses the shell while the Bazel MCP schemas are
   loaded but prohibited, isolating fixed MCP context overhead;
-- `bazel-mcp`: Codex uses the shell for inspection and editing, but every Bazel
-  invocation must use `bazel.run` or `bazel.inspect`.
+- `bazel-mcp`: compact-JSON control; Codex uses the shell for inspection and
+  editing, but every Bazel invocation must use `bazel.run` or `bazel.inspect`;
+- `bazel-mcp-toon`: production-default TOON encoding with the same MCP-only
+  Bazel policy.
 
 The shell adapters find an instrumented executable on `PATH` that launches
 Bazel directly with an isolated output user root and preserves stdout and
@@ -177,6 +181,13 @@ launches six paid attempts:
 
 ```sh
 make bench-agentic-control-smoke
+```
+
+Compare the compact-JSON MCP result encoding with TOON on the two
+high-output tasks. At five samples it launches twenty paid attempts:
+
+```sh
+make bench-agentic-toon
 ```
 
 Agentic Make targets pin `gpt-5.6-luna` with `xhigh` reasoning by default.

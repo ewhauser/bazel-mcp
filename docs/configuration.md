@@ -94,15 +94,15 @@ Raw evidence remains local and should still be treated as sensitive.
 ### Choose a result encoding
 
 ```toml
-result_encoding = "text"
+result_encoding = "toon"
 ```
 
 Available values are:
 
 | Value | MCP result |
 | --- | --- |
-| `text` | Compact JSON in one text content block. This is the default. |
-| `toon` | Token-oriented TOON text in one content block. |
+| `text` | Compact JSON in one text content block. |
+| `toon` | Token-oriented TOON text in one content block. This is the default. |
 | `structured` | MCP structured content only. |
 | `both` | Structured content plus backwards-compatible JSON text. |
 
@@ -156,7 +156,7 @@ and must be between 100 and 60,000 milliseconds.
 | `retention_days` | `7` | Maximum age of retained invocation evidence. |
 | `maximum_storage_bytes` | `10737418240` | Maximum cache size before older evidence is removed. |
 | `retention_cleanup_interval_seconds` | `3600` | Interval between retention sweeps. |
-| `result_encoding` | `text` | Model-visible result representation. |
+| `result_encoding` | `toon` | Model-visible result representation. |
 | `supported_bazel_major_versions` | `[7, 8, 9]` | Bazel major versions accepted by default. |
 | `allow_unsupported_bazel_versions` | `false` | Allow majors outside `supported_bazel_major_versions`. |
 | `version_check_timeout_seconds` | `30` | Timeout for the pre-invocation Bazel version check. |

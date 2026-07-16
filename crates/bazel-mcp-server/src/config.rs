@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultEncoding {
-    #[default]
     Text,
+    #[default]
     Toon,
     Structured,
     Both,
@@ -97,7 +97,7 @@ impl Default for ServerConfig {
             progress_interval_seconds: 60,
             retention_days: 7,
             maximum_storage_bytes: 10 * 1024 * 1024 * 1024,
-            result_encoding: ResultEncoding::Text,
+            result_encoding: ResultEncoding::default(),
             supported_bazel_major_versions: [7, 8, 9].into_iter().collect(),
             allow_unsupported_bazel_versions: false,
             version_check_timeout_seconds: 30,
@@ -393,6 +393,15 @@ mod tests {
             let config = ServerConfig::load(&cli(path)).unwrap();
             assert_eq!(config.result_encoding, expected);
         }
+    }
+
+    #[test]
+    fn toon_is_the_default_result_encoding() {
+        assert_eq!(ResultEncoding::default(), ResultEncoding::Toon);
+        assert_eq!(
+            ServerConfig::default().result_encoding,
+            ResultEncoding::Toon
+        );
     }
 
     #[test]

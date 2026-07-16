@@ -2,7 +2,7 @@
 	setup-oss-corpus test-token-integration run check bench bench-save \
 	bench-compare bench-storage bench-storage-compare bench-token bench-token-live bench-agentic \
 	bench-agentic-smoke bench-agentic-live bench-agentic-presentation \
-	bench-agentic-control-smoke publish-token-benchmark \
+	bench-agentic-control-smoke bench-agentic-toon publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
 	fuzz-run harden-release check-release-security \
 	mcp-conformance test-claude-code test-claude-code-live generate-sbom
@@ -105,7 +105,7 @@ bench-agentic-presentation:
 		--project $(OSS_PROJECT) --samples $(AGENTIC_PRESENTATION_SAMPLES) \
 		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
 		--task fix-noisy-normalizer --task fix-fanout-macro \
-		--adapter shell-default --adapter bazel-mcp $(AGENTIC_ARGS)
+		--adapter shell-default --adapter bazel-mcp-toon $(AGENTIC_ARGS)
 
 bench-agentic-control-smoke:
 	$(NIX_DEVELOP) ./scripts/benchmarks/run-agentic-benchmark.sh \
@@ -113,7 +113,14 @@ bench-agentic-control-smoke:
 		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
 		--task fix-noisy-normalizer --task fix-fanout-macro \
 		--adapter shell-default --adapter shell-mcp-loaded \
-		--adapter bazel-mcp $(AGENTIC_ARGS)
+		--adapter bazel-mcp-toon $(AGENTIC_ARGS)
+
+bench-agentic-toon:
+	$(NIX_DEVELOP) ./scripts/benchmarks/run-agentic-benchmark.sh \
+		--project $(OSS_PROJECT) --samples $(AGENTIC_PRESENTATION_SAMPLES) \
+		--model $(AGENTIC_MODEL) --reasoning-effort $(AGENTIC_REASONING_EFFORT) \
+		--task fix-noisy-normalizer --task fix-fanout-macro \
+		--adapter bazel-mcp --adapter bazel-mcp-toon $(AGENTIC_ARGS)
 
 publish-token-benchmark:
 	python3 ./scripts/benchmarks/publish-token-report.py \

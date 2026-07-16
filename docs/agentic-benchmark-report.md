@@ -14,6 +14,7 @@ with otherwise equivalent attempts using `bazel-mcp`.
 | Project | `abseil-cpp` |
 | Corpus commit | `5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a` |
 | Bazel | `9.1.0` |
+| MCP result encoding | compact JSON text |
 | Samples | 5 per task and adapter |
 | Run identifier | `agentic-1784163133577` |
 | Adapter order | cyclic task/sample counterbalancing |

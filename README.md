@@ -181,7 +181,7 @@ A basic call is an ordinary MCP tool request:
 ```
 
 Without a compatible task opt-in, the request remains attached and returns a
-normal `CallToolResult`. The default `text` encoding places the bounded logical
+normal `CallToolResult`. The default `toon` encoding places the bounded logical
 result in one text content block:
 
 ```json
@@ -191,7 +191,7 @@ result in one text content block:
   "result": {
     "content": [{
       "type": "text",
-      "text": "{\"invocation_id\":\"019f...\",\"state\":\"succeeded\",\"command\":\"build\",\"exit_code\":0,\"headline\":\"Build succeeded\",\"more_available\":true}"
+      "text": "invocation_id: \"019f...\"\nstate: succeeded\ncommand: build\nexit_code: 0\nheadline: Build succeeded\nmore_available: true"
     }],
     "isError": false
   }
@@ -381,6 +381,26 @@ roots or override the cache directory.
 See the [configuration reference](docs/configuration.md) for all settings and
 their defaults.
 
+### Result formats
+
+TOON is the default model-visible result format. Select a different format in
+the server configuration when required by an MCP host:
+
+```toml
+result_encoding = "toon"
+```
+
+| Value | Representation | When to use it |
+| --- | --- | --- |
+| `toon` | One token-oriented TOON text block. | Default; use for compact model context. |
+| `text` | One compact JSON text block. | Use when a host or downstream tool expects JSON text. |
+| `structured` | MCP `structuredContent` only. | Use with hosts verified to consume structured content without duplicating it into model context. |
+| `both` | Structured content plus compact JSON text. | Compatibility mode for hosts that need both representations; it has the largest model-visible footprint. |
+
+The setting applies to the server, not individual tool calls. Restart the MCP
+server after changing it. All four choices carry the same logical result,
+redaction, and byte ceilings; they only change its model-visible representation.
+
 ## Compatibility
 
 | Component | Supported |
@@ -416,10 +436,10 @@ corpus, acceptance gates, and reproduction commands.
 ### Agentic coding benchmark
 
 In a five-sample run over two high-output Abseil coding tasks,
-`gpt-5.6-luna` at `xhigh` reasoning solved all 10 attempts with both adapters.
-Compared with direct shell Bazel, `bazel-mcp` reduced provider-reported total
-tokens by **36.88%** and active tokens by **41.77%** when cached input was
-assigned zero weight.
+`gpt-5.6-luna` at `xhigh` reasoning solved all 10 attempts with both the direct
+shell and compact-JSON MCP adapters. The JSON MCP arm reduced
+provider-reported total tokens by **36.88%** and active tokens by **41.77%**
+when cached input was assigned zero weight.
 
 | Metric | Shell Bazel | `bazel-mcp` | Reduction |
 | --- | ---: | ---: | ---: |
@@ -428,9 +448,21 @@ assigned zero weight.
 | Active tokens, 0% cached-input weight | 479,593 | 279,254 | 41.77% |
 | Agent time | 653.2s | 637.1s | 2.46% |
 
+A second five-sample run compared the same MCP tools using compact JSON and
+TOON. Both encodings again solved every attempt, while TOON reduced total
+provider tokens by **11.99%** and the retained MCP result payload by **35.69%**.
+
+| Metric | Compact JSON | TOON | Reduction |
+| --- | ---: | ---: | ---: |
+| Verified solves | 10/10 | 10/10 | parity |
+| Total tokens | 1,624,930 | 1,430,032 | 11.99% |
+| MCP result bytes | 48,785 | 31,375 | 35.69% |
+
 The comparison includes MCP schema and tool-call overhead. See the
 [checked-in agentic benchmark report](docs/agentic-benchmark-report.md) for
 task-level results, cache sensitivity, integrity checks, and limitations, or
+the [TOON comparison report](docs/toon-agentic-benchmark-report.md) for the
+format-specific run. See
 the [agentic benchmark methodology](docs/benchmarks.md#agentic-coding-benchmark)
 to reproduce it.
 

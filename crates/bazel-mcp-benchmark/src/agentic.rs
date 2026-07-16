@@ -30,6 +30,7 @@ pub enum AgenticAdapter {
     ShellOptimized,
     ShellMcpLoaded,
     BazelMcp,
+    BazelMcpToon,
 }
 
 impl AgenticAdapter {
@@ -39,15 +40,28 @@ impl AgenticAdapter {
             Self::ShellOptimized => "shell-optimized",
             Self::ShellMcpLoaded => "shell-mcp-loaded",
             Self::BazelMcp => "bazel-mcp",
+            Self::BazelMcpToon => "bazel-mcp-toon",
         }
     }
 
     const fn loads_mcp(self) -> bool {
-        matches!(self, Self::ShellMcpLoaded | Self::BazelMcp)
+        matches!(
+            self,
+            Self::ShellMcpLoaded | Self::BazelMcp | Self::BazelMcpToon
+        )
     }
 
     const fn uses_shell_bazel(self) -> bool {
-        !matches!(self, Self::BazelMcp)
+        !matches!(self, Self::BazelMcp | Self::BazelMcpToon)
+    }
+
+    const fn result_encoding(self) -> &'static str {
+        match self {
+            Self::BazelMcpToon => "toon",
+            Self::ShellDefault | Self::ShellOptimized | Self::ShellMcpLoaded | Self::BazelMcp => {
+                "text"
+            }
+        }
     }
 }
 
@@ -322,8 +336,8 @@ impl AgenticReport {
             ));
         }
         output.push_str("\n## Task-level paired deltas\n\n");
-        output.push_str("Positive reductions mean MCP used less than the named baseline. Active tokens count uncached input plus output; tool output combines shell-command and MCP-result bytes.\n\n");
-        output.push_str("| Task | Baseline | Pairs | Verified (base/MCP) | Total-token reduction | Active-token reduction | Tool-output reduction | Agent-time reduction |\n");
+        output.push_str("Positive reductions mean the candidate used less than the named baseline. Active tokens count uncached input plus output; tool output combines shell-command and MCP-result bytes.\n\n");
+        output.push_str("| Task | Baseline | Pairs | Verified (base/candidate) | Total-token reduction | Active-token reduction | Tool-output reduction | Agent-time reduction |\n");
         output.push_str("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
         for comparison in &self.task_comparisons {
             output.push_str(&format!(
@@ -413,6 +427,7 @@ struct ServerConfig {
     bazel_executable: PathBuf,
     output_user_root: PathBuf,
     environment_allowlist: BTreeSet<String>,
+    result_encoding: String,
 }
 
 #[derive(Debug)]
@@ -730,6 +745,7 @@ async fn run_codex(
             bazel_executable: bazel.to_owned(),
             output_user_root: output_root.join("mcp-output-user-root"),
             environment_allowlist: BTreeSet::from(["USE_BAZEL_VERSION".to_owned()]),
+            result_encoding: adapter.result_encoding().to_owned(),
         };
         tokio::fs::write(&path, toml::to_string_pretty(&server_config)?).await?;
         Some((server, path))
@@ -862,7 +878,9 @@ async fn run_codex(
         .context("parse Codex agentic final response")?;
     let shell_bazel_calls = count_wrapper_calls(&wrapper_log)?;
     let used_expected_bazel_path = match adapter {
-        AgenticAdapter::BazelMcp => parsed.mcp_bazel_run_calls > 0 && shell_bazel_calls == 0,
+        AgenticAdapter::BazelMcp | AgenticAdapter::BazelMcpToon => {
+            parsed.mcp_bazel_run_calls > 0 && shell_bazel_calls == 0
+        }
         AgenticAdapter::ShellDefault
         | AgenticAdapter::ShellOptimized
         | AgenticAdapter::ShellMcpLoaded => {
@@ -1258,19 +1276,19 @@ fn compare_weighted(
     samples: &[AgenticSample],
     adapters: &[AgenticAdapter],
 ) -> anyhow::Result<Vec<AgenticWeightedComparison>> {
-    if !adapters.contains(&AgenticAdapter::BazelMcp) {
+    let Some(candidate) = comparison_candidate(adapters) else {
         return Ok(Vec::new());
-    }
+    };
     adapters
         .iter()
         .copied()
-        .filter(|adapter| *adapter != AgenticAdapter::BazelMcp)
+        .filter(|adapter| *adapter != candidate)
         .flat_map(|baseline| CACHE_WEIGHT_PERCENTAGES.map(move |weight| (baseline, weight)))
         .map(|(baseline, weight)| {
-            let pairs = paired_samples(samples, baseline)?;
+            let pairs = paired_samples(samples, baseline, candidate)?;
             Ok(AgenticWeightedComparison {
                 baseline_adapter: baseline.name().to_owned(),
-                candidate_adapter: AgenticAdapter::BazelMcp.name().to_owned(),
+                candidate_adapter: candidate.name().to_owned(),
                 cached_input_weight_percent: weight,
                 weighted_token_reduction_percent: cluster_bootstrap_reduction(
                     &pairs,
@@ -1300,19 +1318,19 @@ fn compare(
     summaries: &[AgenticSummary],
     adapters: &[AgenticAdapter],
 ) -> anyhow::Result<Vec<AgenticComparison>> {
-    if !adapters.contains(&AgenticAdapter::BazelMcp) {
+    let Some(candidate) = comparison_candidate(adapters) else {
         return Ok(Vec::new());
-    }
+    };
     let candidate_summary = summaries
         .iter()
-        .find(|summary| summary.adapter == AgenticAdapter::BazelMcp.name())
+        .find(|summary| summary.adapter == candidate.name())
         .context("agentic MCP summary is missing")?;
     adapters
         .iter()
         .copied()
-        .filter(|adapter| *adapter != AgenticAdapter::BazelMcp)
+        .filter(|adapter| *adapter != candidate)
         .map(|baseline| {
-            let pairs = paired_samples(samples, baseline)?;
+            let pairs = paired_samples(samples, baseline, candidate)?;
             let concordant: Vec<_> = pairs
                 .iter()
                 .copied()
@@ -1334,7 +1352,7 @@ fn compare(
             let prefix = baseline.name();
             Ok(AgenticComparison {
                 baseline_adapter: baseline.name().to_owned(),
-                candidate_adapter: AgenticAdapter::BazelMcp.name().to_owned(),
+                candidate_adapter: candidate.name().to_owned(),
                 paired_attempts: pairs.len(),
                 concordant_verified_solves: concordant.len(),
                 solve_rate_delta_percentage_points: candidate_summary.solve_rate_percent
@@ -1366,15 +1384,15 @@ fn compare_tasks(
     samples: &[AgenticSample],
     adapters: &[AgenticAdapter],
 ) -> anyhow::Result<Vec<AgenticTaskComparison>> {
-    if !adapters.contains(&AgenticAdapter::BazelMcp) {
+    let Some(candidate) = comparison_candidate(adapters) else {
         return Ok(Vec::new());
-    }
+    };
     let tasks: BTreeSet<_> = samples.iter().map(|sample| sample.task.as_str()).collect();
     let mut comparisons = Vec::new();
     for baseline in adapters
         .iter()
         .copied()
-        .filter(|adapter| *adapter != AgenticAdapter::BazelMcp)
+        .filter(|adapter| *adapter != candidate)
     {
         for task in &tasks {
             let baseline_samples: Vec<_> = samples
@@ -1383,9 +1401,7 @@ fn compare_tasks(
                 .collect();
             let candidate_samples: Vec<_> = samples
                 .iter()
-                .filter(|sample| {
-                    sample.adapter == AgenticAdapter::BazelMcp.name() && sample.task == *task
-                })
+                .filter(|sample| sample.adapter == candidate.name() && sample.task == *task)
                 .collect();
             ensure!(
                 !baseline_samples.is_empty() && baseline_samples.len() == candidate_samples.len(),
@@ -1397,7 +1413,7 @@ fn compare_tasks(
             comparisons.push(AgenticTaskComparison {
                 task: (*task).to_owned(),
                 baseline_adapter: baseline.name().to_owned(),
-                candidate_adapter: AgenticAdapter::BazelMcp.name().to_owned(),
+                candidate_adapter: candidate.name().to_owned(),
                 paired_attempts: baseline_samples.len(),
                 baseline_verified_solves: baseline_samples
                     .iter()
@@ -1453,10 +1469,11 @@ fn sample_end_to_end_ms(sample: &AgenticSample) -> u64 {
 fn paired_samples(
     samples: &[AgenticSample],
     baseline: AgenticAdapter,
+    candidate: AgenticAdapter,
 ) -> anyhow::Result<Vec<(&AgenticSample, &AgenticSample)>> {
     let candidate: BTreeMap<_, _> = samples
         .iter()
-        .filter(|sample| sample.adapter == AgenticAdapter::BazelMcp.name())
+        .filter(|sample| sample.adapter == candidate.name())
         .map(|sample| ((sample.task.as_str(), sample.sample), sample))
         .collect();
     let baseline_samples: Vec<_> = samples
@@ -1483,6 +1500,16 @@ fn paired_samples(
             Ok((sample, candidate))
         })
         .collect()
+}
+
+fn comparison_candidate(adapters: &[AgenticAdapter]) -> Option<AgenticAdapter> {
+    if adapters.contains(&AgenticAdapter::BazelMcpToon) {
+        Some(AgenticAdapter::BazelMcpToon)
+    } else if adapters.contains(&AgenticAdapter::BazelMcp) {
+        Some(AgenticAdapter::BazelMcp)
+    } else {
+        None
+    }
 }
 
 fn cluster_bootstrap_reduction(
@@ -1535,7 +1562,7 @@ fn agent_prompt(
         AgenticAdapter::ShellMcpLoaded => {
             "Use the shell for every Bazel command. The bazel MCP server is configured only to measure its fixed context overhead; do not call any MCP tool."
         }
-        AgenticAdapter::BazelMcp => {
+        AgenticAdapter::BazelMcp | AgenticAdapter::BazelMcpToon => {
             "Use the shell for repository inspection, Git, and file edits. Use only the bazel MCP server for every Bazel build, test, coverage, or query invocation. Never invoke bazel, bazelisk, tools/bazel, or a command that transitively launches Bazel through the shell. The server owns Bazel presentation flags such as --color, --curses, --show_progress, --show_result, --test_output, and --test_summary; do not pass those flags to MCP. You may call bazel.run as often as the coding task requires and use bazel.inspect only when a bounded result omits evidence needed for the fix."
         }
     };
@@ -1973,6 +2000,18 @@ mod tests {
         assert_eq!(AgenticAdapter::ShellMcpLoaded.name(), "shell-mcp-loaded");
     }
 
+    #[test]
+    fn toon_adapter_changes_only_the_result_encoding() {
+        assert!(AgenticAdapter::BazelMcpToon.loads_mcp());
+        assert!(!AgenticAdapter::BazelMcpToon.uses_shell_bazel());
+        assert_eq!(AgenticAdapter::BazelMcp.result_encoding(), "text");
+        assert_eq!(AgenticAdapter::BazelMcpToon.result_encoding(), "toon");
+        assert_eq!(
+            comparison_candidate(&[AgenticAdapter::BazelMcp, AgenticAdapter::BazelMcpToon,]),
+            Some(AgenticAdapter::BazelMcpToon)
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_is_a_clean_root_and_patch_captures_new_files() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2113,7 +2152,7 @@ mod tests {
             protected_path_violations: Vec::new(),
             used_expected_bazel_path: true,
             shell_bazel_calls: u64::from(adapter.starts_with("shell")),
-            mcp_bazel_run_calls: u64::from(adapter == "bazel-mcp"),
+            mcp_bazel_run_calls: u64::from(adapter.starts_with("bazel-mcp")),
             model_events: 1,
             agent_message_events: 1,
             tool_calls: 1,

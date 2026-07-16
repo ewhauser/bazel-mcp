@@ -357,9 +357,9 @@ workspace or the invocation store.
 The server supports four deployment-level result encodings:
 
 - `text`: one compact JSON `TextContent` block and no duplicate
-  `structuredContent`; this is the default.
-- `toon`: one TOON-encoded `TextContent` block and no duplicate
   `structuredContent`.
+- `toon`: one TOON-encoded `TextContent` block and no duplicate
+  `structuredContent`; this is the default.
 - `structured`: structured content for hosts proven to handle it without placing
   a duplicate representation in model context.
 - `both`: structured content plus the backwards-compatible text representation.
