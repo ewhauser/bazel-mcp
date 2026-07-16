@@ -11,6 +11,38 @@ pub(crate) struct InvocationCursor {
     pub id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DeferredCursor {
+    context: String,
+    pub created_at_ms: i64,
+    pub id: String,
+}
+
+impl DeferredCursor {
+    pub fn new(retrieval: &str, created_at_ms: i64, id: String) -> Self {
+        Self {
+            context: cursor_context(&["deferred", retrieval]),
+            created_at_ms,
+            id,
+        }
+    }
+
+    pub fn encode(&self) -> Result<String, StoreError> {
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
+    }
+
+    pub fn decode_for(value: &str, retrieval: &str) -> Result<Self, StoreError> {
+        let raw = URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| StoreError::InvalidCursor)?;
+        let cursor: Self = serde_json::from_slice(&raw).map_err(|_| StoreError::InvalidCursor)?;
+        if cursor.context != cursor_context(&["deferred", retrieval]) {
+            return Err(StoreError::InvalidCursor);
+        }
+        Ok(cursor)
+    }
+}
+
 impl InvocationCursor {
     pub fn new(workspace: Option<&str>, requested_at_ms: i64, id: String) -> Self {
         Self {

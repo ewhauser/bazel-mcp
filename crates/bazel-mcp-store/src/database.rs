@@ -6,8 +6,10 @@ use std::{
 };
 
 use bazel_mcp_types::{
-    Artifact, CoverageFile, Diagnostic, InvocationId, InvocationMetrics, InvocationRecord,
-    InvocationState, InvocationSummary, Page, PageRequest, QueryRow, Termination, TestResult,
+    Artifact, CoverageFile, DeferredFailure, DeferredFailureKind, DeferredResultRecord,
+    DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId,
+    InvocationMetrics, InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest,
+    QueryRow, Termination, TestResult,
 };
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -15,14 +17,15 @@ use turso::{Connection, Database, Value, params};
 
 use crate::{
     InvocationPaths,
-    cursor::{InvocationCursor, OrdinalCursor},
+    cursor::{DeferredCursor, InvocationCursor, OrdinalCursor},
 };
 
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_targets_coverage.sql");
 const MIGRATION_3: &str = include_str!("../migrations/0003_canonical_arguments.sql");
 const MIGRATION_4: &str = include_str!("../migrations/0004_cancellation_reason.sql");
-const LATEST_SCHEMA_VERSION: i64 = 4;
+const MIGRATION_5: &str = include_str!("../migrations/0005_deferred_results.sql");
+const LATEST_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -30,6 +33,8 @@ pub enum StoreError {
     NonUtf8Path(PathBuf),
     #[error("invocation was not found: {0}")]
     NotFound(InvocationId),
+    #[error("deferred result was not found or has expired: {0}")]
+    DeferredNotFound(InvocationId),
     #[error("invalid pagination cursor")]
     InvalidCursor,
     #[error("unexpected database value in column {0}")]
@@ -91,6 +96,15 @@ impl Store {
         &self,
         record: &InvocationRecord,
     ) -> Result<InvocationPaths, StoreError> {
+        self.create_invocation_with_deferred(record, None).await
+    }
+
+    /// Atomically accept an invocation and its optional deferred-result handle.
+    pub async fn create_invocation_with_deferred(
+        &self,
+        record: &InvocationRecord,
+        deferred: Option<&DeferredResultRecord>,
+    ) -> Result<InvocationPaths, StoreError> {
         let paths = self.paths_for(record);
         paths.create().await?;
         let result = async {
@@ -116,6 +130,34 @@ impl Store {
                     ],
                 )
                 .await?;
+            if let Some(deferred) = deferred {
+                transaction
+                    .execute(
+                        "INSERT INTO deferred_results (
+                            invocation_id, retrieval_kind, created_at_ms, updated_at_ms,
+                            expires_at_ms, cancellation_requested_at_ms, terminal_override,
+                            failure_kind, failure_message
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            deferred.invocation_id.to_string(),
+                            deferred.retrieval.as_str(),
+                            deferred.created_at_ms,
+                            deferred.updated_at_ms,
+                            deferred.expires_at_ms,
+                            option_i64(deferred.cancellation_requested_at_ms),
+                            deferred
+                                .terminal_override
+                                .map_or(Value::Null, |value| Value::Text(value.as_str().into())),
+                            deferred.failure.as_ref().map_or(Value::Null, |failure| {
+                                Value::Text(failure.kind.as_str().into())
+                            }),
+                            deferred.failure.as_ref().map_or(Value::Null, |failure| {
+                                Value::Text(failure.redacted_message.clone())
+                            }),
+                        ],
+                    )
+                    .await?;
+            }
             transaction.commit().await?;
             Ok::<_, StoreError>(())
         }
@@ -125,6 +167,254 @@ impl Store {
             return Err(error);
         }
         Ok(paths)
+    }
+
+    pub async fn get_deferred_result(
+        &self,
+        id: InvocationId,
+        retrieval: DeferredRetrieval,
+        now_ms: i64,
+    ) -> Result<DeferredResultView, StoreError> {
+        let invocation = self.get_invocation(id).await?;
+        let connection = self.database.connect()?;
+        let mut rows = connection
+            .query(
+                "SELECT retrieval_kind, created_at_ms, updated_at_ms, expires_at_ms,
+                        cancellation_requested_at_ms, terminal_override,
+                        failure_kind, failure_message
+                 FROM deferred_results
+                 WHERE invocation_id = ?1 AND retrieval_kind = ?2",
+                params![id.to_string(), retrieval.as_str()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Err(StoreError::DeferredNotFound(id));
+        };
+        let deferred = deferred_from_row(id, &row)?;
+        drop(rows);
+        if deferred.is_expired(now_ms, invocation.state.is_terminal()) {
+            let deleted = connection
+                .execute(
+                    "DELETE FROM deferred_results WHERE invocation_id = ?1",
+                    params![id.to_string()],
+                )
+                .await?;
+            if deleted > 0 {
+                tracing::info!(
+                    target: "bazel_mcp::metrics",
+                    metric = "deferred_invocations_expired_total",
+                    increment = deleted,
+                    "expired deferred invocation metadata during lookup"
+                );
+            }
+            return Err(StoreError::DeferredNotFound(id));
+        }
+        Ok(DeferredResultView {
+            deferred,
+            invocation,
+        })
+    }
+
+    pub async fn list_deferred_results(
+        &self,
+        retrieval: DeferredRetrieval,
+        now_ms: i64,
+        page: PageRequest,
+    ) -> Result<Page<DeferredResultView>, StoreError> {
+        let limit = page.limit.clamp(1, 200) as usize;
+        let cursor = page
+            .cursor
+            .as_deref()
+            .map(|value| DeferredCursor::decode_for(value, retrieval.as_str()))
+            .transpose()?;
+        let connection = self.database.connect()?;
+        let query = "SELECT d.invocation_id, d.retrieval_kind, d.created_at_ms,
+                            d.updated_at_ms, d.expires_at_ms,
+                            d.cancellation_requested_at_ms, d.terminal_override,
+                            d.failure_kind, d.failure_message,
+                            i.request_json, i.state, i.started_at_ms, i.finished_at_ms,
+                            i.termination_json, i.summary_json, i.metrics_json,
+                            i.canonical_arguments_json, i.cancellation_reason
+                     FROM deferred_results d
+                     JOIN invocations i ON i.id = d.invocation_id
+                     WHERE d.retrieval_kind = ?1
+                       AND (i.state NOT IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted')
+                            OR d.expires_at_ms > ?2)
+                       AND (?3 IS NULL OR d.created_at_ms < ?3
+                            OR (d.created_at_ms = ?3 AND d.invocation_id < ?4))
+                     ORDER BY d.created_at_ms DESC, d.invocation_id DESC
+                     LIMIT ?5";
+        let cursor_time = cursor
+            .as_ref()
+            .map_or(Value::Null, |value| Value::Integer(value.created_at_ms));
+        let cursor_id = cursor
+            .as_ref()
+            .map_or_else(String::new, |value| value.id.clone());
+        let mut rows = connection
+            .query(
+                query,
+                params![
+                    retrieval.as_str(),
+                    now_ms,
+                    cursor_time,
+                    cursor_id,
+                    i64::try_from(limit + 1).unwrap_or(i64::MAX),
+                ],
+            )
+            .await?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id_text: String = row.get(0)?;
+            let id = parse_invocation_id(&id_text, 0)?;
+            let deferred = deferred_from_joined_row(id, &row)?;
+            let invocation = record_from_joined_deferred_row(&row)?;
+            items.push(DeferredResultView {
+                deferred,
+                invocation,
+            });
+        }
+        let truncated = items.len() > limit;
+        items.truncate(limit);
+        let next_cursor = if truncated {
+            items
+                .last()
+                .map(|view| {
+                    DeferredCursor::new(
+                        retrieval.as_str(),
+                        view.deferred.created_at_ms,
+                        view.deferred.invocation_id.to_string(),
+                    )
+                    .encode()
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(Page {
+            items,
+            next_cursor,
+            truncated,
+        })
+    }
+
+    pub async fn record_deferred_cancellation(
+        &self,
+        id: InvocationId,
+        requested_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        let _guard = self.write_coordinator.lock().await;
+        let connection = self.database.connect()?;
+        let changed = connection
+            .execute(
+                "UPDATE deferred_results
+                 SET cancellation_requested_at_ms = COALESCE(cancellation_requested_at_ms, ?2),
+                     updated_at_ms = MAX(updated_at_ms, ?2)
+                 WHERE invocation_id = ?1",
+                params![id.to_string(), requested_at_ms],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(StoreError::DeferredNotFound(id));
+        }
+        Ok(())
+    }
+
+    pub async fn set_deferred_terminal_override(
+        &self,
+        id: InvocationId,
+        state: DeferredTerminalState,
+        updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        let _guard = self.write_coordinator.lock().await;
+        let connection = self.database.connect()?;
+        let changed = connection
+            .execute(
+                "UPDATE deferred_results
+                 SET terminal_override = ?2, updated_at_ms = MAX(updated_at_ms, ?3)
+                 WHERE invocation_id = ?1",
+                params![id.to_string(), state.as_str(), updated_at_ms],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(StoreError::DeferredNotFound(id));
+        }
+        Ok(())
+    }
+
+    pub async fn persist_deferred_failure(
+        &self,
+        id: InvocationId,
+        failure: &DeferredFailure,
+        updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        let _guard = self.write_coordinator.lock().await;
+        let connection = self.database.connect()?;
+        let changed = connection
+            .execute(
+                "UPDATE deferred_results
+                 SET failure_kind = ?2, failure_message = ?3,
+                     updated_at_ms = MAX(updated_at_ms, ?4)
+                 WHERE invocation_id = ?1",
+                params![
+                    id.to_string(),
+                    failure.kind.as_str(),
+                    failure.redacted_message.as_str(),
+                    updated_at_ms,
+                ],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(StoreError::DeferredNotFound(id));
+        }
+        Ok(())
+    }
+
+    pub async fn extend_deferred_expiry(
+        &self,
+        id: InvocationId,
+        minimum_expires_at_ms: i64,
+        updated_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        let _guard = self.write_coordinator.lock().await;
+        let connection = self.database.connect()?;
+        let changed = connection
+            .execute(
+                "UPDATE deferred_results
+                 SET expires_at_ms = MAX(expires_at_ms, ?2),
+                     updated_at_ms = MAX(updated_at_ms, ?3)
+                 WHERE invocation_id = ?1",
+                params![id.to_string(), minimum_expires_at_ms, updated_at_ms],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(StoreError::DeferredNotFound(id));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_expired_deferred_results(&self, now_ms: i64) -> Result<usize, StoreError> {
+        let _guard = self.write_coordinator.lock().await;
+        let connection = self.database.connect()?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM deferred_results
+                 WHERE expires_at_ms <= ?1
+                   AND invocation_id IN (
+                       SELECT id FROM invocations
+                       WHERE state IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted')
+                   )",
+                params![now_ms],
+            )
+            .await?;
+        if deleted > 0 {
+            tracing::info!(
+                target: "bazel_mcp::metrics",
+                metric = "deferred_invocations_expired_total",
+                increment = deleted,
+                "expired deferred invocation metadata during retention"
+            );
+        }
+        Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
     }
 
     pub async fn get_invocation(&self, id: InvocationId) -> Result<InvocationRecord, StoreError> {
@@ -178,6 +468,23 @@ impl Store {
             )
             .await?;
         replace_normalized_summary(&transaction, id, record.summary.as_ref()).await?;
+        if next.is_terminal() {
+            let terminal_at_ms = record
+                .finished_at_ms
+                .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms);
+            transaction
+                .execute(
+                    "UPDATE deferred_results
+                     SET expires_at_ms = MAX(
+                             expires_at_ms,
+                             ?2 + MAX(1, expires_at_ms - created_at_ms)
+                         ),
+                         updated_at_ms = MAX(updated_at_ms, ?2)
+                     WHERE invocation_id = ?1",
+                    params![id.to_string(), terminal_at_ms],
+                )
+                .await?;
+        }
         transaction.commit().await?;
         self.paths_for(&record).write_metadata(&record).await?;
         Ok(record)
@@ -398,8 +705,10 @@ impl Store {
         maximum_age: Duration,
         maximum_bytes: u64,
     ) -> Result<usize, StoreError> {
-        let cutoff = bazel_mcp_types::unix_timestamp_ms()
-            .saturating_sub(i64::try_from(maximum_age.as_millis()).unwrap_or(i64::MAX));
+        let now_ms = bazel_mcp_types::unix_timestamp_ms();
+        self.delete_expired_deferred_results(now_ms).await?;
+        let cutoff =
+            now_ms.saturating_sub(i64::try_from(maximum_age.as_millis()).unwrap_or(i64::MAX));
         let connection = self.database.connect()?;
         let mut rows = connection
             .query(
@@ -450,11 +759,66 @@ impl Store {
         let mut deleted = 0;
         for id in selected {
             if let Ok(record) = self.get_invocation(id).await {
-                self.delete_terminal_invocation(&record).await?;
+                if self.deferred_protects_invocation(id, now_ms).await? {
+                    self.prune_deferred_evidence(&record).await?;
+                } else {
+                    self.delete_terminal_invocation(&record).await?;
+                }
                 deleted += 1;
             }
         }
         Ok(deleted)
+    }
+
+    async fn deferred_protects_invocation(
+        &self,
+        id: InvocationId,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let connection = self.database.connect()?;
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM deferred_results
+                 WHERE invocation_id = ?1 AND expires_at_ms > ?2",
+                params![id.to_string(), now_ms],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    async fn prune_deferred_evidence(&self, record: &InvocationRecord) -> Result<(), StoreError> {
+        if !record.state.is_terminal() {
+            return Ok(());
+        }
+        let paths = self.paths_for(record);
+        let tombstone = paths.directory.with_extension("deleting");
+        if paths.directory.exists() {
+            tokio::fs::rename(&paths.directory, &tombstone).await?;
+        }
+        let _guard = self.write_coordinator.lock().await;
+        let mut connection = self.database.connect()?;
+        let transaction = connection.transaction().await?;
+        for table in [
+            "diagnostics",
+            "test_results",
+            "query_rows",
+            "artifacts",
+            "target_results",
+            "coverage_files",
+        ] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE invocation_id = ?1"),
+                    params![record.request.id.to_string()],
+                )
+                .await?;
+        }
+        transaction.commit().await?;
+        drop(_guard);
+        if tombstone.exists() {
+            tokio::fs::remove_dir_all(tombstone).await?;
+        }
+        Ok(())
     }
 
     async fn delete_terminal_invocation(
@@ -472,6 +836,12 @@ impl Store {
         let _guard = self.write_coordinator.lock().await;
         let mut connection = self.database.connect()?;
         let transaction = connection.transaction().await?;
+        transaction
+            .execute(
+                "DELETE FROM deferred_results WHERE invocation_id = ?1",
+                params![record.request.id.to_string()],
+            )
+            .await?;
         for table in [
             "diagnostics",
             "test_results",
@@ -824,6 +1194,7 @@ impl Store {
             (2_i64, MIGRATION_2),
             (3_i64, MIGRATION_3),
             (4_i64, MIGRATION_4),
+            (5_i64, MIGRATION_5),
         ] {
             if !migration_applied(&connection, version).await? {
                 apply_migration(&connection, version, sql).await?;
@@ -835,7 +1206,7 @@ impl Store {
 
     async fn recover_interrupted(&self) -> Result<(), StoreError> {
         let _guard = self.write_coordinator.lock().await;
-        let connection = self.database.connect()?;
+        let mut connection = self.database.connect()?;
         let mut rows = connection
             .query(
                 "SELECT request_json, state, started_at_ms, finished_at_ms,
@@ -851,22 +1222,60 @@ impl Store {
         }
         drop(rows);
         let finished_at_ms = bazel_mcp_types::unix_timestamp_ms();
-        let termination = serde_json::to_string(&Termination::Interrupted)?;
-        connection
-            .execute(
-                "UPDATE invocations SET state = 'interrupted', finished_at_ms = ?1,
-                    termination_json = ?2 WHERE state IN ('queued', 'starting', 'running')",
-                params![finished_at_ms, termination],
-            )
-            .await?;
+        let transaction = connection.transaction().await?;
+        let mut orphaned_deferred = 0_u64;
         for mut record in interrupted {
             record.state = InvocationState::Interrupted;
             record.finished_at_ms = Some(finished_at_ms);
             record.termination = Some(Termination::Interrupted);
+            record.summary = Some(InvocationSummary {
+                success: false,
+                headline: "Bazel invocation was interrupted by server restart".to_owned(),
+                truncated: true,
+                inspect_hint: Some("log".to_owned()),
+                ..InvocationSummary::default()
+            });
+            transaction
+                .execute(
+                    "UPDATE invocations
+                     SET state = 'interrupted', finished_at_ms = ?2,
+                         termination_json = ?3, summary_json = ?4
+                     WHERE id = ?1",
+                    params![
+                        record.request.id.to_string(),
+                        finished_at_ms,
+                        serde_json::to_string(&Termination::Interrupted)?,
+                        serde_json::to_string(record.summary.as_ref().expect("summary set"))?,
+                    ],
+                )
+                .await?;
+            orphaned_deferred = orphaned_deferred.saturating_add(
+                transaction
+                    .execute(
+                        "UPDATE deferred_results
+                         SET expires_at_ms = MAX(
+                                 expires_at_ms,
+                                 ?2 + MAX(1, expires_at_ms - created_at_ms)
+                             ),
+                             updated_at_ms = MAX(updated_at_ms, ?2)
+                         WHERE invocation_id = ?1",
+                        params![record.request.id.to_string(), finished_at_ms],
+                    )
+                    .await?,
+            );
             let paths = self.paths_for(&record);
             if paths.directory.is_dir() {
                 paths.write_metadata(&record).await?;
             }
+        }
+        transaction.commit().await?;
+        if orphaned_deferred > 0 {
+            tracing::info!(
+                target: "bazel_mcp::metrics",
+                metric = "orphaned_deferred_work_total",
+                increment = orphaned_deferred,
+                "recovered orphaned deferred invocation metadata"
+            );
         }
         Ok(())
     }
@@ -957,6 +1366,20 @@ async fn validate_schema(connection: &Connection) -> Result<(), StoreError> {
         ("artifacts", &["invocation_id", "record_json"]),
         ("target_results", &["invocation_id", "record_json"]),
         ("coverage_files", &["invocation_id", "record_json"]),
+        (
+            "deferred_results",
+            &[
+                "invocation_id",
+                "retrieval_kind",
+                "created_at_ms",
+                "updated_at_ms",
+                "expires_at_ms",
+                "cancellation_requested_at_ms",
+                "terminal_override",
+                "failure_kind",
+                "failure_message",
+            ],
+        ),
     ] {
         let mut rows = connection
             .query(&format!("PRAGMA table_info({table})"), ())
@@ -1186,10 +1609,88 @@ fn record_from_row(row: &turso::Row) -> Result<InvocationRecord, StoreError> {
     Ok(record)
 }
 
+fn record_from_joined_deferred_row(row: &turso::Row) -> Result<InvocationRecord, StoreError> {
+    let request_json: String = row.get(9)?;
+    let mut record = InvocationRecord::queued(serde_json::from_str(&request_json)?);
+    let state: String = row.get(10)?;
+    record.state = parse_state(&state).ok_or(StoreError::InvalidColumn(10))?;
+    record.started_at_ms = nullable_i64(row, 11)?;
+    record.finished_at_ms = nullable_i64(row, 12)?;
+    record.termination = nullable_json(row, 13)?;
+    record.summary = nullable_json(row, 14)?;
+    let metrics: String = row.get(15)?;
+    record.metrics = serde_json::from_str(&metrics)?;
+    record.canonical_arguments = nullable_json(row, 16)?;
+    record.cancellation_reason = nullable_text(row, 17)?;
+    Ok(record)
+}
+
+fn deferred_from_row(
+    id: InvocationId,
+    row: &turso::Row,
+) -> Result<DeferredResultRecord, StoreError> {
+    deferred_from_columns(id, row, 0)
+}
+
+fn deferred_from_joined_row(
+    id: InvocationId,
+    row: &turso::Row,
+) -> Result<DeferredResultRecord, StoreError> {
+    deferred_from_columns(id, row, 1)
+}
+
+fn deferred_from_columns(
+    id: InvocationId,
+    row: &turso::Row,
+    offset: usize,
+) -> Result<DeferredResultRecord, StoreError> {
+    let retrieval: String = row.get(offset)?;
+    let retrieval =
+        DeferredRetrieval::parse(&retrieval).ok_or(StoreError::InvalidColumn(offset))?;
+    let terminal_override = nullable_text(row, offset + 5)?
+        .map(|value| {
+            DeferredTerminalState::parse(&value).ok_or(StoreError::InvalidColumn(offset + 5))
+        })
+        .transpose()?;
+    let failure_kind = nullable_text(row, offset + 6)?;
+    let failure_message = nullable_text(row, offset + 7)?;
+    let failure = match (failure_kind, failure_message) {
+        (None, None) => None,
+        (Some(kind), Some(redacted_message)) => Some(DeferredFailure {
+            kind: DeferredFailureKind::parse(&kind).ok_or(StoreError::InvalidColumn(offset + 6))?,
+            redacted_message,
+        }),
+        _ => return Err(StoreError::InvalidColumn(offset + 6)),
+    };
+    Ok(DeferredResultRecord {
+        invocation_id: id,
+        retrieval,
+        created_at_ms: row.get(offset + 1)?,
+        updated_at_ms: row.get(offset + 2)?,
+        expires_at_ms: row.get(offset + 3)?,
+        cancellation_requested_at_ms: nullable_i64(row, offset + 4)?,
+        terminal_override,
+        failure,
+    })
+}
+
+fn parse_invocation_id(value: &str, column: usize) -> Result<InvocationId, StoreError> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .map_err(|_| StoreError::InvalidColumn(column))
+}
+
 fn nullable_i64(row: &turso::Row, index: usize) -> Result<Option<i64>, StoreError> {
     match row.get_value(index)? {
         Value::Null => Ok(None),
         Value::Integer(value) => Ok(Some(value)),
+        _ => Err(StoreError::InvalidColumn(index)),
+    }
+}
+
+fn nullable_text(row: &turso::Row, index: usize) -> Result<Option<String>, StoreError> {
+    match row.get_value(index)? {
+        Value::Null => Ok(None),
+        Value::Text(value) => Ok(Some(value)),
         _ => Err(StoreError::InvalidColumn(index)),
     }
 }
@@ -1302,6 +1803,157 @@ mod tests {
             .unwrap();
         let record = store.get_invocation(id).await.unwrap();
         assert_eq!(record.state, InvocationState::Running);
+    }
+
+    #[tokio::test]
+    async fn deferred_results_are_atomic_typed_paged_and_expiry_aware() {
+        let root = tempdir().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let now = 10_000_i64;
+        let mut ids = Vec::new();
+        for offset in 0..3_i64 {
+            let mut request = InvocationRequest::new(
+                PathBuf::from("/tmp/workspace"),
+                BazelCommand::Build,
+                vec![format!("//:task-{offset}")],
+            );
+            request.requested_at_ms = now + offset;
+            let id = request.id;
+            let record = InvocationRecord::queued(request);
+            let deferred = DeferredResultRecord::new(
+                id,
+                DeferredRetrieval::SeparateResult,
+                now + offset,
+                now + offset + 1_000,
+            );
+            store
+                .create_invocation_with_deferred(&record, Some(&deferred))
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+
+        let first = store
+            .get_deferred_result(ids[0], DeferredRetrieval::SeparateResult, now)
+            .await
+            .unwrap();
+        assert_eq!(first.invocation.request.id, ids[0]);
+        assert!(matches!(
+            store
+                .get_deferred_result(ids[0], DeferredRetrieval::InlineResult, now)
+                .await,
+            Err(StoreError::DeferredNotFound(_))
+        ));
+
+        let page = store
+            .list_deferred_results(
+                DeferredRetrieval::SeparateResult,
+                now,
+                PageRequest {
+                    cursor: None,
+                    limit: 2,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.truncated);
+        assert_eq!(page.items[0].deferred.invocation_id, ids[2]);
+        let second_page = store
+            .list_deferred_results(
+                DeferredRetrieval::SeparateResult,
+                now,
+                PageRequest {
+                    cursor: page.next_cursor,
+                    limit: 2,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0].deferred.invocation_id, ids[0]);
+
+        store
+            .record_deferred_cancellation(ids[0], now + 10)
+            .await
+            .unwrap();
+        store
+            .persist_deferred_failure(
+                ids[0],
+                &DeferredFailure {
+                    kind: DeferredFailureKind::Execution,
+                    redacted_message: "bounded failure".to_owned(),
+                },
+                now + 11,
+            )
+            .await
+            .unwrap();
+        store
+            .set_deferred_terminal_override(ids[0], DeferredTerminalState::Cancelled, now + 12)
+            .await
+            .unwrap();
+        let updated = store
+            .get_deferred_result(ids[0], DeferredRetrieval::SeparateResult, now + 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.deferred.cancellation_requested_at_ms,
+            Some(now + 10)
+        );
+        assert_eq!(
+            updated.deferred.terminal_override,
+            Some(DeferredTerminalState::Cancelled)
+        );
+        assert_eq!(
+            updated.deferred.failure.unwrap().redacted_message,
+            "bounded failure"
+        );
+
+        store
+            .transition(ids[1], InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(ids[1], InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(
+                ids[1],
+                InvocationState::Succeeded,
+                Some(Termination::Exit { code: 0 }),
+                Some(InvocationSummary {
+                    success: true,
+                    headline: "done".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let terminal = store
+            .get_deferred_result(
+                ids[1],
+                DeferredRetrieval::SeparateResult,
+                bazel_mcp_types::unix_timestamp_ms(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            terminal.deferred.expires_at_ms
+                >= terminal
+                    .invocation
+                    .finished_at_ms
+                    .unwrap()
+                    .saturating_add(1_000)
+        );
+
+        // A queued task is never expired, even after its initial window.
+        assert!(
+            store
+                .get_deferred_result(ids[2], DeferredRetrieval::SeparateResult, i64::MAX,)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1438,9 +2090,9 @@ mod tests {
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(row.get::<i64>(0).unwrap(), 4);
+        assert_eq!(row.get::<i64>(0).unwrap(), 5);
         assert_eq!(row.get::<i64>(1).unwrap(), 1);
-        assert_eq!(row.get::<i64>(2).unwrap(), 4);
+        assert_eq!(row.get::<i64>(2).unwrap(), 5);
 
         let mut rows = connection
             .query("PRAGMA table_info(invocations)", ())

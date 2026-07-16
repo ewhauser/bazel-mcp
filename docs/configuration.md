@@ -106,6 +106,30 @@ Available values are:
 | `structured` | MCP structured content only. |
 | `both` | Structured content plus backwards-compatible JSON text. |
 
+### Configure negotiated task execution
+
+```toml
+mcp_execution_policy = "auto"
+task_ttl_seconds = 86400
+task_poll_interval_ms = 2000
+```
+
+`auto` is the recommended default. The server discovers support at runtime and
+uses synchronous execution for ordinary clients, the experimental task flow
+for clients negotiating MCP `2025-11-25` and sending `params.task`, or the
+`io.modelcontextprotocol/tasks` extension for clients negotiating its
+`2026-06-30` base protocol and declaring the extension in per-request
+capabilities. The task dialect is never selected from a host name.
+
+`sync_only` always returns an ordinary `CallToolResult` for new calls. Existing
+unexpired task handles remain readable and cancellable after a restart or
+policy change. `tasks_required` rejects `bazel.run` before starting Bazel when
+the client did not declare a compatible task flow.
+
+The TTL is the minimum time a terminal task result remains available. A task
+that is still queued or running never expires. The poll interval is advisory
+and must be between 100 and 60,000 milliseconds.
+
 ## Reference
 
 | Setting | Default | Description |
@@ -126,6 +150,9 @@ Available values are:
 | `cancellation_terminate_grace_seconds` | `5` | Additional time allowed after termination. |
 | `progress_initial_seconds` | `30` | Delay before the first MCP progress notification. |
 | `progress_interval_seconds` | `60` | Interval between later progress notifications. |
+| `mcp_execution_policy` | `auto` | New-run policy: `auto`, `sync_only`, or `tasks_required`. |
+| `task_ttl_seconds` | `86400` | Minimum terminal task-result availability window; must be greater than zero. |
+| `task_poll_interval_ms` | `2000` | Suggested task polling interval, from 100 through 60,000 ms. |
 | `retention_days` | `7` | Maximum age of retained invocation evidence. |
 | `maximum_storage_bytes` | `10737418240` | Maximum cache size before older evidence is removed. |
 | `retention_cleanup_interval_seconds` | `3600` | Interval between retention sweeps. |

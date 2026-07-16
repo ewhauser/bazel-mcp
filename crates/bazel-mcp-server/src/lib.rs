@@ -3,14 +3,14 @@
 mod config;
 mod handler;
 
-pub use config::{Cli, ResultEncoding, ServerConfig};
+pub use config::{Cli, McpExecutionPolicy, ResultEncoding, ServerConfig};
 pub use handler::BazelMcpServer;
 
 use anyhow::Context;
 use bazel_mcp_policy::PolicyConfig;
 use bazel_mcp_runner::{InvocationService, RunnerConfig};
 use bazel_mcp_store::Store;
-use rmcp::ServiceExt;
+use rmcp::RoleServer;
 
 pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
     let store = Store::open(&config.cache_root)
@@ -57,9 +57,23 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         },
     )?;
     let shutdown_runner = runner.clone();
-    let server = BazelMcpServer::new(runner, config.result_encoding).with_progress_timing(
-        std::time::Duration::from_secs(config.progress_initial_seconds),
-        std::time::Duration::from_secs(config.progress_interval_seconds),
+    let server = BazelMcpServer::new(runner, config.result_encoding)
+        .with_progress_timing(
+            std::time::Duration::from_secs(config.progress_initial_seconds),
+            std::time::Duration::from_secs(config.progress_interval_seconds),
+        )
+        .with_task_execution(
+            config.mcp_execution_policy,
+            std::time::Duration::from_secs(config.task_ttl_seconds),
+            config.task_poll_interval_ms,
+        );
+    tracing::info!(
+        policy = ?config.mcp_execution_policy,
+        task_ttl_seconds = config.task_ttl_seconds,
+        task_poll_interval_ms = config.task_poll_interval_ms,
+        legacy_protocol = "2025-11-25",
+        extension_protocol = "2026-06-30",
+        "configured negotiated MCP task execution"
     );
     let cleanup_store = store;
     let cleanup_age =
@@ -86,10 +100,11 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
             }
         }
     });
-    let running = server
-        .serve(rmcp::transport::stdio())
-        .await
-        .context("start stdio MCP transport")?;
+    let running = rmcp::service::serve_directly::<RoleServer, _, _, _, _>(
+        server,
+        rmcp::transport::stdio(),
+        None,
+    );
     let service_cancellation = running.cancellation_token();
     let shutdown_wait = config
         .cancellation_interrupt_grace_seconds

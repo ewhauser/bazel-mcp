@@ -39,6 +39,8 @@ pub struct TranscriptMetrics {
     pub model_events: u64,
     pub tool_calls: u64,
     pub polling_calls: u64,
+    #[serde(default)]
+    pub protocol_polling_bytes: u64,
 }
 
 impl Transcript {
@@ -60,6 +62,7 @@ impl Transcript {
         let mut model_events = 0_u64;
         let mut tool_calls = 0_u64;
         let mut polling_calls = 0_u64;
+        let mut protocol_polling_bytes = 0_u64;
         for event in &self.events {
             if event.kind == TranscriptKind::ModelEvent {
                 model_events += 1;
@@ -70,6 +73,10 @@ impl Transcript {
             }
             if event.kind == TranscriptKind::Progress {
                 polling_calls += 1;
+                if !event.model_visible {
+                    protocol_polling_bytes =
+                        protocol_polling_bytes.saturating_add(event.content.len() as u64);
+                }
             }
             if event.model_visible {
                 if matches!(
@@ -93,6 +100,7 @@ impl Transcript {
             model_events,
             tool_calls,
             polling_calls,
+            protocol_polling_bytes,
         })
     }
 }
@@ -159,5 +167,41 @@ mod tests {
         let metrics = transcript.measure("o200k_base").unwrap();
         assert_eq!(metrics.model_events, 2);
         assert!(metrics.cumulative_context_tokens > metrics.visible_tool_tokens);
+    }
+
+    #[test]
+    fn negotiated_task_transcripts_preserve_results_and_isolate_polling_bytes() {
+        let transcripts = [
+            include_str!("../resources/protocol/synchronous.jsonl"),
+            include_str!("../resources/protocol/legacy-tasks.jsonl"),
+            include_str!("../resources/protocol/tasks-extension.jsonl"),
+        ];
+        let mut final_results = Vec::new();
+        for source in transcripts {
+            let events = source
+                .lines()
+                .map(|line| serde_json::from_str::<TranscriptEvent>(line).unwrap())
+                .collect::<Vec<_>>();
+            let transcript = Transcript {
+                canonicalization_version: 1,
+                events,
+            };
+            let metrics = transcript.measure("o200k_base").unwrap();
+            let result = transcript
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.kind == TranscriptKind::ToolResult)
+                .unwrap()
+                .content
+                .clone();
+            final_results.push(result);
+            if transcript.events[0].adapter == "synchronous" {
+                assert_eq!(metrics.protocol_polling_bytes, 0);
+            } else {
+                assert!(metrics.protocol_polling_bytes > 0);
+            }
+        }
+        assert!(final_results.windows(2).all(|pair| pair[0] == pair[1]));
     }
 }

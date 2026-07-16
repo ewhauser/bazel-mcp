@@ -8,6 +8,12 @@ cancellation_interrupt_grace_seconds = 10
 cancellation_terminate_grace_seconds = 5
 progress_initial_seconds = 30
 progress_interval_seconds = 60
+# "auto" negotiates synchronous, legacy 2025-11-25 tasks, or the Tasks extension.
+# Use "sync_only" as a host compatibility escape hatch, or "tasks_required"
+# only when detached execution is mandatory.
+mcp_execution_policy = "auto"
+task_ttl_seconds = 86400
+task_poll_interval_ms = 2000
 redaction_patterns = ["(?i)token=[^\\s]+"]
 retention_days = 7
 maximum_storage_bytes = 10737418240

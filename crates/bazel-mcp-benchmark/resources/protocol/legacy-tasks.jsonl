@@ -1,0 +1,4 @@
+{"sequence":0,"adapter":"legacy_tasks","scenario":"successful_build","kind":"tool_call","role":"assistant","model_visible":true,"content":"bazel.run //:fixture task={}"}
+{"sequence":1,"adapter":"legacy_tasks","scenario":"successful_build","kind":"progress","role":"host","model_visible":false,"content":"{\"method\":\"tasks/get\",\"status\":\"working\"}"}
+{"sequence":2,"adapter":"legacy_tasks","scenario":"successful_build","kind":"progress","role":"host","model_visible":false,"content":"{\"method\":\"tasks/result\"}"}
+{"sequence":3,"adapter":"legacy_tasks","scenario":"successful_build","kind":"tool_result","role":"tool","model_visible":true,"content":"{\"command\":\"build\",\"headline\":\"Build completed successfully\",\"state\":\"succeeded\"}"}
