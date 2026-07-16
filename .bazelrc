@@ -1,2 +1,4 @@
 common --enable_platform_specific_config
+common --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc=true
+common --@com_google_protobuf//bazel/flags:experimental_proto_descriptor_sets_include_source_info=true
 common:windows --host_platform=//platforms:local_windows_msvc

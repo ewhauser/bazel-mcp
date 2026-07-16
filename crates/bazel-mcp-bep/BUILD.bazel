@@ -1,12 +1,13 @@
 load("@crates//:defs.bzl", "all_crate_deps")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_rs//rs:cargo_build_script.bzl", "cargo_build_script")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
-load(":proto_descriptor.bzl", "proto_descriptor")
 
-proto_descriptor(
+proto_library(
     name = "bep_descriptor",
-    src = "proto/build_event_stream_subset.proto",
+    srcs = ["proto/build_event_stream_subset.proto"],
+    strip_import_prefix = "/crates/bazel-mcp-bep/proto",
 )
 
 cargo_build_script(
