@@ -227,7 +227,6 @@ crates/bazel-mcp-bep/
     ├── compatibility.rs
     ├── framing.rs
     └── fixtures/
-        ├── bazel-7/
         ├── bazel-8/
         └── bazel-9/
 ```

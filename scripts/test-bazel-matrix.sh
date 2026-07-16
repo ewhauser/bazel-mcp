@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-versions=${MATRIX_VERSIONS:-"7.6.1 8.4.2 9.1.0"}
+versions=${MATRIX_VERSIONS:-"8.4.2 9.1.0"}
 server=${BAZEL_MCP_SERVER_BIN:-"$PWD/target/debug/bazel-mcp"}
 bazel=${BAZEL_MCP_BAZEL:-$(command -v bazelisk || command -v bazel)}
 run_id=${BAZEL_MATRIX_RUN_ID:-"$(date +%s)-$$"}
@@ -21,9 +21,11 @@ EOF
   chmod 700 "$workspace/tools/bazel"
   export USE_BAZEL_VERSION="$version"
   export BAZEL_MCP_WRAPPED_BAZEL="$bazel"
+  case_output="$matrix_root/$version/cases.tsv"
+  python3 scripts/test-mcp-smoke.py \
+    --workspace "$workspace" --server "$server" --bazel "$bazel" \
+    --root "$matrix_root/$version/runtime" --wrapper >"$case_output"
   while IFS= read -r row; do
     printf '%s\t%s\n' "$version" "$row"
-  done < <(python3 scripts/test-mcp-smoke.py \
-    --workspace "$workspace" --server "$server" --bazel "$bazel" \
-    --root "$matrix_root/$version/runtime" --wrapper)
+  done <"$case_output"
 done
