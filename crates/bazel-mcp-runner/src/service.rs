@@ -17,15 +17,17 @@ use bazel_mcp_policy::{
 };
 use bazel_mcp_reducer::{
     Budget, PythonDiagnosticParser, REDUCER_API_VERSION, ReducerContext, ReducerPipeline,
-    StarlarkReducerConfig, StreamReductionOutput, finalize_diagnostics, load_starlark_reducers,
-    normalize_terminal_text, parse_go_diagnostic, parse_lcov_reader, parse_test_xml,
+    StarlarkReducerConfig, StreamReductionOutput, TestFailureAccumulator, TestFailureEvidence,
+    finalize_diagnostics, load_starlark_reducers, normalize_terminal_text, parse_go_diagnostic,
+    parse_lcov_reader, parse_test_xml,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
     ArtifactKind, BazelCommand, CommandClass, DeferredFailure, DeferredFailureKind,
     DeferredResultRecord, DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic,
     DiagnosticCategory, InvocationId, InvocationMetrics, InvocationRecord, InvocationRequest,
-    InvocationState, Page, PageRequest, ResultDisposition, Severity, Termination, TestStatus,
+    InvocationState, Page, PageRequest, ResultDisposition, Severity, Termination, TestCase,
+    TestStatus,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1888,7 +1890,8 @@ impl InvocationService {
             let mut saw_artifact = false;
             let mut copied_for_test = false;
             let mut saw_remote = false;
-            let mut actionable_excerpt = None::<Diagnostic>;
+            let mut extracted_failures = Vec::<TestFailureEvidence>::new();
+            let mut fallback_excerpt = None::<(u8, Diagnostic)>;
             for log in matching_logs {
                 saw_artifact = true;
                 if !log.locally_available {
@@ -1907,6 +1910,7 @@ impl InvocationService {
                     continue;
                 }
                 let mut reader = BufReader::new(file);
+                let mut failure_accumulator = TestFailureAccumulator::default();
                 let mut line = Vec::new();
                 let mut complete = true;
                 loop {
@@ -1934,26 +1938,39 @@ impl InvocationService {
                             &visible_line.replace(workspace_text.as_ref(), "<workspace>"),
                             4 * 1024,
                         );
-                        if let Some(mut diagnostic) = parse_go_diagnostic(&text) {
+                        failure_accumulator.observe_line(&text);
+                        let candidate = if let Some(mut diagnostic) = parse_go_diagnostic(&text) {
                             diagnostic.category = DiagnosticCategory::Test;
                             diagnostic.target = Some(test.label.clone());
                             diagnostic.message = bounded_text(&diagnostic.message, 1_000);
-                            actionable_excerpt = Some(diagnostic);
+                            Some((0, diagnostic))
                         } else if let Some(mut diagnostic) = python_parser.observe_line(&text) {
                             diagnostic.category = DiagnosticCategory::Test;
                             diagnostic.target = Some(test.label.clone());
                             diagnostic.message = bounded_text(&diagnostic.message, 1_000);
-                            actionable_excerpt = Some(diagnostic);
-                        } else if actionable_excerpt.is_none() && is_actionable_evidence(&text) {
-                            actionable_excerpt = Some(Diagnostic {
-                                severity: Severity::Error,
-                                category: DiagnosticCategory::Test,
-                                message: bounded_text(&text, 1_000),
-                                location: None,
-                                target: Some(test.label.clone()),
-                                action: None,
-                                repetition_count: 1,
-                            });
+                            Some((0, diagnostic))
+                        } else {
+                            failure_evidence_priority(&text).map(|priority| {
+                                (
+                                    priority,
+                                    Diagnostic {
+                                        severity: Severity::Error,
+                                        category: DiagnosticCategory::Test,
+                                        message: bounded_text(&text, 1_000),
+                                        location: None,
+                                        target: Some(test.label.clone()),
+                                        action: None,
+                                        repetition_count: 1,
+                                    },
+                                )
+                            })
+                        };
+                        if let Some((priority, diagnostic)) = candidate
+                            && fallback_excerpt
+                                .as_ref()
+                                .is_none_or(|(current, _)| priority < *current)
+                        {
+                            fallback_excerpt = Some((priority, diagnostic));
                         }
                         let record = EvidenceRecord {
                             label: Some(test.label.clone()),
@@ -1974,6 +1991,16 @@ impl InvocationService {
                     }
                 }
                 if complete {
+                    for failure in failure_accumulator.finish() {
+                        if extracted_failures.len() >= 20 {
+                            break;
+                        }
+                        if !extracted_failures.iter().any(|current| {
+                            current.name == failure.name && current.message == failure.message
+                        }) {
+                            extracted_failures.push(failure);
+                        }
+                    }
                     copied_for_test = true;
                     copied_any = true;
                 }
@@ -1981,8 +2008,49 @@ impl InvocationService {
             if copied_for_test {
                 test.test_log_available = true;
                 test.test_log_unavailable_reason = None;
-                if let Some(diagnostic) = actionable_excerpt {
-                    diagnostics.push(diagnostic);
+                if extracted_failures.is_empty() {
+                    if let Some((_, diagnostic)) = fallback_excerpt {
+                        diagnostics.push(diagnostic);
+                    }
+                } else {
+                    let previous_cases = std::mem::take(&mut test.cases);
+                    let mut cases = Vec::<TestCase>::new();
+                    for failure in &extracted_failures {
+                        if cases.len() >= 20 {
+                            break;
+                        }
+                        if cases.iter().any(|case| case.name == failure.name) {
+                            continue;
+                        }
+                        cases.push(TestCase {
+                            name: failure.name.clone(),
+                            status: TestStatus::Failed,
+                            duration_ms: None,
+                            message: Some(failure.message.clone()),
+                        });
+                    }
+                    for case in previous_cases {
+                        if cases.len() >= 20 {
+                            break;
+                        }
+                        if !cases.iter().any(|current| {
+                            current.name == case.name && current.message == case.message
+                        }) {
+                            cases.push(case);
+                        }
+                    }
+                    test.cases = cases;
+                    for failure in extracted_failures.into_iter().take(20) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            category: DiagnosticCategory::Test,
+                            message: failure.message,
+                            location: failure.location,
+                            target: Some(test.label.clone()),
+                            action: None,
+                            repetition_count: 1,
+                        });
+                    }
                 }
             } else {
                 test.test_log_available = false;
@@ -2360,18 +2428,44 @@ fn failure_evidence_records(
 }
 
 fn is_actionable_evidence(line: &str) -> bool {
+    failure_evidence_priority(line).is_some()
+}
+
+fn failure_evidence_priority(line: &str) -> Option<u8> {
+    let line = line.trim();
     let lower = line.to_ascii_lowercase();
-    lower.contains("error:")
+    let base = lower
+        .split_once(" [repeated ")
+        .map_or(lower.as_str(), |(base, _)| base);
+    if matches!(base, "failure:" | "failures:")
+        || (line.starts_with("test ") && base.ends_with(" ... ok"))
+    {
+        return None;
+    }
+    if lower.contains("root_cause")
+        || lower.contains("panicked at")
+        || (lower.contains("assertion") && lower.contains(" failed"))
+    {
+        Some(0)
+    } else if lower.contains("error:")
         || lower.starts_with("error ")
-        || lower.contains("failed:")
-        || lower.contains("failure")
         || lower.contains("fatal:")
         || lower.contains("no such target")
         || lower.contains("no such package")
         || lower.contains("undefined reference")
         || lower.contains("missing strict dependencies")
         || (lower.contains(".go: import of \"") && lower.ends_with('"'))
-        || lower.contains("root_cause")
+    {
+        Some(1)
+    } else if lower.contains("failed:")
+        || lower.contains("failure")
+        || lower.starts_with("test result: failed")
+        || (line.starts_with("test ") && line.ends_with(" ... FAILED"))
+    {
+        Some(2)
+    } else {
+        None
+    }
 }
 
 async fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {

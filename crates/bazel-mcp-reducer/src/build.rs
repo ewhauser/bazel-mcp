@@ -650,16 +650,20 @@ fn diagnostic_priority(diagnostic: &Diagnostic) -> (Severity, u8, u8) {
         DiagnosticCategory::Action => 5,
     };
     let lower = diagnostic.message.to_ascii_lowercase();
-    let evidence_quality = if diagnostic.location.is_some() {
+    let rust_failure =
+        lower.contains("panicked at") || (lower.contains("assertion") && lower.contains(" failed"));
+    let evidence_quality = if diagnostic.location.is_some()
+        || (lower.contains("root_cause") && !lower.contains("error executing"))
+    {
         0
+    } else if diagnostic.category == DiagnosticCategory::Test && rust_failure {
+        1
     } else if lower.starts_with("test failed:")
         || lower.starts_with("test timed out:")
         || lower.starts_with("test was incomplete:")
         || lower.starts_with("test result was unavailable:")
     {
         3
-    } else if lower.contains("root_cause") && !lower.contains("error executing") {
-        0
     } else if lower.contains("error executing") {
         2
     } else {
@@ -1075,7 +1079,13 @@ fn compact_go_path(path: &str) -> String {
 }
 
 fn is_actionable(line: &str) -> bool {
+    let line = line.trim();
     let lower = line.to_ascii_lowercase();
+    if matches!(lower.as_str(), "failure:" | "failures:")
+        || (line.starts_with("test ") && lower.ends_with(" ... ok"))
+    {
+        return false;
+    }
     lower.contains("error:")
         || lower.starts_with("error ")
         || lower.contains("failed:")
@@ -1085,6 +1095,10 @@ fn is_actionable(line: &str) -> bool {
         || lower.contains("undefined reference")
         || lower.contains("fatal:")
         || lower.contains("root_cause")
+        || lower.contains("panicked at")
+        || (lower.contains("assertion") && lower.contains(" failed"))
+        || lower.starts_with("test result: failed")
+        || (line.starts_with("test ") && line.ends_with(" ... FAILED"))
 }
 
 fn category_from_text(line: &str) -> DiagnosticCategory {
@@ -1095,7 +1109,8 @@ fn category_from_text(line: &str) -> DiagnosticCategory {
         DiagnosticCategory::Visibility
     } else if lower.contains("analysis") {
         DiagnosticCategory::Analysis
-    } else if lower.contains("test") {
+    } else if lower.contains("test") || lower.contains("panicked at") || lower.contains("assertion")
+    {
         DiagnosticCategory::Test
     } else if lower.contains("error:")
         || lower.contains("error[")
@@ -1473,6 +1488,74 @@ AssertionError: mismatch
                 .collect::<Vec<_>>(),
             vec!["pkg/first_test.py", "pkg/second_test.py"]
         );
+    }
+
+    #[test]
+    fn keeps_failed_rust_evidence_and_rejects_successful_test_names() {
+        let stderr = b"test build::tests::successful_root_cause_test ... ok\n\
+test test::tests::fails ... FAILED\n\
+failures:\n\
+thread 'test::tests::fails' panicked at src/test.rs:7:9:\n\
+assertion `left == right` failed\n";
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert!(
+            summary
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("panicked at"))
+        );
+        assert!(
+            summary
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("assertion"))
+        );
+        assert!(summary.diagnostics.iter().all(|diagnostic| {
+            !diagnostic.message.contains("successful_root_cause_test")
+                && diagnostic.message != "failures:"
+        }));
+    }
+
+    #[test]
+    fn ranks_combined_rust_failure_above_single_log_lines() {
+        let diagnostic = |message: &str, location| Diagnostic {
+            severity: Severity::Error,
+            category: DiagnosticCategory::Test,
+            message: message.to_owned(),
+            location,
+            target: Some("//pkg:test".to_owned()),
+            action: None,
+            repetition_count: 1,
+        };
+        let mut summary = InvocationSummary {
+            success: false,
+            diagnostics: vec![
+                diagnostic("thread 'tests::fails' panicked at src/test.rs:7:9:", None),
+                diagnostic("assertion `left == right` failed", None),
+                diagnostic(
+                    "Rust test tests::fails failed at src/test.rs:7:9: assertion `left == right` failed; left: 1; right: 2",
+                    Some(bazel_mcp_types::DiagnosticLocation {
+                        path: "src/test.rs".to_owned(),
+                        line: Some(7),
+                        column: Some(9),
+                    }),
+                ),
+            ],
+            ..InvocationSummary::default()
+        };
+
+        finalize_diagnostics(&mut summary, Budget::result_default());
+
+        assert!(summary.diagnostics[0].message.starts_with("Rust test"));
+        assert!(summary.headline.contains("left: 1; right: 2"));
     }
 
     #[test]
