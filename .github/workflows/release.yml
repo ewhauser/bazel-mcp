@@ -271,6 +271,16 @@ jobs:
           persist-credentials: false
           ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
+      # Keep the publisher tied to the workflow revision so manual backfills of
+      # older tags still get the current release-upload behavior.
+      - name: Checkout release publisher
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: .release-workflow
+          sparse-checkout: scripts/publish_github_release_assets.py
+          sparse-checkout-cone-mode: false
       - name: Install dist
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
@@ -308,26 +318,22 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
       - name: Publish GitHub release artifacts
         env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
+          ANNOUNCEMENT_IS_PRERELEASE: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
         run: |
-          release_tag_uri="$(jq -rn --arg tag "$RELEASE_TAG" '$tag | @uri')"
-          lookup_error="$RUNNER_TEMP/release-lookup-error.txt"
-
-          if gh api --silent "repos/$GITHUB_REPOSITORY/releases/tags/$release_tag_uri" 2>"$lookup_error"; then
-            gh release upload "$RELEASE_TAG" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
-          elif grep -q '(HTTP 404)' "$lookup_error"; then
-            cat "$lookup_error" >&2
-            echo "No GitHub release exists for $RELEASE_TAG; creating it now."
-            # Write and read notes from a file to avoid quoting breaking things.
-            echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
-            gh release create "$RELEASE_TAG" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" --repo "$GITHUB_REPOSITORY" artifacts/*
-          else
-            cat "$lookup_error" >&2
-            echo "Unable to determine whether the GitHub release exists; refusing to create a duplicate." >&2
-            exit 1
+          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+          publish_args=(
+            --repository "$GITHUB_REPOSITORY"
+            --tag "$RELEASE_TAG"
+            --artifacts artifacts
+            --title "$ANNOUNCEMENT_TITLE"
+            --notes-file "$RUNNER_TEMP/notes.txt"
+          )
+          if [[ "$ANNOUNCEMENT_IS_PRERELEASE" == "true" ]]; then
+            publish_args+=(--prerelease)
           fi
+          python3 .release-workflow/scripts/publish_github_release_assets.py "${publish_args[@]}"
 
   publish-homebrew-formula:
     needs:
