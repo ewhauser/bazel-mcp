@@ -435,6 +435,7 @@ impl BazelMcpServer {
         }
     }
 
+    #[cfg(test)]
     fn model_visible_bytes(&self, value: &serde_json::Value) -> Result<usize, String> {
         self.encode_with_size(value.clone()).map(|(_, bytes)| bytes)
     }
