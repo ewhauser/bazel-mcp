@@ -151,8 +151,8 @@ pub enum Termination {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvocationMetrics {
-    pub raw_stdout_bytes: u64,
-    pub raw_stderr_bytes: u64,
+    #[serde(default)]
+    pub raw_output_bytes: u64,
     pub bep_bytes: u64,
     pub bep_events: u64,
     pub model_visible_bytes: u64,

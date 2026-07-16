@@ -132,18 +132,33 @@ impl BepAccumulator {
                 }
             }
             Some(build_event::Payload::TestSummary(summary)) => {
+                let label = label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown test>".into());
+                let status = test_status(summary.overall_status);
+                if let Some(diagnostic) = test_outcome_diagnostic(&label, status) {
+                    let bytes = diagnostic.message.len()
+                        + diagnostic.target.as_ref().map_or(0, String::len);
+                    if self.reserve(1, bytes) {
+                        self.diagnostics.push(diagnostic);
+                    }
+                }
                 let test = TestResult {
-                    label: label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown test>".into()),
-                    status: test_status(summary.overall_status),
+                    label,
+                    status,
                     duration_ms: u64::try_from(summary.total_run_duration_millis).ok(),
                     attempts: u32::try_from(summary.attempt_count.max(1)).unwrap_or(1),
                     shard: u32::try_from(summary.shard_count)
                         .ok()
                         .filter(|value| *value > 0),
                     cases: Vec::new(),
-                    log_uri: summary.failed.first().and_then(file_uri),
+                    test_log_available: false,
+                    test_log_unavailable_reason: (status != TestStatus::Passed)
+                        .then(|| "test_log_not_snapshotted".to_owned()),
                 };
-                let bytes = test.label.len() + test.log_uri.as_ref().map_or(0, String::len);
+                let bytes = test.label.len()
+                    + test
+                        .test_log_unavailable_reason
+                        .as_ref()
+                        .map_or(0, String::len);
                 if self.reserve(1, bytes) {
                     self.tests.push(test);
                 }
@@ -215,14 +230,9 @@ impl BepAccumulator {
         let success = exit_code == Some(0);
         if !success {
             add_text_diagnostics(stderr, &mut self.diagnostics);
-            if self.diagnostics.is_empty() {
-                add_text_diagnostics(stdout, &mut self.diagnostics);
-            }
+            add_text_diagnostics(stdout, &mut self.diagnostics);
         }
 
-        self.diagnostics
-            .sort_by_key(|diagnostic| diagnostic.severity);
-        self.diagnostics = deduplicate_diagnostics(self.diagnostics);
         self.targets
             .sort_by(|left, right| left.label.cmp(&right.label));
         self.targets
@@ -249,43 +259,29 @@ impl BepAccumulator {
             }
         }
 
-        let mut truncated = self.truncated || self.diagnostics.len() > budget.max_items;
-        self.diagnostics.truncate(budget.max_items);
-        let mut used = 0_usize;
-        self.diagnostics.retain(|diagnostic| {
-            let next = used.saturating_add(diagnostic.message.len());
-            if next > budget.max_bytes {
-                truncated = true;
-                false
-            } else {
-                used = next;
-                true
-            }
-        });
-        let headline = if success {
-            format!("Bazel completed successfully in {elapsed_ms} ms")
-        } else if let Some(first) = self.diagnostics.first() {
-            format!("Bazel failed: {}", first.message)
-        } else {
-            format!("Bazel failed with exit code {exit_code:?}")
-        };
         let artifacts = self.resolve_artifacts();
-        StreamReductionOutput {
-            summary: InvocationSummary {
-                success,
-                headline,
-                targets: self.targets,
-                target_counts,
-                diagnostics: self.diagnostics,
-                tests: self.tests,
-                test_counts,
-                coverage: None,
-                query_sample: Vec::new(),
-                query_result_count: None,
-                elapsed_ms,
-                truncated,
-                inspect_hint: truncated.then(|| "diagnostics".to_owned()),
+        let mut summary = InvocationSummary {
+            success,
+            headline: if success {
+                format!("Bazel completed successfully in {elapsed_ms} ms")
+            } else {
+                format!("Bazel failed with exit code {exit_code:?}")
             },
+            targets: self.targets,
+            target_counts,
+            diagnostics: self.diagnostics,
+            tests: self.tests,
+            test_counts,
+            coverage: None,
+            query_sample: Vec::new(),
+            query_result_count: None,
+            elapsed_ms,
+            truncated: self.truncated,
+            inspect_hint: self.truncated.then(|| "diagnostics".to_owned()),
+        };
+        finalize_diagnostics(&mut summary, budget);
+        StreamReductionOutput {
+            summary,
             artifacts,
             canonical_arguments: self.canonical_arguments,
         }
@@ -381,30 +377,34 @@ pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
                 label: label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown target>".into()),
                 success: completed.success,
             }),
-            Some(build_event::Payload::TestSummary(summary)) => tests.push(TestResult {
-                label: label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown test>".into()),
-                status: test_status(summary.overall_status),
-                duration_ms: u64::try_from(summary.total_run_duration_millis).ok(),
-                attempts: u32::try_from(summary.attempt_count.max(1)).unwrap_or(1),
-                shard: u32::try_from(summary.shard_count)
-                    .ok()
-                    .filter(|value| *value > 0),
-                cases: Vec::new(),
-                log_uri: summary.failed.first().and_then(file_uri),
-            }),
+            Some(build_event::Payload::TestSummary(summary)) => {
+                let label = label_from_id(id.as_ref()).unwrap_or_else(|| "<unknown test>".into());
+                let status = test_status(summary.overall_status);
+                if let Some(diagnostic) = test_outcome_diagnostic(&label, status) {
+                    diagnostics.push(diagnostic);
+                }
+                tests.push(TestResult {
+                    label,
+                    status,
+                    duration_ms: u64::try_from(summary.total_run_duration_millis).ok(),
+                    attempts: u32::try_from(summary.attempt_count.max(1)).unwrap_or(1),
+                    shard: u32::try_from(summary.shard_count)
+                        .ok()
+                        .filter(|value| *value > 0),
+                    cases: Vec::new(),
+                    test_log_available: false,
+                    test_log_unavailable_reason: (status != TestStatus::Passed)
+                        .then(|| "test_log_not_snapshotted".to_owned()),
+                });
+            }
             _ => {}
         }
     }
 
     if !success {
         add_text_diagnostics(input.stderr, &mut diagnostics);
-        if diagnostics.is_empty() {
-            add_text_diagnostics(input.stdout, &mut diagnostics);
-        }
+        add_text_diagnostics(input.stdout, &mut diagnostics);
     }
-
-    diagnostics.sort_by_key(|diagnostic| diagnostic.severity);
-    diagnostics = deduplicate_diagnostics(diagnostics);
 
     targets.sort_by(|left, right| left.label.cmp(&right.label));
     targets.dedup_by(|left, right| left.label == right.label);
@@ -427,31 +427,13 @@ pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
             }
         }
     }
-    let mut truncated = diagnostics.len() > input.budget.max_items;
-    diagnostics.truncate(input.budget.max_items);
-    let mut used = 0_usize;
-    diagnostics.retain(|diagnostic| {
-        let next = used.saturating_add(diagnostic.message.len());
-        if next > input.budget.max_bytes {
-            truncated = true;
-            false
-        } else {
-            used = next;
-            true
-        }
-    });
-
-    let headline = if success {
-        format!("Bazel completed successfully in {} ms", input.elapsed_ms)
-    } else if let Some(first) = diagnostics.first() {
-        format!("Bazel failed: {}", first.message)
-    } else {
-        format!("Bazel failed with exit code {:?}", input.exit_code)
-    };
-
-    InvocationSummary {
+    let mut summary = InvocationSummary {
         success,
-        headline,
+        headline: if success {
+            format!("Bazel completed successfully in {} ms", input.elapsed_ms)
+        } else {
+            format!("Bazel failed with exit code {:?}", input.exit_code)
+        },
         targets,
         target_counts,
         diagnostics,
@@ -461,21 +443,40 @@ pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
         query_sample: Vec::new(),
         query_result_count: None,
         elapsed_ms: input.elapsed_ms,
-        truncated,
-        inspect_hint: truncated.then(|| "diagnostics".to_owned()),
-    }
+        truncated: false,
+        inspect_hint: None,
+    };
+    finalize_diagnostics(&mut summary, input.budget);
+    summary
 }
 
 fn deduplicate_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    let mut positions = BTreeMap::<(Severity, String, Option<String>), usize>::new();
+    let mut positions = BTreeMap::<
+        (
+            Severity,
+            DiagnosticCategory,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+        usize,
+    >::new();
     let mut unique = Vec::<Diagnostic>::new();
     for diagnostic in diagnostics {
+        let aggregate_actions = diagnostic.category == DiagnosticCategory::Action;
         let key = (
             diagnostic.severity,
+            diagnostic.category,
             diagnostic.message.clone(),
-            diagnostic.target.clone(),
+            (!aggregate_actions)
+                .then(|| diagnostic.target.clone())
+                .flatten(),
+            diagnostic.action.clone(),
         );
         if let Some(index) = positions.get(&key).copied() {
+            if aggregate_actions && unique[index].target != diagnostic.target {
+                unique[index].target = None;
+            }
             unique[index].repetition_count = unique[index]
                 .repetition_count
                 .saturating_add(diagnostic.repetition_count);
@@ -485,6 +486,90 @@ fn deduplicate_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
         }
     }
     unique
+}
+
+/// Re-ranks, aggregates, and bounds diagnostics after all structured and local
+/// evidence enrichment has completed.
+pub fn finalize_diagnostics(summary: &mut InvocationSummary, budget: Budget) {
+    let diagnostics = std::mem::take(&mut summary.diagnostics);
+    let mut diagnostics = deduplicate_diagnostics(diagnostics);
+    diagnostics.sort_by_key(diagnostic_priority);
+
+    let mut truncated = diagnostics.len() > budget.max_items;
+    diagnostics.truncate(budget.max_items);
+    let mut used = 0_usize;
+    diagnostics.retain(|diagnostic| {
+        let next = used.saturating_add(diagnostic.message.len());
+        if next > budget.max_bytes {
+            truncated = true;
+            false
+        } else {
+            used = next;
+            true
+        }
+    });
+    summary.diagnostics = diagnostics;
+    summary.truncated |= truncated;
+    if summary.truncated {
+        summary.inspect_hint = Some("diagnostics".to_owned());
+    }
+    if !summary.success
+        && let Some(first) = summary.diagnostics.first()
+    {
+        summary.headline = format!("Bazel failed: {}", first.message);
+    }
+}
+
+fn diagnostic_priority(diagnostic: &Diagnostic) -> (Severity, u8, u8) {
+    let category = match diagnostic.category {
+        DiagnosticCategory::Loading
+        | DiagnosticCategory::Visibility
+        | DiagnosticCategory::Analysis
+        | DiagnosticCategory::Compilation => 0,
+        DiagnosticCategory::Test => 1,
+        DiagnosticCategory::Workspace => 2,
+        DiagnosticCategory::Bazel => 3,
+        DiagnosticCategory::Unknown => 4,
+        DiagnosticCategory::Action => 5,
+    };
+    let lower = diagnostic.message.to_ascii_lowercase();
+    let evidence_quality = if lower.starts_with("test failed:")
+        || lower.starts_with("test timed out:")
+        || lower.starts_with("test was incomplete:")
+        || lower.starts_with("test result was unavailable:")
+    {
+        3
+    } else if lower.contains("root_cause") && !lower.contains("error executing") {
+        0
+    } else if lower.contains("error executing") {
+        2
+    } else {
+        1
+    };
+    (diagnostic.severity, category, evidence_quality)
+}
+
+fn test_outcome_diagnostic(label: &str, status: TestStatus) -> Option<Diagnostic> {
+    let (severity, message) = match status {
+        TestStatus::Passed | TestStatus::Skipped => return None,
+        TestStatus::Flaky => (Severity::Warning, format!("Test was flaky: {label}")),
+        TestStatus::Failed => (Severity::Error, format!("Test failed: {label}")),
+        TestStatus::TimedOut => (Severity::Error, format!("Test timed out: {label}")),
+        TestStatus::Incomplete => (Severity::Error, format!("Test was incomplete: {label}")),
+        TestStatus::Remote => (
+            Severity::Error,
+            format!("Test result was unavailable: {label}"),
+        ),
+    };
+    Some(Diagnostic {
+        severity,
+        category: DiagnosticCategory::Test,
+        message,
+        location: None,
+        target: Some(label.to_owned()),
+        action: None,
+        repetition_count: 1,
+    })
 }
 
 #[must_use]
@@ -616,7 +701,6 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     for (line, count) in candidates
         .into_iter()
         .filter(|(line, _)| is_actionable(line))
-        .take(20)
     {
         diagnostics.push(Diagnostic {
             severity: if line.to_ascii_lowercase().contains("warning:") {
@@ -662,6 +746,8 @@ fn category_from_text(line: &str) -> DiagnosticCategory {
         || lower.contains("undefined reference")
     {
         DiagnosticCategory::Compilation
+    } else if lower.contains("root_cause") {
+        DiagnosticCategory::Test
     } else {
         DiagnosticCategory::Unknown
     }
@@ -700,13 +786,6 @@ fn test_status(value: i32) -> TestStatus {
         5 => TestStatus::Incomplete,
         6 => TestStatus::Remote,
         _ => TestStatus::Incomplete,
-    }
-}
-
-fn file_uri(file: &FileView<'_>) -> Option<String> {
-    match &file.file {
-        Some(file::File::Uri(uri)) => Some((*uri).to_owned()),
-        _ => None,
     }
 }
 
@@ -754,6 +833,54 @@ mod tests {
                 .any(|d| d.message.contains("bad type"))
         );
         assert!(summary.diagnostics.len() <= 2);
+    }
+
+    #[test]
+    fn ranks_root_cause_before_aggregated_fanout_failures() {
+        let events = (0..48)
+            .map(|index| {
+                let event = BuildEvent {
+                    id: encode_event_id(&BuildEventId {
+                        id: Some(owned_build_event_id::Id::ActionCompleted(Box::new(
+                            bazel_mcp_bep::proto::build_event_id::ActionCompletedId {
+                                label: format!("//pkg:fanout_{index}"),
+                                ..Default::default()
+                            },
+                        ))),
+                    }),
+                    payload: Some(owned_build_event::Payload::Action(Box::new(
+                        ActionExecuted {
+                            success: false,
+                            exit_code: 1,
+                            r#type: "CppCompile".into(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                };
+                BepEvent::from_owned(&event).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let summary = reduce_invocation(ReductionInput {
+            events: &events,
+            stdout: b"",
+            stderr: b"source.cc:9: error: FANOUT_ROOT_CAUSE",
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget {
+                max_bytes: 1_000,
+                max_items: 2,
+            },
+        });
+
+        assert!(summary.diagnostics[0].message.contains("FANOUT_ROOT_CAUSE"));
+        let action = summary
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.category == DiagnosticCategory::Action)
+            .unwrap();
+        assert_eq!(action.target, None);
+        assert_eq!(action.repetition_count, 48);
     }
 
     #[test]

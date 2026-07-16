@@ -28,7 +28,7 @@
         "attempts": 1,
         "shard": null,
         "cases": [],
-        "log_uri": null
+        "test_log_available": false
       },
       {
         "label": "//:sharded",
@@ -37,7 +37,7 @@
         "attempts": 1,
         "shard": 2,
         "cases": [],
-        "log_uri": null
+        "test_log_available": false
       }
     ],
     "test_counts": {

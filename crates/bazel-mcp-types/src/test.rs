@@ -28,5 +28,8 @@ pub struct TestResult {
     pub attempts: u32,
     pub shard: Option<u32>,
     pub cases: Vec<TestCase>,
-    pub log_uri: Option<String>,
+    #[serde(default)]
+    pub test_log_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_log_unavailable_reason: Option<String>,
 }

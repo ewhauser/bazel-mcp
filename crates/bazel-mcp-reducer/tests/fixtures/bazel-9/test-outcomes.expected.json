@@ -3,7 +3,7 @@
   "terminal_error": null,
   "summary": {
     "success": false,
-    "headline": "Bazel failed: FAILED: //:fail (Summary)",
+    "headline": "Bazel failed: FLAKY_ROOT_CAUSE",
     "targets": [
       {
         "label": "//:fail",
@@ -34,10 +34,64 @@
     "diagnostics": [
       {
         "severity": "error",
+        "category": "test",
+        "message": "FLAKY_ROOT_CAUSE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "TEST_ROOT_CAUSE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 2
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "TIMEOUT_ROOT_CAUSE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 2
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test failed: //:fail",
+        "location": null,
+        "target": "//:fail",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test timed out: //:timeout",
+        "location": null,
+        "target": "//:timeout",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
         "category": "unknown",
         "message": "FAILED: //:fail (Summary)",
         "location": null,
         "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "warning",
+        "category": "test",
+        "message": "Test was flaky: //:flaky",
+        "location": null,
+        "target": "//:flaky",
         "action": null,
         "repetition_count": 1
       }
@@ -50,7 +104,8 @@
         "attempts": 2,
         "shard": null,
         "cases": [],
-        "log_uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/fail/test.log"
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
       },
       {
         "label": "//:flaky",
@@ -59,7 +114,8 @@
         "attempts": 2,
         "shard": null,
         "cases": [],
-        "log_uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/flaky/test_attempts/attempt_1.log"
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
       },
       {
         "label": "//:pass",
@@ -68,7 +124,7 @@
         "attempts": 1,
         "shard": null,
         "cases": [],
-        "log_uri": null
+        "test_log_available": false
       },
       {
         "label": "//:sharded",
@@ -77,7 +133,7 @@
         "attempts": 1,
         "shard": 2,
         "cases": [],
-        "log_uri": null
+        "test_log_available": false
       },
       {
         "label": "//:timeout",
@@ -86,7 +142,8 @@
         "attempts": 2,
         "shard": null,
         "cases": [],
-        "log_uri": "file://<OUTPUT_ROOT>_______________________________________________________________________________/90ef6f76d84382381adcd7adfcc3ad35/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/timeout/test.log"
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
       }
     ],
     "test_counts": {

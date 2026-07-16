@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
@@ -15,7 +15,8 @@ use bazel_mcp_policy::{
     validate_workspace,
 };
 use bazel_mcp_reducer::{
-    Budget, StreamReductionOutput, normalize_terminal_text, parse_lcov_reader, parse_test_xml,
+    Budget, StreamReductionOutput, finalize_diagnostics, normalize_terminal_text,
+    parse_lcov_reader, parse_test_xml,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
@@ -27,7 +28,7 @@ use bazel_mcp_types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
 };
@@ -146,6 +147,7 @@ pub enum InspectView {
     Summary,
     Diagnostics,
     Tests,
+    TestLog,
     Coverage,
     Artifacts,
     QueryResults,
@@ -164,43 +166,44 @@ pub struct InspectRequest {
     pub max_bytes: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct LogCursor {
     invocation_id: InvocationId,
-    end: u64,
+    view: InspectView,
+    next_record: u64,
+    filter: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct EvidenceRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    text: String,
 }
 
 impl LogCursor {
     fn encode(&self) -> Result<String, RunnerError> {
-        let mut bytes = Vec::with_capacity(26);
-        bytes.extend_from_slice(&[1, 5]);
-        bytes.extend_from_slice(self.invocation_id.as_uuid().as_bytes());
-        bytes.extend_from_slice(&self.end.to_le_bytes());
-        Ok(URL_SAFE_NO_PAD.encode(bytes))
+        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
     }
 
     fn decode(value: &str) -> Result<Self, RunnerError> {
-        let bytes = URL_SAFE_NO_PAD
+        let raw = URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| RunnerError::InvalidOffset)?;
-        if bytes.len() != 26 || bytes[0] != 1 || bytes[1] != 5 {
-            return Err(RunnerError::InvalidOffset);
-        }
-        let uuid = uuid::Uuid::from_slice(&bytes[2..18]).map_err(|_| RunnerError::InvalidOffset)?;
-        let end = u64::from_le_bytes(
-            bytes[18..26]
-                .try_into()
-                .map_err(|_| RunnerError::InvalidOffset)?,
-        );
-        Ok(Self {
-            invocation_id: InvocationId::from_uuid(uuid),
-            end,
-        })
+        serde_json::from_slice(&raw).map_err(|_| RunnerError::InvalidOffset)
     }
 
-    fn decode_for(value: &str, invocation_id: InvocationId) -> Result<Self, RunnerError> {
+    fn decode_for(
+        value: &str,
+        invocation_id: InvocationId,
+        view: InspectView,
+        filter: Option<&str>,
+    ) -> Result<Self, RunnerError> {
         let cursor = Self::decode(value)?;
-        if cursor.invocation_id != invocation_id {
+        if cursor.invocation_id != invocation_id
+            || cursor.view != view
+            || cursor.filter.as_deref() != filter
+        {
             return Err(RunnerError::InvalidOffset);
         }
         Ok(cursor)
@@ -781,7 +784,8 @@ impl InvocationService {
                     request.workspace.as_deref(),
                     PageRequest {
                         cursor: request.cursor,
-                        limit: request.limit.min(1),
+                        limit: request.limit.clamp(1, 100),
+                        max_bytes: Some(request.max_bytes.saturating_sub(512)),
                     },
                 )
                 .await?;
@@ -805,7 +809,8 @@ impl InvocationService {
         let record = self.store.get_invocation(id).await?;
         let page_request = PageRequest {
             cursor: request.cursor.clone(),
-            limit: bounded_page_limit(request.view, request.limit, request.max_bytes),
+            limit: request.limit.clamp(1, 100),
+            max_bytes: Some(request.max_bytes.saturating_sub(512)),
         };
         let paths = self.store.paths_for(&record);
         let (items, total_count, filtered_count, next_cursor, truncated) = match request.view {
@@ -915,6 +920,7 @@ impl InvocationService {
                             PageRequest {
                                 cursor: None,
                                 limit: request.limit,
+                                max_bytes: Some(request.max_bytes.saturating_sub(512)),
                             },
                         )
                         .await?;
@@ -951,10 +957,26 @@ impl InvocationService {
                 )
             }
             InspectView::Log => {
-                let (content, truncated, next_cursor) =
-                    self.read_combined_log_page(&paths, &request).await?;
+                let (items, truncated, next_cursor) = self
+                    .read_evidence_page(&paths.evidence, &paths, &request)
+                    .await?;
                 (
-                    serde_json::json!([content]),
+                    serde_json::to_value(items)?,
+                    None,
+                    None,
+                    next_cursor,
+                    truncated,
+                )
+            }
+            InspectView::TestLog => {
+                let (items, truncated, next_cursor) = if paths.test_log_evidence.exists() {
+                    self.read_evidence_page(&paths.test_log_evidence, &paths, &request)
+                        .await?
+                } else {
+                    self.read_test_log_unavailable_page(id, &request).await?
+                };
+                (
+                    serde_json::to_value(items)?,
                     None,
                     None,
                     next_cursor,
@@ -1046,8 +1068,11 @@ impl InvocationService {
                     "--show_progress=false",
                     "--show_result=0",
                 ]);
-            if queued.request.command == BazelCommand::Test {
-                command.args(["--test_output=summary", "--test_summary=none"]);
+            if matches!(
+                queued.request.command,
+                BazelCommand::Test | BazelCommand::Coverage
+            ) {
+                command.args(["--test_output=errors", "--test_summary=none"]);
             }
         }
         command.args(&queued.request.arguments);
@@ -1176,6 +1201,7 @@ impl InvocationService {
                             PageRequest {
                                 cursor: None,
                                 limit: 3,
+                                max_bytes: None,
                             },
                             move |value| redactor.redact_bounded(value, 4 * 1024),
                         )
@@ -1198,13 +1224,28 @@ impl InvocationService {
             let stdout = capture::read_bounded_tail(&paths.stdout, log_limit).await?;
             let stderr = capture::read_bounded_tail(&paths.stderr, log_limit).await?;
             let exit_code = status.as_ref().and_then(ExitStatus::code);
+            self.persist_failure_evidence(
+                paths,
+                &queued.request.workspace,
+                &queued.request.command,
+                exit_code != Some(0),
+                &stdout,
+                &stderr,
+            )
+            .await?;
             let reduced = catch_unwind(AssertUnwindSafe(|| {
                 bep.finish(
                     &stdout,
                     &stderr,
                     exit_code,
                     bazel_wall_ms,
-                    Budget::result_default(),
+                    // Enrichment can add higher-value failed-test evidence.
+                    // Apply the public result budget only after that evidence
+                    // is present so ranking and aggregation precede limits.
+                    Budget {
+                        max_bytes: usize::MAX,
+                        max_items: usize::MAX,
+                    },
                 )
             }));
             let StreamReductionOutput {
@@ -1256,8 +1297,9 @@ impl InvocationService {
                     }
                 }
             }
-            self.enrich_tests(&queued.request.workspace, &mut summary, &artifacts)
+            self.enrich_tests(paths, &queued.request.workspace, &mut summary, &artifacts)
                 .await;
+            finalize_diagnostics(&mut summary, Budget::result_default());
             if queued.request.command == BazelCommand::Coverage {
                 summary.coverage = self
                     .load_coverage(&queued.request.workspace, &artifacts)
@@ -1265,8 +1307,9 @@ impl InvocationService {
             }
             self.sanitize_summary(queued.request.id, &queued.request.workspace, &mut summary);
             let metrics = InvocationMetrics {
-                raw_stdout_bytes: capture::file_size(&paths.stdout).await,
-                raw_stderr_bytes: capture::file_size(&paths.stderr).await,
+                raw_output_bytes: capture::file_size(&paths.stdout)
+                    .await
+                    .saturating_add(capture::file_size(&paths.stderr).await),
                 bep_bytes: capture::file_size(&paths.bep).await,
                 bep_events: u64::try_from(bep_outcome.event_count).unwrap_or(u64::MAX),
                 queue_ms,
@@ -1354,7 +1397,7 @@ impl InvocationService {
 
     fn sanitize_summary(
         &self,
-        id: InvocationId,
+        _id: InvocationId,
         workspace: &Path,
         summary: &mut bazel_mcp_types::InvocationSummary,
     ) {
@@ -1383,12 +1426,7 @@ impl InvocationService {
                 .as_deref()
                 .map(|action| sanitize(action, 1_000));
         }
-        if summary.diagnostics.len() > 20 {
-            summary.diagnostics.truncate(20);
-            summary.truncated = true;
-            summary.inspect_hint = Some("diagnostics".to_owned());
-        }
-        for (index, test) in summary.tests.iter_mut().enumerate() {
+        for test in &mut summary.tests {
             test.label = sanitize(&test.label, 1_000);
             for case in &mut test.cases {
                 case.name = sanitize(&case.name, 512);
@@ -1397,8 +1435,6 @@ impl InvocationService {
                     .as_deref()
                     .map(|message| sanitize(message, 1_000));
             }
-            test.log_uri = (test.status != TestStatus::Passed)
-                .then(|| format!("bazel://invocations/{id}/tests/{index}/failure-log"));
         }
         if let Some(coverage) = &mut summary.coverage {
             for file in &mut coverage.files {
@@ -1457,64 +1493,230 @@ impl InvocationService {
 
     async fn enrich_tests(
         &self,
+        paths: &InvocationPaths,
         workspace: &Path,
         summary: &mut bazel_mcp_types::InvocationSummary,
         artifacts: &[bazel_mcp_types::Artifact],
     ) {
-        let failed_test = summary
+        if !summary
             .tests
-            .iter_mut()
-            .find(|test| test.status != TestStatus::Passed);
-        let Some(test) = failed_test else {
+            .iter()
+            .any(|test| test.status != TestStatus::Passed)
+        {
+            return;
+        }
+
+        let raw_temporary = paths.test_logs_raw.with_extension("tmp");
+        let evidence_temporary = paths.test_log_evidence.with_extension("tmp");
+        if tokio::fs::try_exists(&paths.test_logs_raw)
+            .await
+            .unwrap_or(false)
+            || tokio::fs::try_exists(&paths.test_log_evidence)
+                .await
+                .unwrap_or(false)
+        {
+            for test in summary
+                .tests
+                .iter_mut()
+                .filter(|test| test.status != TestStatus::Passed)
+            {
+                test.test_log_available = false;
+                test.test_log_unavailable_reason =
+                    Some("test_log_snapshot_already_exists".to_owned());
+            }
+            return;
+        }
+
+        let raw = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&raw_temporary)
+            .await;
+        let evidence = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&evidence_temporary)
+            .await;
+        let (Ok(mut raw), Ok(mut evidence)) = (raw, evidence) else {
+            let _ = tokio::fs::remove_file(&raw_temporary).await;
+            let _ = tokio::fs::remove_file(&evidence_temporary).await;
+            set_test_log_unavailable(summary, "test_log_snapshot_failed");
             return;
         };
-        if let Some(xml) = artifacts.iter().find(|artifact| {
-            artifact.kind == ArtifactKind::TestLog && artifact.name.ends_with("test.xml")
-        }) && let Some(path) = self.validated_artifact_path(workspace, xml).await
+
+        let workspace_text = workspace.to_string_lossy();
+        let any_remote_test_log = artifacts.iter().any(|artifact| {
+            artifact.kind == ArtifactKind::TestLog
+                && artifact.name.ends_with("test.log")
+                && !artifact.locally_available
+        });
+        let mut diagnostics = Vec::new();
+        let mut copied_any = false;
+        for test in summary
+            .tests
+            .iter_mut()
+            .filter(|test| test.status != TestStatus::Passed)
         {
-            let small_enough = tokio::fs::metadata(&path)
-                .await
-                .is_ok_and(|metadata| metadata.len() <= 16 * 1024 * 1024);
-            if small_enough
-                && let Ok(contents) = tokio::fs::read_to_string(path).await
-                && let Ok(cases) = parse_test_xml(&contents)
+            if let Some(xml) = artifacts.iter().find(|artifact| {
+                artifact.kind == ArtifactKind::TestLog
+                    && artifact.name.ends_with("test.xml")
+                    && artifact_matches_test(artifact, &test.label)
+            }) && let Some(path) = self.validated_artifact_path(workspace, xml).await
             {
-                test.cases = cases
-                    .into_iter()
-                    .filter(|case| case.status != TestStatus::Passed)
-                    .take(20)
-                    .map(|mut case| {
-                        case.name = bounded_text(&case.name, 512);
-                        case.message = case.message.map(|message| bounded_text(&message, 1_000));
-                        case
-                    })
-                    .collect();
+                let small_enough = tokio::fs::metadata(&path)
+                    .await
+                    .is_ok_and(|metadata| metadata.len() <= 16 * 1024 * 1024);
+                if small_enough
+                    && let Ok(contents) = tokio::fs::read_to_string(path).await
+                    && let Ok(cases) = parse_test_xml(&contents)
+                {
+                    test.cases = cases
+                        .into_iter()
+                        .filter(|case| case.status != TestStatus::Passed)
+                        .take(20)
+                        .map(|mut case| {
+                            case.name = bounded_text(&case.name, 512);
+                            case.message =
+                                case.message.map(|message| bounded_text(&message, 1_000));
+                            case
+                        })
+                        .collect();
+                }
+            }
+
+            let matching_logs = artifacts.iter().filter(|artifact| {
+                artifact.kind == ArtifactKind::TestLog
+                    && artifact.name.ends_with("test.log")
+                    && artifact_matches_test(artifact, &test.label)
+            });
+            let mut saw_artifact = false;
+            let mut copied_for_test = false;
+            let mut saw_remote = false;
+            let mut actionable_excerpt = None::<String>;
+            for log in matching_logs {
+                saw_artifact = true;
+                if !log.locally_available {
+                    saw_remote = true;
+                    continue;
+                }
+                let Some(path) = self.validated_artifact_path(workspace, log).await else {
+                    continue;
+                };
+                let Ok(file) = tokio::fs::File::open(&path).await else {
+                    continue;
+                };
+                let marker = format!("\n===== {} :: {} =====\n", test.label, log.name);
+                if raw.write_all(marker.as_bytes()).await.is_err() {
+                    continue;
+                }
+                let mut reader = BufReader::new(file);
+                let mut line = Vec::new();
+                let mut complete = true;
+                loop {
+                    line.clear();
+                    let read = match reader.read_until(b'\n', &mut line).await {
+                        Ok(read) => read,
+                        Err(_) => {
+                            complete = false;
+                            break;
+                        }
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    if raw.write_all(&line).await.is_err() {
+                        complete = false;
+                        break;
+                    }
+                    for visible_line in normalize_terminal_text(&line).lines() {
+                        let visible_line = visible_line.trim();
+                        if visible_line.is_empty() {
+                            continue;
+                        }
+                        let text = self.redactor.redact_bounded(
+                            &visible_line.replace(workspace_text.as_ref(), "<workspace>"),
+                            4 * 1024,
+                        );
+                        if is_actionable_evidence(&text) {
+                            actionable_excerpt = Some(bounded_text(&text, 1_000));
+                        }
+                        let record = EvidenceRecord {
+                            label: Some(test.label.clone()),
+                            text: format!("[{}] {text}", test.label),
+                        };
+                        let Ok(mut encoded) = serde_json::to_vec(&record) else {
+                            complete = false;
+                            break;
+                        };
+                        encoded.push(b'\n');
+                        if evidence.write_all(&encoded).await.is_err() {
+                            complete = false;
+                            break;
+                        }
+                    }
+                    if !complete {
+                        break;
+                    }
+                }
+                if complete {
+                    copied_for_test = true;
+                    copied_any = true;
+                }
+            }
+            if copied_for_test {
+                test.test_log_available = true;
+                test.test_log_unavailable_reason = None;
+                if let Some(message) = actionable_excerpt {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        category: DiagnosticCategory::Compilation,
+                        message,
+                        location: None,
+                        target: Some(test.label.clone()),
+                        action: None,
+                        repetition_count: 1,
+                    });
+                }
+            } else {
+                test.test_log_available = false;
+                test.test_log_unavailable_reason = Some(
+                    if saw_remote || (!saw_artifact && any_remote_test_log) {
+                        "remote_test_log_unavailable"
+                    } else if saw_artifact {
+                        "test_log_outside_allowed_roots_or_unreadable"
+                    } else {
+                        "test_log_not_found"
+                    }
+                    .to_owned(),
+                );
             }
         }
-        if test.cases.is_empty()
-            && let Some(log) = artifacts.iter().find(|artifact| {
-                artifact.kind == ArtifactKind::TestLog && artifact.name.ends_with("test.log")
-            })
-            && let Some(path) = self.validated_artifact_path(workspace, log).await
-            && let Ok(bytes) = capture::read_bounded_tail(&path, 64 * 1024).await
-        {
-            let text = normalize_terminal_text(&bytes);
-            if let Some(line) = text.lines().rev().find(|line| {
-                let lower = line.to_ascii_lowercase();
-                lower.contains("root_cause") || lower.contains("error:") || lower.contains("failed")
-            }) {
-                summary.diagnostics.push(Diagnostic {
-                    severity: Severity::Error,
-                    category: DiagnosticCategory::Test,
-                    message: bounded_text(line, 1_000),
-                    location: None,
-                    target: Some(test.label.clone()),
-                    action: None,
-                    repetition_count: 1,
-                });
+
+        let flushed = raw.flush().await.is_ok() && evidence.flush().await.is_ok();
+        drop(raw);
+        drop(evidence);
+        let committed = if copied_any {
+            flushed
+                && set_private_file(&raw_temporary).await.is_ok()
+                && set_private_file(&evidence_temporary).await.is_ok()
+                && tokio::fs::rename(&raw_temporary, &paths.test_logs_raw)
+                    .await
+                    .is_ok()
+                && tokio::fs::rename(&evidence_temporary, &paths.test_log_evidence)
+                    .await
+                    .is_ok()
+        } else {
+            false
+        };
+        if committed {
+            summary.diagnostics.extend(diagnostics);
+        } else {
+            let _ = tokio::fs::remove_file(&raw_temporary).await;
+            let _ = tokio::fs::remove_file(&evidence_temporary).await;
+            if copied_any {
+                set_test_log_unavailable(summary, "test_log_snapshot_failed");
             }
         }
-        test.log_uri = Some("bazel://invocation/tests/failure-log".to_owned());
     }
 
     async fn load_coverage(
@@ -1548,7 +1750,7 @@ impl InvocationService {
         artifact: &bazel_mcp_types::Artifact,
     ) -> Option<PathBuf> {
         let path = local_artifact_path(artifact)?;
-        let canonical = tokio::fs::canonicalize(path).await.ok()?;
+        let canonical = tokio::fs::canonicalize(&path).await.ok()?;
         let in_workspace = canonical.starts_with(workspace);
         let in_output_root = if let Some(root) = &self.config.output_user_root {
             tokio::fs::canonicalize(root)
@@ -1557,55 +1759,323 @@ impl InvocationService {
         } else {
             false
         };
-        (in_workspace || in_output_root).then_some(canonical)
+        let in_bazel_testlogs = if artifact.kind == ArtifactKind::TestLog {
+            match bazel_test_log_output_base(&path).zip(bazel_test_log_output_base(&canonical)) {
+                Some((lexical_root, canonical_root)) => tokio::fs::canonicalize(lexical_root)
+                    .await
+                    .is_ok_and(|lexical_root| {
+                        lexical_root == canonical_root && canonical.starts_with(&lexical_root)
+                    }),
+                None => false,
+            }
+        } else {
+            false
+        };
+        (in_workspace || in_output_root || in_bazel_testlogs).then_some(canonical)
     }
 
-    async fn read_combined_log_page(
+    async fn persist_failure_evidence(
         &self,
         paths: &InvocationPaths,
+        workspace: &Path,
+        command: &BazelCommand,
+        failed: bool,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<(), RunnerError> {
+        let records = failure_evidence_records(command, failed, stdout, stderr);
+        let workspace = workspace.to_string_lossy();
+        let mut bytes = Vec::new();
+        for mut record in records {
+            record.text = self.redactor.redact_bounded(
+                &record.text.replace(workspace.as_ref(), "<workspace>"),
+                4 * 1024,
+            );
+            serde_json::to_writer(&mut bytes, &record)?;
+            bytes.push(b'\n');
+        }
+        write_private_atomic(&paths.evidence, &bytes).await?;
+        Ok(())
+    }
+
+    async fn read_evidence_page(
+        &self,
+        path: &Path,
+        paths: &InvocationPaths,
         request: &InspectRequest,
-    ) -> Result<(Option<String>, bool, Option<String>), RunnerError> {
+    ) -> Result<(Vec<String>, bool, Option<String>), RunnerError> {
         let invocation_id = request.invocation_id.ok_or(StoreError::InvalidCursor)?;
-        let stderr_length = tokio::fs::metadata(&paths.stderr)
-            .await
-            .map_or(0, |metadata| metadata.len());
-        let path = if stderr_length > 0 {
-            &paths.stderr
-        } else {
-            &paths.stdout
-        };
-        let length = tokio::fs::metadata(path)
-            .await
-            .map_or(0, |metadata| metadata.len());
-        let end = request
+        let start = request
             .cursor
             .as_deref()
-            .map(|value| LogCursor::decode_for(value, invocation_id))
-            .transpose()?
-            .map_or(length, |cursor| cursor.end);
-        if end > length {
-            return Err(RunnerError::InvalidOffset);
-        }
-        let max_bytes = request.max_bytes.saturating_sub(512).clamp(1, 32 * 1024) as u64;
-        let start = end.saturating_sub(max_bytes);
-        let mut file = tokio::fs::File::open(path).await?;
-        file.seek(std::io::SeekFrom::Start(start)).await?;
-        let mut bytes = vec![0_u8; usize::try_from(end - start).unwrap_or(32 * 1024)];
-        file.read_exact(&mut bytes).await?;
-        let content = normalize_terminal_text(&bytes);
-        let content = self
-            .redactor
-            .redact_bounded(&content, usize::try_from(max_bytes).unwrap_or(32 * 1024));
-        let truncated = start > 0;
-        let next_cursor = truncated
-            .then_some(LogCursor {
-                invocation_id,
-                end: start,
+            .map(|value| {
+                LogCursor::decode_for(
+                    value,
+                    invocation_id,
+                    request.view,
+                    request.filter.as_deref(),
+                )
             })
-            .map(|cursor| cursor.encode())
-            .transpose()?;
-        Ok((Some(content), truncated, next_cursor))
+            .transpose()?
+            .map_or(0, |cursor| cursor.next_record);
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && request.view == InspectView::Log =>
+            {
+                let stdout = capture::read_bounded_tail(&paths.stdout, 1024 * 1024).await?;
+                let stderr = capture::read_bounded_tail(&paths.stderr, 1024 * 1024).await?;
+                let records = failure_evidence_records(
+                    &BazelCommand::Custom("retained".to_owned()),
+                    true,
+                    &stdout,
+                    &stderr,
+                );
+                return page_evidence_records(records.into_iter(), start, request, invocation_id);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut lines = BufReader::new(file).lines();
+        let mut records = Vec::new();
+        while let Some(line) = lines.next_line().await? {
+            records.push(serde_json::from_str::<EvidenceRecord>(&line)?);
+        }
+        page_evidence_records(records.into_iter(), start, request, invocation_id)
     }
+
+    async fn read_test_log_unavailable_page(
+        &self,
+        invocation_id: InvocationId,
+        request: &InspectRequest,
+    ) -> Result<(Vec<String>, bool, Option<String>), RunnerError> {
+        let start = request
+            .cursor
+            .as_deref()
+            .map(|value| {
+                LogCursor::decode_for(
+                    value,
+                    invocation_id,
+                    request.view,
+                    request.filter.as_deref(),
+                )
+            })
+            .transpose()?
+            .map_or(0, |cursor| cursor.next_record);
+        let maximum_bytes = request.max_bytes.saturating_sub(512).max(1);
+        let maximum_items = usize::try_from(request.limit.clamp(1, 100)).unwrap_or(100);
+        let filter = request.filter.as_deref().map(str::to_ascii_lowercase);
+        let mut items = Vec::new();
+        let mut used_bytes = 2_usize;
+        let mut reason_index = 0_u64;
+        let mut storage_cursor = None;
+
+        loop {
+            let (page, _, _) = self
+                .store
+                .page_tests(
+                    invocation_id,
+                    None,
+                    PageRequest {
+                        cursor: storage_cursor,
+                        limit: 100,
+                        max_bytes: Some(128 * 1024),
+                    },
+                )
+                .await?;
+            for test in page.items {
+                let Some(reason) = test.test_log_unavailable_reason else {
+                    continue;
+                };
+                let index = reason_index;
+                reason_index = reason_index.saturating_add(1);
+                if index < start {
+                    continue;
+                }
+                let text = self
+                    .redactor
+                    .redact_bounded(&format!("{}: {reason}", test.label), 4 * 1024);
+                if !filter
+                    .as_ref()
+                    .is_none_or(|filter| text.to_ascii_lowercase().contains(filter))
+                {
+                    continue;
+                }
+                let item_bytes = serde_json::to_vec(&text)?.len();
+                let separator = usize::from(!items.is_empty());
+                if items.len() == maximum_items
+                    || (!items.is_empty()
+                        && used_bytes
+                            .saturating_add(separator)
+                            .saturating_add(item_bytes)
+                            > maximum_bytes)
+                {
+                    let next_cursor = LogCursor {
+                        invocation_id,
+                        view: request.view,
+                        next_record: index,
+                        filter: request.filter.clone(),
+                    }
+                    .encode()?;
+                    return Ok((items, true, Some(next_cursor)));
+                }
+                used_bytes = used_bytes
+                    .saturating_add(separator)
+                    .saturating_add(item_bytes);
+                items.push(text);
+            }
+            if !page.truncated {
+                return Ok((items, false, None));
+            }
+            storage_cursor = page.next_cursor;
+        }
+    }
+}
+
+fn page_evidence_records(
+    records: impl Iterator<Item = EvidenceRecord>,
+    start: u64,
+    request: &InspectRequest,
+    invocation_id: InvocationId,
+) -> Result<(Vec<String>, bool, Option<String>), RunnerError> {
+    let maximum_bytes = request.max_bytes.saturating_sub(512).max(1);
+    let maximum_items = usize::try_from(request.limit.clamp(1, 100)).unwrap_or(100);
+    let filter = request.filter.as_deref().map(str::to_ascii_lowercase);
+    let mut items = Vec::new();
+    let mut used_bytes = 2_usize;
+    let mut next_record = start;
+    let mut truncated = false;
+    for (index, record) in records.enumerate() {
+        let index = u64::try_from(index).unwrap_or(u64::MAX);
+        if index < start {
+            continue;
+        }
+        let matches = filter.as_ref().is_none_or(|filter| {
+            record.text.to_ascii_lowercase().contains(filter)
+                || record
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.to_ascii_lowercase().contains(filter))
+        });
+        if !matches {
+            next_record = index.saturating_add(1);
+            continue;
+        }
+        let item_bytes = serde_json::to_vec(&record.text)?.len();
+        let separator = usize::from(!items.is_empty());
+        if items.len() == maximum_items
+            || (!items.is_empty()
+                && used_bytes
+                    .saturating_add(separator)
+                    .saturating_add(item_bytes)
+                    > maximum_bytes)
+        {
+            next_record = index;
+            truncated = true;
+            break;
+        }
+        used_bytes = used_bytes
+            .saturating_add(separator)
+            .saturating_add(item_bytes);
+        items.push(record.text);
+        next_record = index.saturating_add(1);
+    }
+    let next_cursor = truncated
+        .then_some(LogCursor {
+            invocation_id,
+            view: request.view,
+            next_record,
+            filter: request.filter.clone(),
+        })
+        .map(|cursor| cursor.encode())
+        .transpose()?;
+    Ok((items, truncated, next_cursor))
+}
+
+fn failure_evidence_records(
+    command: &BazelCommand,
+    failed: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Vec<EvidenceRecord> {
+    let test_like = matches!(command, BazelCommand::Test | BazelCommand::Coverage);
+    let streams = if (failed && test_like) || (!failed && !stdout.is_empty()) {
+        [stdout, stderr]
+    } else {
+        [stderr, stdout]
+    };
+    let mut positions = BTreeMap::<String, usize>::new();
+    let mut lines = Vec::<(String, u32)>::new();
+    for stream in streams {
+        for line in normalize_terminal_text(stream).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let line = bounded_text(line, 4 * 1024);
+            if let Some(index) = positions.get(&line).copied() {
+                lines[index].1 = lines[index].1.saturating_add(1);
+            } else {
+                positions.insert(line.clone(), lines.len());
+                lines.push((line, 1));
+            }
+        }
+    }
+    let mut actionable = Vec::new();
+    let mut fallback = Vec::new();
+    for (line, count) in lines {
+        let record = EvidenceRecord {
+            label: None,
+            text: if count > 1 {
+                format!("{line} [repeated {count} times]")
+            } else {
+                line
+            },
+        };
+        if is_actionable_evidence(&record.text) {
+            actionable.push(record);
+        } else {
+            fallback.push(record);
+        }
+    }
+    let fallback_start = fallback.len().saturating_sub(2_000);
+    actionable.truncate(1_000);
+    actionable.extend(fallback.into_iter().skip(fallback_start));
+    actionable.truncate(3_000);
+    actionable
+}
+
+fn is_actionable_evidence(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error:")
+        || lower.starts_with("error ")
+        || lower.contains("failed:")
+        || lower.contains("failure")
+        || lower.contains("fatal:")
+        || lower.contains("no such target")
+        || lower.contains("no such package")
+        || lower.contains("undefined reference")
+        || lower.contains("root_cause")
+}
+
+async fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), io::Error> {
+    let temporary = path.with_extension("tmp");
+    let mut file = tokio::fs::File::create(&temporary).await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    drop(file);
+    set_private_file(&temporary).await?;
+    tokio::fs::rename(temporary, path).await
+}
+
+#[cfg(unix)]
+async fn set_private_file(path: &Path) -> Result<(), io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+}
+
+#[cfg(not(unix))]
+async fn set_private_file(_path: &Path) -> Result<(), io::Error> {
+    Ok(())
 }
 
 fn local_artifact_path(artifact: &bazel_mcp_types::Artifact) -> Option<PathBuf> {
@@ -1619,6 +2089,57 @@ fn local_artifact_path(artifact: &bazel_mcp_types::Artifact) -> Option<PathBuf> 
     path.is_absolute().then_some(path)
 }
 
+fn artifact_matches_test(artifact: &bazel_mcp_types::Artifact, label: &str) -> bool {
+    let label = label.rsplit_once("//").map_or(label, |(_, label)| label);
+    let (package, target) = label
+        .split_once(':')
+        .map_or(("", label.trim_start_matches("//")), |(package, target)| {
+            (package.trim_start_matches("//"), target)
+        });
+    let fragment = if package.is_empty() {
+        format!("/testlogs/{target}/")
+    } else {
+        format!("/testlogs/{package}/{target}/")
+    };
+    artifact.uri.replace('\\', "/").contains(&fragment)
+}
+
+fn bazel_test_log_output_base(path: &Path) -> Option<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    let execroot = components
+        .iter()
+        .position(|component| component.as_os_str() == "execroot")?;
+    let bazel_out = components
+        .iter()
+        .enumerate()
+        .skip(execroot + 1)
+        .find(|(_, component)| component.as_os_str() == "bazel-out")?
+        .0;
+    components
+        .iter()
+        .enumerate()
+        .skip(bazel_out + 1)
+        .find(|(_, component)| component.as_os_str() == "testlogs")?;
+    if !matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("log" | "xml")
+    ) {
+        return None;
+    }
+    Some(components[..execroot].iter().collect())
+}
+
+fn set_test_log_unavailable(summary: &mut bazel_mcp_types::InvocationSummary, reason: &str) {
+    for test in summary
+        .tests
+        .iter_mut()
+        .filter(|test| test.status != TestStatus::Passed)
+    {
+        test.test_log_available = false;
+        test.test_log_unavailable_reason = Some(reason.to_owned());
+    }
+}
+
 fn bounded_text(value: &str, maximum_bytes: usize) -> String {
     if value.len() <= maximum_bytes {
         return value.to_owned();
@@ -1628,21 +2149,6 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
         boundary -= 1;
     }
     format!("{}…", &value[..boundary])
-}
-
-fn bounded_page_limit(view: InspectView, requested: u32, max_bytes: usize) -> u32 {
-    let estimated_item_bytes = match view {
-        InspectView::Summary | InspectView::Tests | InspectView::Invocations => max_bytes.max(1),
-        InspectView::Diagnostics => 5_000,
-        InspectView::Coverage => 1_500,
-        InspectView::Artifacts => 2_500,
-        InspectView::QueryResults => 4_500,
-        InspectView::Log => max_bytes.max(1),
-    };
-    let budgeted = u32::try_from(max_bytes / estimated_item_bytes)
-        .unwrap_or(u32::MAX)
-        .max(1);
-    requested.clamp(1, 100).min(budgeted)
 }
 
 fn enforce_inspect_budget(
@@ -1868,6 +2374,140 @@ mod tests {
         assert_eq!(
             local_artifact_path(&artifact),
             Some(PathBuf::from("/tmp/bazel-out/test.xml"))
+        );
+    }
+
+    #[test]
+    fn log_evidence_is_automatic_deduplicated_and_encoding_neutral() {
+        let records = failure_evidence_records(
+            &BazelCommand::Test,
+            true,
+            b"TEST_ROOT_CAUSE\nordinary stdout\n",
+            b"ERROR: build wrapper\nTEST_ROOT_CAUSE\nordinary stderr\n",
+        );
+        assert_eq!(records[0].text, "TEST_ROOT_CAUSE [repeated 2 times]");
+        assert!(
+            records
+                .iter()
+                .any(|record| record.text == "ordinary stdout")
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| record.text == "ordinary stderr")
+        );
+        let public = records
+            .iter()
+            .map(|record| record.text.clone())
+            .collect::<Vec<_>>();
+        let value = serde_json::to_value(public).unwrap();
+        assert!(
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item.is_string())
+        );
+        assert!(!value.to_string().contains("\"stdout\":"));
+        assert!(!value.to_string().contains("\"stderr\":"));
+    }
+
+    #[test]
+    fn evidence_cursor_advances_after_last_emitted_item_without_gaps() {
+        let id = InvocationId::new();
+        let records = (0..7)
+            .map(|index| EvidenceRecord {
+                label: None,
+                text: format!("ERROR: item {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut request = InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            view: InspectView::Log,
+            cursor: None,
+            filter: None,
+            limit: 2,
+            max_bytes: 8 * 1024,
+        };
+        let mut observed = Vec::new();
+        loop {
+            let start = request
+                .cursor
+                .as_deref()
+                .map(|cursor| LogCursor::decode_for(cursor, id, InspectView::Log, None).unwrap())
+                .map_or(0, |cursor| cursor.next_record);
+            let (items, truncated, cursor) =
+                page_evidence_records(records.clone().into_iter(), start, &request, id).unwrap();
+            observed.extend(items);
+            request.cursor = cursor;
+            if !truncated {
+                break;
+            }
+        }
+        assert_eq!(
+            observed,
+            (0..7)
+                .map(|index| format!("ERROR: item {index}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn associates_test_artifacts_without_exposing_a_public_uri() {
+        let artifact = bazel_mcp_types::Artifact {
+            name: "test.log".into(),
+            kind: ArtifactKind::TestLog,
+            uri: "file:///tmp/output/execroot/ws/bazel-out/testlogs/pkg/failing/test.log".into(),
+            size_bytes: None,
+            locally_available: true,
+        };
+        assert!(artifact_matches_test(&artifact, "//pkg:failing"));
+        assert!(!artifact_matches_test(&artifact, "//pkg:passing"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn default_bazel_testlog_containment_accepts_real_paths_and_rejects_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let store = Store::open(root.path().join("store")).await.unwrap();
+        let service = InvocationService::new(store, RunnerConfig::default()).unwrap();
+        let workspace = root.path().join("workspace");
+        let testlogs = root
+            .path()
+            .join("output-base/execroot/ws/bazel-out/config/testlogs/pkg/test");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::create_dir_all(&testlogs).await.unwrap();
+        let safe = testlogs.join("test.log");
+        tokio::fs::write(&safe, "failure").await.unwrap();
+        let artifact = bazel_mcp_types::Artifact {
+            name: "test.log".into(),
+            kind: ArtifactKind::TestLog,
+            uri: format!("file://{}", safe.display()),
+            size_bytes: None,
+            locally_available: true,
+        };
+        let canonical_safe = tokio::fs::canonicalize(&safe).await.unwrap();
+        assert_eq!(
+            service.validated_artifact_path(&workspace, &artifact).await,
+            Some(canonical_safe)
+        );
+
+        let outside = root.path().join("outside.log");
+        tokio::fs::write(&outside, "secret").await.unwrap();
+        let escaped = testlogs.join("escaped.log");
+        symlink(&outside, &escaped).unwrap();
+        let escaped_artifact = bazel_mcp_types::Artifact {
+            uri: format!("file://{}", escaped.display()),
+            ..artifact
+        };
+        assert_eq!(
+            service
+                .validated_artifact_path(&workspace, &escaped_artifact)
+                .await,
+            None
         );
     }
 }
