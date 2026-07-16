@@ -1107,12 +1107,65 @@ async fn scheduler_uses_effective_output_base_and_never_evaluates_arguments() {
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("first-workspace");
     let second = root.path().join("second-workspace");
+    let independent_first = root.path().join("independent-first-started");
+    let independent_second = root.path().join("independent-second-started");
+    let shared_first = root.path().join("shared-first-started");
+    let shared_second = root.path().join("shared-second-started");
+    let shared_release = root.path().join("shared-release");
     tokio::fs::create_dir(&first).await.unwrap();
     tokio::fs::create_dir(&second).await.unwrap();
     tokio::fs::write(second.join("MODULE.bazel"), "module(name='second')\n")
         .await
         .unwrap();
-    let service = service(&root, &first, "#!/bin/sh\nsleep 0.3\nexit 0\n").await;
+    let script = format!(
+        "#!/bin/sh\n\
+if [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n\
+wait_for() {{\n\
+  i=0\n\
+  while [ \"$i\" -lt 500 ]; do\n\
+    [ -f \"$1\" ] && return 0\n\
+    i=$((i+1))\n\
+    sleep 0.01\n\
+  done\n\
+  return 1\n\
+}}\n\
+for arg in \"$@\"; do\n\
+  case \"$arg\" in\n\
+    //:warm-version-cache) exit 0 ;;\n\
+    //:independent-first)\n\
+      touch '{}'\n\
+      wait_for '{}'\n\
+      exit $?\n\
+      ;;\n\
+    //:independent-second)\n\
+      touch '{}'\n\
+      wait_for '{}'\n\
+      exit $?\n\
+      ;;\n\
+    //:shared-first)\n\
+      touch '{}'\n\
+      wait_for '{}'\n\
+      exit $?\n\
+      ;;\n\
+    //:shared-second)\n\
+      touch '{}'\n\
+      wait_for '{}'\n\
+      exit $?\n\
+      ;;\n\
+  esac\n\
+done\n\
+sleep 0.3\n\
+exit 0\n",
+        independent_first.display(),
+        independent_second.display(),
+        independent_second.display(),
+        independent_first.display(),
+        shared_first.display(),
+        shared_release.display(),
+        shared_second.display(),
+        shared_release.display(),
+    );
+    let service = service(&root, &first, &script).await;
 
     service
         .run(InvocationRequest::new(
@@ -1125,42 +1178,82 @@ async fn scheduler_uses_effective_output_base_and_never_evaluates_arguments() {
 
     let shell_marker = root.path().join("shell-evaluated");
     let literal_argument = format!("$(touch {})", shell_marker.display());
-    let independent_started = Instant::now();
     let (first_result, second_result) = tokio::join!(
         service.run(InvocationRequest::new(
             first.clone(),
             BazelCommand::Build,
-            vec![literal_argument],
+            vec![literal_argument, "//:independent-first".into()],
         )),
         service.run(InvocationRequest::new(
             second.clone(),
             BazelCommand::Build,
-            vec!["//...".into()],
+            vec!["//:independent-second".into()],
         )),
     );
-    let independent_elapsed = independent_started.elapsed();
     assert_eq!(first_result.unwrap().state, InvocationState::Succeeded);
     assert_eq!(second_result.unwrap().state, InvocationState::Succeeded);
+    assert!(independent_first.exists());
+    assert!(independent_second.exists());
     assert!(!shell_marker.exists());
 
     let shared_output_base = root.path().join("shared-output-base");
     let startup_argument = format!("--output_base={}", shared_output_base.display());
-    let mut first_request =
-        InvocationRequest::new(first.clone(), BazelCommand::Build, vec!["//...".into()]);
+    let mut first_request = InvocationRequest::new(
+        first.clone(),
+        BazelCommand::Build,
+        vec!["//:shared-first".into()],
+    );
     first_request.startup_arguments = vec![startup_argument.clone()];
-    let mut second_request =
-        InvocationRequest::new(second.clone(), BazelCommand::Build, vec!["//...".into()]);
+    let mut second_request = InvocationRequest::new(
+        second.clone(),
+        BazelCommand::Build,
+        vec!["//:shared-second".into()],
+    );
     second_request.startup_arguments = vec![startup_argument];
-    let serialized_started = Instant::now();
-    let (first_result, second_result) =
-        tokio::join!(service.run(first_request), service.run(second_request),);
-    let serialized_elapsed = serialized_started.elapsed();
+    let first_id = first_request.id;
+    let second_id = second_request.id;
+    let first_run = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(first_request).await.unwrap() }
+    });
+    let second_run = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(second_request).await.unwrap() }
+    });
+    wait_for_invocation(&service, first_id).await;
+    wait_for_invocation(&service, second_id).await;
+
+    let one_started = tokio::time::timeout(Duration::from_secs(2), async {
+        while !shared_first.exists() && !shared_second.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let overlap_before_release = match (shared_first.exists(), shared_second.exists()) {
+        (true, false) => {
+            tokio::time::timeout(Duration::from_secs(1), wait_for_path(&shared_second))
+                .await
+                .is_ok()
+        }
+        (false, true) => tokio::time::timeout(Duration::from_secs(1), wait_for_path(&shared_first))
+            .await
+            .is_ok(),
+        (true, true) => true,
+        (false, false) => false,
+    };
+    tokio::fs::write(&shared_release, b"release").await.unwrap();
+    let (first_result, second_result) = tokio::join!(first_run, second_run);
+
+    assert!(one_started, "neither shared output-base request started");
+    assert!(
+        !overlap_before_release,
+        "shared output-base requests overlapped before the active request was released"
+    );
     assert_eq!(first_result.unwrap().state, InvocationState::Succeeded);
     assert_eq!(second_result.unwrap().state, InvocationState::Succeeded);
-    assert!(
-        serialized_elapsed > independent_elapsed + Duration::from_millis(200),
-        "shared output base did not serialize: independent={independent_elapsed:?}, shared={serialized_elapsed:?}"
-    );
+    assert!(shared_first.exists());
+    assert!(shared_second.exists());
 
     let mut same_workspace = Vec::new();
     for _ in 0..4 {
