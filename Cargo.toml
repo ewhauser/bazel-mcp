@@ -39,6 +39,7 @@ tonic = "0.14"
 
 # Serialization and domain data
 base64 = "0.22"
+blake3 = { version = "1.8", features = ["mmap", "rayon"] }
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 memchr = "2"

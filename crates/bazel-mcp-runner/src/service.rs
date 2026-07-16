@@ -1274,6 +1274,15 @@ impl InvocationService {
             }
             return Err(error.into());
         }
+        let extension_limits = (!self.reducers.is_empty()).then_some({
+            (
+                self.config.starlark_reducers.limits.max_events,
+                self.config.starlark_reducers.limits.max_input_bytes,
+            )
+        });
+        let incremental_bep = (queued.request.command.class() == CommandClass::BuildLike
+            && self.config.bep_transport == BepTransport::Tail)
+            .then(|| capture::IncrementalBepCapture::start(paths.bep.clone(), extension_limits));
         let started = Instant::now();
         let timeout = queued
             .request
@@ -1326,6 +1335,21 @@ impl InvocationService {
         }
         let postprocess: Result<InvocationRecord, RunnerError> = async {
             let reduction_started = Instant::now();
+            let incremental_reduction = match incremental_bep {
+                Some(capture) => {
+                    let reduction = capture.finish().await?;
+                    tracing::debug!(
+                        invocation_id = %queued.request.id,
+                        source = ?reduction.source,
+                        finalize_ms = reduction.finalize_ms,
+                        events = reduction.outcome.event_count,
+                        bytes = reduction.outcome.decoded_bytes,
+                        "completed incremental BEP reduction"
+                    );
+                    Some(reduction)
+                }
+                None => None,
+            };
             let (query_row_count, query_sample) =
                 if queued.request.command.class() == CommandClass::Query {
                     let redactor = self.redactor.clone();
@@ -1346,14 +1370,10 @@ impl InvocationService {
                 } else {
                     (0, Vec::new())
                 };
-            let extension_limits = (!self.reducers.is_empty()).then_some({
-                (
-                    self.config.starlark_reducers.limits.max_events,
-                    self.config.starlark_reducers.limits.max_input_bytes,
-                )
-            });
-            let (bep, bep_outcome) =
-                capture::reduce_bep(paths.bep.clone(), extension_limits).await?;
+            let (bep, bep_outcome) = match incremental_reduction {
+                Some(reduction) => (reduction.accumulator, reduction.outcome),
+                None => capture::reduce_bep(paths.bep.clone(), extension_limits).await?,
+            };
             if let Some(error) = &bep_outcome.terminal_error {
                 tracing::warn!(invocation_id = %queued.request.id, %error, "partially decoded BEP");
             }

@@ -1,18 +1,18 @@
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use bazel_mcp_bep::{
-    BepEvent, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, DEFAULT_MAX_STREAM_EVENTS,
-    visit_stream_partial_bounded,
+    DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, DEFAULT_MAX_STREAM_EVENTS,
+    IncrementalStreamDecoder, visit_stream_partial_bounded,
 };
 use bazel_mcp_reducer::BepAccumulator;
 use bazel_mcp_store::{InvocationCompletion, Store};
@@ -20,8 +20,11 @@ use bazel_mcp_types::{
     BazelCommand, InvocationId, InvocationRecord, InvocationRequest, InvocationState,
     InvocationSummary, PageRequest, Termination, TestResult, TestStatus,
 };
+use blake3::Hasher;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+
+const PARALLEL_MMAP_HASH_THRESHOLD: u64 = 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(about = "Reproducible end-to-end storage benchmark")]
@@ -130,6 +133,10 @@ struct BepDecodeMetrics {
     large_stream_decode_ms: f64,
     tailed_events: usize,
     tail_finalize_ms: f64,
+    #[serde(default)]
+    large_tailed_events: usize,
+    #[serde(default)]
+    large_tail_finalize_ms: f64,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -236,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
         peak_rss_bytes: storage_peak_rss_bytes,
     };
     let report = BenchmarkReport {
-        schema_version: 3,
+        schema_version: 4,
         label: args.label,
         revision: args.revision,
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
@@ -376,7 +383,8 @@ fn benchmark_bep_decode() -> anyhow::Result<BepDecodeMetrics> {
         large.extend_from_slice(&representative);
     }
     let (large_stream_events, large_stream_decode_ms) = decode_bep(&large)?;
-    let (tailed_events, tail_finalize_ms) = tail_bep_file(&representative)?;
+    let (tailed_events, tail_finalize_ms) = tail_bep_file(&representative, 1_021)?;
+    let (large_tailed_events, large_tail_finalize_ms) = tail_bep_file(&large, 64 * 1024 + 13)?;
     Ok(BepDecodeMetrics {
         representative_bytes: representative.len() as u64,
         representative_events,
@@ -386,91 +394,110 @@ fn benchmark_bep_decode() -> anyhow::Result<BepDecodeMetrics> {
         large_stream_decode_ms,
         tailed_events,
         tail_finalize_ms,
+        large_tailed_events,
+        large_tail_finalize_ms,
     })
 }
 
-fn tail_bep_file(bytes: &[u8]) -> anyhow::Result<(usize, f64)> {
+fn tail_bep_file(bytes: &[u8], chunk_bytes: usize) -> anyhow::Result<(usize, f64)> {
     let root = tempfile::tempdir()?;
     let path = root.path().join("events.bep");
     std::fs::File::create(&path)?;
     let done = Arc::new(AtomicBool::new(false));
+    let observed_bytes = Arc::new(AtomicU64::new(0));
     let tail_done = done.clone();
+    let tail_observed_bytes = observed_bytes.clone();
     let tail_path = path.clone();
-    let tailer = std::thread::spawn(move || tail_complete_bep_frames(&tail_path, &tail_done));
+    let tailer = std::thread::spawn(move || {
+        tail_complete_bep_frames(&tail_path, &tail_done, &tail_observed_bytes)
+    });
     let mut writer = std::fs::OpenOptions::new().append(true).open(path)?;
-    for chunk in bytes.chunks(1_021) {
+    for chunk in bytes.chunks(chunk_bytes) {
         writer.write_all(chunk)?;
         writer.flush()?;
         std::thread::yield_now();
     }
+    drop(writer);
+    let catchup_started = Instant::now();
+    while observed_bytes.load(Ordering::Acquire) < bytes.len() as u64 {
+        anyhow::ensure!(
+            catchup_started.elapsed() < Duration::from_secs(5),
+            "incremental BEP tail did not catch up"
+        );
+        std::thread::yield_now();
+    }
     let finalized = Instant::now();
     done.store(true, Ordering::Release);
-    let events = tailer
+    let (events, tailed_bytes, tailed_digest) = tailer
         .join()
         .map_err(|_| anyhow::anyhow!("BEP tail experiment panicked"))??;
+    let (final_bytes, final_digest) = hash_bep_file(root.path().join("events.bep"))?;
+    anyhow::ensure!(
+        tailed_bytes == final_bytes && tailed_digest == final_digest,
+        "tailed BEP bytes did not match retained file"
+    );
     Ok((events, millis(finalized.elapsed())))
 }
 
-fn tail_complete_bep_frames(path: &Path, done: &AtomicBool) -> anyhow::Result<usize> {
-    use std::io::Read;
-
+fn tail_complete_bep_frames(
+    path: &Path,
+    done: &AtomicBool,
+    observed_bytes: &AtomicU64,
+) -> anyhow::Result<(usize, u64, [u8; 32])> {
     let mut reader = std::fs::File::open(path)?;
-    let mut pending = Vec::new();
-    let mut buffer = [0_u8; 4 * 1024];
+    let mut buffer = [0_u8; 64 * 1024];
     let mut accumulator = BepAccumulator::default();
-    let mut event_count = 0_usize;
-    let mut stream_bytes = 0_usize;
+    let mut decoder = IncrementalStreamDecoder::new(
+        DEFAULT_MAX_FRAME_BYTES,
+        DEFAULT_MAX_STREAM_BYTES,
+        DEFAULT_MAX_STREAM_EVENTS,
+    );
+    let mut hasher = Hasher::new();
+    let mut tailed_bytes = 0_u64;
     loop {
         let read = reader.read(&mut buffer)?;
         if read > 0 {
-            pending.extend_from_slice(&buffer[..read]);
-            while let Some((prefix_bytes, frame_bytes)) = complete_frame_length(&pending)? {
-                anyhow::ensure!(
-                    frame_bytes <= DEFAULT_MAX_FRAME_BYTES,
-                    "tailed BEP frame exceeded the frame bound"
-                );
-                let consumed = prefix_bytes.saturating_add(frame_bytes);
-                if pending.len() < consumed {
-                    break;
-                }
-                stream_bytes = stream_bytes.saturating_add(frame_bytes);
-                event_count = event_count.saturating_add(1);
-                anyhow::ensure!(
-                    stream_bytes <= DEFAULT_MAX_STREAM_BYTES
-                        && event_count <= DEFAULT_MAX_STREAM_EVENTS,
-                    "tailed BEP stream exceeded its bounds"
-                );
-                let event = BepEvent::decode(pending[prefix_bytes..consumed].to_vec())?;
-                accumulator.observe(event);
-                pending.drain(..consumed);
-            }
+            hasher.update(&buffer[..read]);
+            tailed_bytes = tailed_bytes.saturating_add(read as u64);
+            decoder.push(&buffer[..read], |event| accumulator.observe(event));
+            observed_bytes.store(tailed_bytes, Ordering::Release);
             continue;
         }
         if done.load(Ordering::Acquire) {
+            let outcome = decoder.finish();
             anyhow::ensure!(
-                pending.is_empty(),
-                "tailed BEP ended with an incomplete frame"
+                outcome.terminal_error.is_none(),
+                "tailed BEP decode failed: {:?}",
+                outcome.terminal_error
             );
             std::hint::black_box(accumulator);
-            return Ok(event_count);
+            return Ok((
+                outcome.event_count,
+                tailed_bytes,
+                *hasher.finalize().as_bytes(),
+            ));
         }
         std::thread::yield_now();
     }
 }
 
-fn complete_frame_length(input: &[u8]) -> anyhow::Result<Option<(usize, usize)>> {
-    let mut value = 0_u64;
-    for (index, byte) in input.iter().copied().take(10).enumerate() {
-        value |= u64::from(byte & 0x7f) << (index * 7);
-        if byte & 0x80 == 0 {
-            let length = usize::try_from(value).context("BEP frame length does not fit usize")?;
-            return Ok(Some((index + 1, length)));
+fn hash_bep_file(path: PathBuf) -> anyhow::Result<(u64, [u8; 32])> {
+    let bytes = std::fs::metadata(&path)?.len();
+    let mut hasher = Hasher::new();
+    if bytes >= PARALLEL_MMAP_HASH_THRESHOLD {
+        hasher.update_mmap_rayon(path)?;
+    } else {
+        let mut reader = File::open(path)?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
         }
     }
-    if input.len() >= 10 {
-        anyhow::bail!("invalid BEP frame length varint");
-    }
-    Ok(None)
+    Ok((bytes, *hasher.finalize().as_bytes()))
 }
 
 fn decode_bep(bytes: &[u8]) -> anyhow::Result<(usize, f64)> {

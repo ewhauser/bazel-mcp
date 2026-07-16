@@ -16,6 +16,7 @@ bazel-mcp-policy.workspace = true
 bazel-mcp-reducer.workspace = true
 bazel-mcp-store.workspace = true
 bazel-mcp-types.workspace = true
+blake3.workspace = true
 clap.workspace = true
 buffa.workspace = true
 libc.workspace = true
