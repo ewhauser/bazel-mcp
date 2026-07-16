@@ -70,6 +70,8 @@ pub struct InspectParams {
     pub filter: Option<String>,
     /// Maximum items, from 1 through 100.
     pub limit: Option<u32>,
+    /// Maximum model-visible response bytes, clamped from 512 through 8192.
+    pub max_bytes: Option<u32>,
     /// Opaque continuation cursor.
     pub cursor: Option<String>,
 }
@@ -250,7 +252,7 @@ impl BazelMcpServer {
         if workspace.is_some() && view != InspectView::Invocations {
             return Err("workspace is supported only for the invocations view".into());
         }
-        let visible_budget = 8 * 1024;
+        let visible_budget = inspect_visible_budget(params.max_bytes);
         let mut representation_budget = self.single_representation_budget(visible_budget);
         loop {
             let result = self
@@ -1219,6 +1221,10 @@ fn parse_id(value: &str) -> Result<InvocationId, String> {
         .map_err(|_| "invocation_id must be a UUID".to_owned())
 }
 
+fn inspect_visible_budget(requested: Option<u32>) -> usize {
+    requested.unwrap_or(8 * 1024).clamp(512, 8 * 1024) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use bazel_mcp_runner::RunnerConfig;
@@ -1249,6 +1255,7 @@ mod tests {
                 view: "invocations".to_owned(),
                 filter: None,
                 limit: Some(20),
+                max_bytes: Some(2_048),
                 cursor: None,
             }))
             .await
@@ -1256,9 +1263,18 @@ mod tests {
         let Some(ContentBlock::Text(content)) = result.content.first() else {
             panic!("ledger result did not contain one text block");
         };
+        assert!(content.text.len() <= 2_048);
         let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
         assert_eq!(value["view"], "invocations");
         assert_eq!(value["items"][0]["request"]["id"], id.to_string());
+    }
+
+    #[test]
+    fn inspection_byte_budget_is_bounded() {
+        assert_eq!(inspect_visible_budget(None), 8_192);
+        assert_eq!(inspect_visible_budget(Some(1)), 512);
+        assert_eq!(inspect_visible_budget(Some(2_048)), 2_048);
+        assert_eq!(inspect_visible_budget(Some(20_000)), 8_192);
     }
 
     #[tokio::test]
