@@ -62,7 +62,7 @@ pub struct RunParams {
 pub struct InspectParams {
     /// UUID returned by bazel.run.
     pub invocation_id: String,
-    /// summary, diagnostics, tests, coverage, artifacts, query_results, or log.
+    /// summary, diagnostics, tests, coverage, artifacts, query_results, log, or test_log.
     pub view: String,
     /// Optional literal substring or label glob filter.
     pub filter: Option<String>,
@@ -87,8 +87,6 @@ struct RunResult<'a> {
     command: &'a str,
     exit_code: Option<i32>,
     duration_ms: u64,
-    stdout_bytes: u64,
-    stderr_bytes: u64,
     headline: &'a str,
     targets: TargetCounts,
     tests: TestCounts,
@@ -228,6 +226,7 @@ impl BazelMcpServer {
             "diagnostics" => InspectView::Diagnostics,
             "tests" => InspectView::Tests,
             "log" => InspectView::Log,
+            "test_log" => InspectView::TestLog,
             "coverage" => InspectView::Coverage,
             "artifacts" => InspectView::Artifacts,
             "query_results" => InspectView::QueryResults,
@@ -323,8 +322,6 @@ impl BazelMcpServer {
                 command: record.request.command.as_str(),
                 exit_code,
                 duration_ms: record.metrics.bazel_wall_ms,
-                stdout_bytes: record.metrics.raw_stdout_bytes,
-                stderr_bytes: record.metrics.raw_stderr_bytes,
                 headline: &summary.headline,
                 targets: summary.target_counts.clone(),
                 tests: summary.test_counts.clone(),
@@ -339,6 +336,7 @@ impl BazelMcpServer {
                     "summary",
                     "diagnostics",
                     "tests",
+                    "test_log",
                     "coverage",
                     "artifacts",
                     "query_results",
@@ -1100,7 +1098,11 @@ impl Service<RoleServer> for BazelMcpServer {
                     .runner
                     .list_deferred_results(
                         DeferredRetrieval::SeparateResult,
-                        PageRequest { cursor, limit: 100 },
+                        PageRequest {
+                            cursor,
+                            limit: 100,
+                            max_bytes: None,
+                        },
                     )
                     .await
                     .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
@@ -1214,12 +1216,25 @@ mod tests {
             RunnerConfig::default(),
         )
         .unwrap();
-        let value = serde_json::json!({"message": "hello"});
+        let value = serde_json::json!({
+            "view": "log",
+            "items": ["ERROR: first", "ERROR: second"],
+            "next_cursor": null,
+            "truncated": false
+        });
         let one = serde_json::to_vec(&value).unwrap().len();
 
         let text = BazelMcpServer::new(runner.clone(), ResultEncoding::Text);
         assert_eq!(text.model_visible_bytes(&value).unwrap(), one);
         assert_eq!(text.single_representation_budget(8_192), 8_192);
+        let text_result = text.encode(value.clone()).unwrap();
+        let Some(ContentBlock::Text(content)) = text_result.content.first() else {
+            panic!("text result did not contain one text block");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&content.text).unwrap(),
+            value
+        );
 
         let toon = BazelMcpServer::new(runner.clone(), ResultEncoding::Toon);
         let toon_text = BazelMcpServer::encode_toon(&value).unwrap();
@@ -1235,9 +1250,19 @@ mod tests {
         };
         assert_eq!(content.text, toon_text);
 
+        let structured = BazelMcpServer::new(runner.clone(), ResultEncoding::Structured);
+        assert_eq!(
+            structured.encode(value.clone()).unwrap().structured_content,
+            Some(value.clone())
+        );
+
         let both = BazelMcpServer::new(runner, ResultEncoding::Both);
         assert_eq!(both.model_visible_bytes(&value).unwrap(), one * 2);
         assert_eq!(both.single_representation_budget(8_192), 4_096);
+        assert_eq!(
+            both.encode(value.clone()).unwrap().structured_content,
+            Some(value)
+        );
     }
 
     #[tokio::test]

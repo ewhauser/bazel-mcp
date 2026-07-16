@@ -147,8 +147,9 @@ logs and BEP.
 4. Policy-driven unavailability is a normal domain result, not an MCP protocol
    error.
 5. BEP is never retained by default because no advertised view reads raw BEP.
-6. Stdout and stderr are retained or purged together as the backing evidence
-   for `log`.
+6. The raw stdout and stderr captures are retained or purged together. The
+   public `log` view reads an encoding-neutral, normalized evidence file and
+   never exposes stream identity.
 7. No GC operation deletes a nonterminal invocation.
 8. An unexpired deferred task may protect metadata and the compact summary but
    never extends a follow-up view TTL.
@@ -160,7 +161,7 @@ logs and BEP.
 
 ## View inventory and backing evidence
 
-The per-invocation manifest contains exactly the seven public inspection views
+The per-invocation manifest contains exactly the eight public inspection views
 from specification 001. An internal invocation-listing operation, if present,
 is not a per-invocation view and has no manifest row.
 
@@ -169,10 +170,11 @@ is not a per-invocation view and has no manifest row.
 | `summary` | Compact summary in the invocation record | Invocation metadata |
 | `diagnostics` | Redacted diagnostic rows | All diagnostic rows for the invocation |
 | `tests` | Redacted test-result rows and bounded failure detail | All test rows for the invocation |
+| `test_log` | Private failed-test snapshots plus redacted line evidence | All failed-test evidence for the invocation |
 | `coverage` | Redacted coverage summary and per-file rows | All coverage rows for the invocation |
 | `artifacts` | Bounded artifact metadata rows | All artifact rows for the invocation |
 | `query_results` | Redacted query rows | All query rows for the invocation |
-| `log` | Raw stdout and stderr files | Both files together |
+| `log` | Redacted normalized failure-evidence strings, derived from both raw captures | The evidence file and raw captures together |
 
 Target-result rows that are not exposed by a public view are working evidence.
 After their contribution to the compact summary is committed, they are purged
@@ -185,12 +187,18 @@ lifetime of Bazel outputs in the workspace or remote cache. If an artifact
 reference later cannot be resolved, the available artifact view returns an
 item-level availability reason as required by specification 001.
 
-The `log` view is a deterministic virtual view of both streams. It MUST NOT
-silently choose stderr and omit nonempty stdout. Pages identify their source
-stream and prioritize the failure-oriented stderr tail before the stdout tail;
-they do not claim to reconstruct cross-stream interleaving that was not
-captured. Existing byte ceilings, redaction, and backward pagination continue
-to apply.
+The `log` view is a deterministic, encoding-neutral view derived from both
+streams. It MUST NOT silently omit a nonempty stream, but stdout/stderr choice
+and failure sequencing remain internal implementation details. The public shape
+is always `items: [string]`; there is no source field or stream selector.
+Normalization, redaction, exact deduplication, actionable-line ranking, a
+bounded fallback tail, and opaque forward pagination apply before return.
+
+The `test_log` view uses the same public string shape. Complete failed-test logs
+are first copied into private invocation storage so a later Bazel invocation
+cannot mutate prior evidence. Redacted line records provide bounded filtering
+and pagination; missing, remote, rejected-by-containment, and expired evidence
+have explicit reasons.
 
 ## Default retention policy
 
@@ -239,6 +247,7 @@ by the existing lifecycle rules and therefore belongs to one of those classes.
 | Compact metadata and summary | 7 days | 7 days |
 | Nonempty normalized follow-up view | 1 hour | 24 hours |
 | `log` | 1 hour only when selected as an explicit fallback | 24 hours when either stream contains bytes |
+| `test_log` | Not retained | 24 hours when a failed-test snapshot exists |
 | BEP | Purge after reduction attempt | Purge after reduction attempt |
 | Non-view normalized/intermediate data | Purge after summary commit | Purge after summary commit |
 
@@ -258,7 +267,7 @@ examples are:
 | Invocation | Expected available views at completion |
 | --- | --- |
 | Successful build | `summary`, plus nonempty `artifacts` or other normalized views |
-| Successful test | `summary`, plus nonempty `tests`, `diagnostics`, and `artifacts` |
+| Successful test | `summary`, plus nonempty `tests`, `diagnostics`, and `artifacts`; `test_log` only when a flaky/failing snapshot exists |
 | Successful coverage | `summary`, plus nonempty `coverage`, `diagnostics`, and `artifacts` |
 | Successful query | `summary`, `query_results` when rows exist |
 | Successful truncated informational command | `summary`, `log` |
@@ -283,6 +292,7 @@ pub enum InvocationView {
     Summary,
     Diagnostics,
     Tests,
+    TestLog,
     Coverage,
     Artifacts,
     QueryResults,
@@ -370,7 +380,7 @@ CREATE INDEX invocation_views_expiry
 ```
 
 The implementation uses the conservative SQL subset supported and tested by
-the pinned Turso version. Every terminal invocation has exactly seven manifest
+the pinned Turso version. Every terminal invocation has exactly eight manifest
 rows. A terminal invocation missing any row is an integrity error and is
 reconciled during recovery; the server does not infer availability from file
 existence.
@@ -382,7 +392,8 @@ check makes TTL behavior correct even when the periodic GC worker is delayed.
 
 `logical_bytes` is computed when backing data is committed:
 
-- for `log`, it is the sum of stdout and stderr file lengths;
+- for `log`, it is the sum of the evidence file and raw capture lengths;
+- for `test_log`, it is the private snapshot plus redacted evidence length;
 - for normalized views, it is the sum of the redacted serialized record byte
   lengths before database insertion; and
 - for `summary`, it is the compact serialized summary and metadata size.
@@ -403,7 +414,7 @@ The runner performs terminal processing in this order:
    manifest commit.
 5. Compute the compact summary, item/byte counts, and retention plan.
 6. Atomically commit terminal invocation state, termination information,
-   compact summary, normalized-row visibility, and all seven manifest rows.
+   compact summary, normalized-row visibility, and all eight manifest rows.
 7. Purge nonretained view evidence and working evidence.
 8. Notify the GC worker and build the model-visible result from the latest
    manifest snapshot.
@@ -673,7 +684,7 @@ specification does not silently truncate raw capture needed by reduction.
 
 Add counters and histograms for:
 
-- capture bytes by `stdout`, `stderr`, and `bep`;
+- aggregate process-output capture bytes and BEP capture bytes;
 - logical retained bytes by view and outcome class;
 - purged bytes by evidence kind and reason;
 - view decisions by availability, view, and outcome class;
@@ -718,7 +729,8 @@ filter values, cursor contents, raw text, or other unbounded cardinality.
 - Replace string inspect hints with `InvocationView`.
 - Commit terminal state and the complete manifest at one visibility point.
 - Gate inspection before cursor decoding or evidence access.
-- Return structured availability and fix `log` to cover both streams.
+- Return structured availability and derive encoding-neutral `log` evidence
+  from both streams without exposing stream identity.
 - Notify GC after terminal transitions without owning storage policy.
 
 ### `bazel-mcp-server`
@@ -744,7 +756,7 @@ crates. No reducer becomes nondeterministic or filesystem-aware.
 
 ### Policy tests
 
-- Every command family and terminal state produces exactly seven decisions.
+- Every command family and terminal state produces exactly eight decisions.
 - Successful log retention requires a typed deterministic fallback fact.
 - Empty normalized views are never advertised.
 - Zero successful or unsuccessful TTL produces `not_retained`.
@@ -755,10 +767,12 @@ crates. No reducer becomes nondeterministic or filesystem-aware.
 ### Store integration tests
 
 - Migration 0006 upgrades databases containing migrations 0001 through 0005.
-- Terminal state and all seven manifest rows become visible atomically.
+- Terminal state and all eight manifest rows become visible atomically.
 - An available manifest row always has complete backing evidence.
 - Each normalized view purge deletes only its own rows.
-- Log purge removes both streams and leaves summary metadata intact.
+- Log purge removes both raw streams and normalized log evidence while leaving
+  summary metadata and failed-test snapshots intact.
+- Test-log purge removes both its private raw snapshot and redacted evidence.
 - BEP and duplicate intermediate files are purged after terminal reduction.
 - `expired`, `evicted`, and `not_retained` survive restart.
 - A crash after the logical manifest transition but before file deletion is
@@ -789,7 +803,10 @@ crates. No reducer becomes nondeterministic or filesystem-aware.
   structured availability, never a missing-file error.
 - An unexpectedly deleted retained file returns `unavailable` and records an
   integrity metric.
-- `log` inspection includes both nonempty streams with source identification.
+- `log` inspection incorporates both nonempty streams but returns only strings,
+  with no source identification or selector.
+- Failed-test snapshots remain immutable across later invocations and
+  `test_log` pagination never reads mutable workspace output paths.
 - Text, TOON, structured, and both result encodings have the same logical
   availability fields and byte ceilings.
 - Synchronous, legacy-task, and extension-task result builders derive identical
@@ -864,7 +881,7 @@ This specification is complete when:
 
 - Specification 001's blanket raw-evidence and BEP-retention language is
   amended as described here.
-- Every terminal invocation has exactly seven durable view-manifest rows.
+- Every terminal invocation has exactly eight durable view-manifest rows.
 - `bazel.run` advertises only currently available, actually backed views.
 - `more_available` and `inspect_hint` agree with the manifest.
 - Expected view unavailability returns the specified normal structured result.

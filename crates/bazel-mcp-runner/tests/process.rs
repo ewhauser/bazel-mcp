@@ -6,6 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bazel_mcp_bep::proto::{
+    BuildEvent, BuildEventId, File, TestResult as BepTestResult, TestSummary as BepTestSummary,
+    build_event, build_event_id, file,
+};
+use bazel_mcp_bep::{encode_event_id, encode_frame};
 use bazel_mcp_policy::PolicyConfig;
 use bazel_mcp_runner::{InspectRequest, InspectView, InvocationService, RunnerConfig};
 use bazel_mcp_store::Store;
@@ -16,6 +21,53 @@ use bazel_mcp_types::{
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+fn failed_test_bep(log_uri: &str, xml_uri: &str) -> Vec<u8> {
+    let output = |name: &str, uri: &str| File {
+        name: name.to_owned(),
+        file: Some(file::File::Uri(uri.to_owned())),
+        ..Default::default()
+    };
+    let result = BuildEvent {
+        id: encode_event_id(&BuildEventId {
+            id: Some(build_event_id::Id::TestResult(Box::new(
+                build_event_id::TestResultId {
+                    label: "//pkg:failing".into(),
+                    run: 1,
+                    attempt: 1,
+                    ..Default::default()
+                },
+            ))),
+        }),
+        payload: Some(build_event::Payload::TestResult(Box::new(BepTestResult {
+            test_action_output: vec![output("test.log", log_uri), output("test.xml", xml_uri)],
+            status: 4,
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let summary = BuildEvent {
+        id: encode_event_id(&BuildEventId {
+            id: Some(build_event_id::Id::TestSummary(Box::new(
+                build_event_id::TestSummaryId {
+                    label: "//pkg:failing".into(),
+                    ..Default::default()
+                },
+            ))),
+        }),
+        payload: Some(build_event::Payload::TestSummary(Box::new(
+            BepTestSummary {
+                failed: vec![output("test.log", log_uri)],
+                overall_status: 4,
+                total_run_duration_millis: 12,
+                attempt_count: 1,
+                ..Default::default()
+            },
+        ))),
+        ..Default::default()
+    };
+    [encode_frame(&result), encode_frame(&summary)].concat()
+}
 
 async fn wait_for_path(path: &Path) {
     for _ in 0..500 {
@@ -151,6 +203,19 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
             .unwrap();
         assert!(!serde_json::to_string(&inspected).unwrap().contains(secret));
     }
+    let secret_filter = service
+        .inspect(InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            view: InspectView::Log,
+            cursor: None,
+            filter: Some("SUPERSECRET".into()),
+            limit: 20,
+            max_bytes: 8 * 1024,
+        })
+        .await
+        .unwrap();
+    assert!(secret_filter.items.as_array().unwrap().is_empty());
 
     service
         .store()
@@ -262,6 +327,134 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
         })
         .await;
     assert!(invalid.is_err());
+
+    let filtered = service
+        .inspect(InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            view: InspectView::Log,
+            cursor: None,
+            filter: Some("LINE-150".into()),
+            limit: 20,
+            max_bytes: 1024,
+        })
+        .await
+        .unwrap();
+    assert_eq!(filtered.items.as_array().unwrap().len(), 1);
+    assert!(filtered.items[0].as_str().unwrap().contains("line-150"));
+
+    let unmatched = service
+        .inspect(InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            view: InspectView::Log,
+            cursor: None,
+            filter: Some("not-present".into()),
+            limit: 20,
+            max_bytes: 1024,
+        })
+        .await
+        .unwrap();
+    assert!(unmatched.items.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let output_root = root.path().join("output-user-root");
+    let test_directory = output_root.join("execroot/ws/bazel-out/testlogs/pkg/failing");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&test_directory).await.unwrap();
+    let test_log = test_directory.join("test.log");
+    let test_xml = test_directory.join("test.xml");
+    tokio::fs::write(
+        &test_log,
+        "setup\nassertion error: SNAPSHOT_TEST_ROOT_CAUSE\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        &test_xml,
+        r#"<testsuites><testsuite><testcase name="failing_case" time="0.01"><failure message="expected true"/></testcase></testsuite></testsuites>"#,
+    )
+    .await
+    .unwrap();
+    let bep = root.path().join("failed-test.bep");
+    tokio::fs::write(
+        &bep,
+        failed_test_bep(
+            &format!("file://{}", test_log.display()),
+            &format!("file://{}", test_xml.display()),
+        ),
+    )
+    .await
+    .unwrap();
+    let flag_marker = root.path().join("saw-test-output-errors");
+    let failed_once = root.path().join("failed-once");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --build_event_binary_file=*) bep_path=${{arg#*=}} ;;\n    --test_output=errors) touch '{}' ;;\n  esac\ndone\nif [ -f '{}' ]; then : > \"$bep_path\"; exit 0; fi\ncp '{}' \"$bep_path\"\ntouch '{}'\necho 'SNAPSHOT_TEST_ROOT_CAUSE'\nexit 1\n",
+        flag_marker.display(),
+        failed_once.display(),
+        bep.display(),
+        failed_once.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Test,
+            vec!["//pkg:failing".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failed.state, InvocationState::Failed);
+    assert!(flag_marker.exists());
+    let summary = failed.summary.as_ref().unwrap();
+    assert!(summary.headline.contains("SNAPSHOT_TEST_ROOT_CAUSE"));
+    assert!(summary.tests[0].test_log_available);
+    assert_eq!(summary.tests[0].cases[0].name, "failing_case");
+    assert!(!serde_json::to_string(summary).unwrap().contains("log_uri"));
+
+    let inspected = service
+        .inspect(InspectRequest {
+            invocation_id: Some(failed.request.id),
+            workspace: None,
+            view: InspectView::TestLog,
+            cursor: None,
+            filter: Some("//PKG:FAILING".into()),
+            limit: 20,
+            max_bytes: 8 * 1024,
+        })
+        .await
+        .unwrap();
+    let items = inspected.items.as_array().unwrap();
+    assert!(items.iter().all(serde_json::Value::is_string));
+    assert!(
+        items
+            .iter()
+            .any(|item| item.as_str().unwrap().contains("SNAPSHOT_TEST_ROOT_CAUSE"))
+    );
+
+    let failed_paths = service.store().paths_for(&failed);
+    let retained_before = tokio::fs::read(&failed_paths.test_logs_raw).await.unwrap();
+    assert!(String::from_utf8_lossy(&retained_before).contains("SNAPSHOT_TEST_ROOT_CAUSE"));
+    tokio::fs::remove_file(&flag_marker).await.unwrap();
+    let passing = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Coverage,
+            vec!["//pkg:failing".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(passing.state, InvocationState::Succeeded);
+    assert!(flag_marker.exists());
+    assert_eq!(
+        tokio::fs::read(&failed_paths.test_logs_raw).await.unwrap(),
+        retained_before
+    );
 }
 
 #[tokio::test]
@@ -721,7 +914,7 @@ async fn query_and_informational_commands_return_bounded_initial_evidence() {
             .headline
             .contains("//pkg:first")
     );
-    assert!(informational.metrics.raw_stdout_bytes > 0);
+    assert!(informational.metrics.raw_output_bytes > 0);
 }
 
 #[tokio::test]
@@ -775,7 +968,8 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
             attempts: 1,
             shard: None,
             cases,
-            log_uri: None,
+            test_log_available: false,
+            test_log_unavailable_reason: Some("test_log_not_found".into()),
         }],
         ..InvocationSummary::default()
     };
@@ -806,6 +1000,22 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
         assert!(result.truncated);
         assert!(serde_json::to_vec(&result).unwrap().len() <= 8 * 1024);
     }
+    let unavailable = service
+        .inspect(InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            view: InspectView::TestLog,
+            cursor: None,
+            filter: Some("//PKG:TEST".into()),
+            limit: 20,
+            max_bytes: 8 * 1024,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        unavailable.items,
+        serde_json::json!(["//pkg:test: test_log_not_found"])
+    );
 }
 
 #[tokio::test]

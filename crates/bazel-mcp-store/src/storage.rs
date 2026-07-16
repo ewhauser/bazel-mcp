@@ -910,7 +910,7 @@ impl Store {
         let mut reclaimed = 0;
         let mut processed = BTreeSet::new();
         for (id, finished, protected) in &candidates {
-            if *finished < cutoff {
+            if retention_age_elapsed(*finished, cutoff) {
                 if self.reclaim_terminal(*id, *protected).await? {
                     reclaimed += 1;
                 }
@@ -1141,6 +1141,7 @@ impl Store {
         let path = self.paths_for_id(id).stdout;
         let filter = filter.map(str::to_owned);
         let limit = page.limit.clamp(1, 100) as usize;
+        let maximum_bytes = page.max_bytes.unwrap_or(usize::MAX);
         tokio::task::spawn_blocking(move || {
             page_query_file(
                 &path,
@@ -1150,6 +1151,7 @@ impl Store {
                     start_offset,
                     start_ordinal,
                     limit,
+                    maximum_bytes,
                     known_total,
                 },
                 transform,
@@ -1351,8 +1353,11 @@ async fn evidence_payload_size(paths: &InvocationPaths) -> Result<u64, StoreErro
         &paths.details,
         &paths.stdout,
         &paths.stderr,
+        &paths.evidence,
         &paths.bep,
         &paths.artifacts,
+        &paths.test_logs_raw,
+        &paths.test_log_evidence,
     ] {
         match tokio::fs::symlink_metadata(path).await {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -1373,8 +1378,11 @@ async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
         &paths.details,
         &paths.stdout,
         &paths.stderr,
+        &paths.evidence,
         &paths.bep,
         &paths.artifacts,
+        &paths.test_logs_raw,
+        &paths.test_log_evidence,
     ] {
         match tokio::fs::symlink_metadata(path).await {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -1464,6 +1472,9 @@ fn load_index_blocking(cache_root: &Path) -> Result<(Index, StoreStartupStats), 
                     expected.manifest.with_extension("tmp"),
                     expected.details.with_extension("tmp"),
                     expected.artifacts.with_extension("tmp"),
+                    expected.evidence.with_extension("tmp"),
+                    expected.test_logs_raw.with_extension("tmp"),
+                    expected.test_log_evidence.with_extension("tmp"),
                 ] {
                     let _ = std::fs::remove_file(temporary);
                 }
@@ -1529,8 +1540,11 @@ fn evidence_payload_size_blocking(paths: &InvocationPaths) -> Result<u64, StoreE
         &paths.details,
         &paths.stdout,
         &paths.stderr,
+        &paths.evidence,
         &paths.bep,
         &paths.artifacts,
+        &paths.test_logs_raw,
+        &paths.test_log_evidence,
     ] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -1582,6 +1596,10 @@ async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<(),
     Ok(())
 }
 
+fn retention_age_elapsed(finished_at_ms: i64, cutoff_ms: i64) -> bool {
+    finished_at_ms <= cutoff_ms
+}
+
 async fn rename_to_trash(
     cache_root: &Path,
     id: InvocationId,
@@ -1612,7 +1630,15 @@ async fn stage_raw_evidence(
     }
     tokio::fs::create_dir(&trash).await?;
     set_private_directory(&trash).await?;
-    for source in [&paths.stdout, &paths.stderr, &paths.bep, &paths.artifacts] {
+    for source in [
+        &paths.stdout,
+        &paths.stderr,
+        &paths.evidence,
+        &paths.bep,
+        &paths.artifacts,
+        &paths.test_logs_raw,
+        &paths.test_log_evidence,
+    ] {
         let Some(name) = source.file_name() else {
             continue;
         };
@@ -1665,9 +1691,11 @@ fn page_records<T, F>(
     searchable: F,
 ) -> Result<(Page<T>, u64, u64), StoreError>
 where
+    T: Serialize,
     F: Fn(&T) -> String,
 {
     let limit = page.limit.clamp(1, 100) as usize;
+    let maximum_bytes = page.max_bytes.unwrap_or(usize::MAX);
     let invocation_id = id.to_string();
     let after = page
         .cursor
@@ -1675,41 +1703,57 @@ where
         .map(|value| OrdinalCursor::decode_for(value, scope, &invocation_id, filter))
         .transpose()?
         .map_or(-1, |cursor| cursor.ordinal);
+    let normalized_filter = filter.map(str::to_ascii_lowercase);
     let total = records.len() as u64;
     let filtered = records
         .iter()
-        .filter(|record| filter.is_none_or(|filter| searchable(record).contains(filter)))
-        .count() as u64;
-    let mut selected: Vec<_> = records
-        .into_iter()
-        .enumerate()
-        .filter(|(ordinal, record)| {
-            i64::try_from(*ordinal).unwrap_or(i64::MAX) > after
-                && filter.is_none_or(|filter| searchable(record).contains(filter))
+        .filter(|record| {
+            normalized_filter
+                .as_ref()
+                .is_none_or(|filter| searchable(record).to_ascii_lowercase().contains(filter))
         })
-        .take(limit + 1)
-        .collect();
-    let truncated = selected.len() > limit;
-    selected.truncate(limit);
+        .count() as u64;
+    let mut selected = Vec::new();
+    let mut used_bytes = 2_usize;
+    let mut last_ordinal = None;
+    let mut truncated = false;
+    for (ordinal, record) in records.into_iter().enumerate() {
+        let ordinal = i64::try_from(ordinal).unwrap_or(i64::MAX);
+        if ordinal <= after
+            || !normalized_filter
+                .as_ref()
+                .is_none_or(|filter| searchable(&record).to_ascii_lowercase().contains(filter))
+        {
+            continue;
+        }
+        let item_bytes = serde_json::to_vec(&record)?.len();
+        let separator = usize::from(!selected.is_empty());
+        if selected.len() == limit
+            || (!selected.is_empty()
+                && used_bytes
+                    .saturating_add(separator)
+                    .saturating_add(item_bytes)
+                    > maximum_bytes)
+        {
+            truncated = true;
+            break;
+        }
+        used_bytes = used_bytes
+            .saturating_add(separator)
+            .saturating_add(item_bytes);
+        last_ordinal = Some(ordinal);
+        selected.push(record);
+    }
     let next_cursor = if truncated {
-        selected
-            .last()
-            .map(|(ordinal, _)| {
-                OrdinalCursor::new(
-                    scope,
-                    &invocation_id,
-                    filter,
-                    i64::try_from(*ordinal).unwrap_or(i64::MAX),
-                )
-                .encode()
-            })
+        last_ordinal
+            .map(|ordinal| OrdinalCursor::new(scope, &invocation_id, filter, ordinal).encode())
             .transpose()?
     } else {
         None
     };
     Ok((
         Page {
-            items: selected.into_iter().map(|(_, record)| record).collect(),
+            items: selected,
             next_cursor,
             truncated,
         },
@@ -1722,6 +1766,7 @@ struct QueryFilePage {
     start_offset: u64,
     start_ordinal: u64,
     limit: usize,
+    maximum_bytes: usize,
     known_total: Option<u64>,
 }
 
@@ -1756,33 +1801,47 @@ where
         } else {
             count_query_rows(&file)?
         };
-        return page_unfiltered_query_file(
-            file,
-            invocation_id,
-            request.start_offset,
-            request.start_ordinal,
-            request.limit,
-            total,
-            transform,
-        );
+        return page_unfiltered_query_file(file, invocation_id, request, total, transform);
     }
     let mut reader = BoundedLineReader::new(BufReader::new(file), QUERY_LINE_LIMIT);
     let mut total = 0_u64;
     let mut filtered = 0_u64;
-    let mut selected = Vec::with_capacity(request.limit + 1);
+    let normalized_filter = filter.map(str::to_ascii_lowercase);
+    let mut selected = Vec::with_capacity(request.limit);
+    let mut used_bytes = 2_usize;
+    let mut truncated = false;
     while let Some(mut line) = reader.next_line()? {
         total = total.saturating_add(1);
         line.value = transform(&line.value);
-        let matches = filter.is_none_or(|filter| line.value.contains(filter));
+        let matches = normalized_filter
+            .as_ref()
+            .is_none_or(|filter| line.value.to_ascii_lowercase().contains(filter));
         if matches {
             filtered = filtered.saturating_add(1);
-            if line.start_offset >= request.start_offset && selected.len() <= request.limit {
-                selected.push(line);
+            if line.start_offset >= request.start_offset && !truncated {
+                let item_bytes = serde_json::to_vec(&QueryRow {
+                    ordinal: line.ordinal,
+                    value: line.value.clone(),
+                })?
+                .len();
+                let separator = usize::from(!selected.is_empty());
+                if selected.len() == request.limit
+                    || (!selected.is_empty()
+                        && used_bytes
+                            .saturating_add(separator)
+                            .saturating_add(item_bytes)
+                            > request.maximum_bytes)
+                {
+                    truncated = true;
+                } else {
+                    used_bytes = used_bytes
+                        .saturating_add(separator)
+                        .saturating_add(item_bytes);
+                    selected.push(line);
+                }
             }
         }
     }
-    let truncated = selected.len() > request.limit;
-    selected.truncate(request.limit);
     let next_cursor = if truncated {
         selected
             .last()
@@ -1845,9 +1904,7 @@ fn count_query_rows(mut file: &File) -> Result<u64, StoreError> {
 fn page_unfiltered_query_file<F>(
     mut file: File,
     invocation_id: &str,
-    start_offset: u64,
-    start_ordinal: u64,
-    limit: usize,
+    request: QueryFilePage,
     total: u64,
     transform: F,
 ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
@@ -1856,23 +1913,39 @@ where
 {
     use std::io::{Seek, SeekFrom};
 
-    file.seek(SeekFrom::Start(start_offset))?;
+    file.seek(SeekFrom::Start(request.start_offset))?;
     let mut reader = BoundedLineReader::with_position(
         BufReader::new(file),
         QUERY_LINE_LIMIT,
-        start_offset,
-        start_ordinal,
+        request.start_offset,
+        request.start_ordinal,
     );
-    let mut selected = Vec::with_capacity(limit + 1);
-    while selected.len() <= limit {
-        let Some(mut line) = reader.next_line()? else {
-            break;
-        };
+    let mut selected = Vec::with_capacity(request.limit);
+    let mut used_bytes = 2_usize;
+    let mut truncated = false;
+    while let Some(mut line) = reader.next_line()? {
         line.value = transform(&line.value);
+        let item_bytes = serde_json::to_vec(&QueryRow {
+            ordinal: line.ordinal,
+            value: line.value.clone(),
+        })?
+        .len();
+        let separator = usize::from(!selected.is_empty());
+        if selected.len() == request.limit
+            || (!selected.is_empty()
+                && used_bytes
+                    .saturating_add(separator)
+                    .saturating_add(item_bytes)
+                    > request.maximum_bytes)
+        {
+            truncated = true;
+            break;
+        }
+        used_bytes = used_bytes
+            .saturating_add(separator)
+            .saturating_add(item_bytes);
         selected.push(line);
     }
-    let truncated = selected.len() > limit;
-    selected.truncate(limit);
     let next_cursor = if truncated {
         selected
             .last()
@@ -2171,6 +2244,7 @@ mod tests {
                 PageRequest {
                     cursor: None,
                     limit: 10,
+                    max_bytes: None,
                 },
             )
             .await
@@ -2220,6 +2294,7 @@ mod tests {
                 PageRequest {
                     cursor: None,
                     limit: 1,
+                    max_bytes: None,
                 },
             )
             .await
@@ -2234,11 +2309,79 @@ mod tests {
                 PageRequest {
                     cursor: first.0.next_cursor,
                     limit: 1,
+                    max_bytes: None,
                 },
             )
             .await
             .unwrap();
         assert_eq!(second.0.items[0].ordinal, 2);
+    }
+
+    #[tokio::test]
+    async fn serialized_byte_packing_preserves_limit_filter_and_cursor_continuity() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        let contents = (0..5)
+            .map(|ordinal| format!("ROW_{ordinal}_{}\n", "x".repeat(80)))
+            .collect::<String>();
+        tokio::fs::write(&paths.stdout, contents).await.unwrap();
+
+        let mut cursor = None;
+        let mut ordinals = Vec::new();
+        loop {
+            let (page, _, _) = store
+                .page_query_rows(
+                    id,
+                    None,
+                    PageRequest {
+                        cursor,
+                        limit: 100,
+                        max_bytes: Some(120),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.items.len(), 1);
+            ordinals.extend(page.items.iter().map(|row| row.ordinal));
+            cursor = page.next_cursor;
+            if !page.truncated {
+                break;
+            }
+        }
+        assert_eq!(ordinals, vec![0, 1, 2, 3, 4]);
+
+        let (requested, _, _) = store
+            .page_query_rows(
+                id,
+                None,
+                PageRequest {
+                    cursor: None,
+                    limit: 3,
+                    max_bytes: Some(8 * 1024),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(requested.items.len(), 3);
+        assert!(requested.truncated);
+
+        let (filtered, _, filtered_count) = store
+            .page_query_rows(
+                id,
+                Some("row_3"),
+                PageRequest {
+                    cursor: None,
+                    limit: 100,
+                    max_bytes: Some(8 * 1024),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered_count, 1);
+        assert_eq!(filtered.items[0].ordinal, 3);
     }
 
     #[tokio::test]
@@ -2261,6 +2404,7 @@ mod tests {
                 PageRequest {
                     cursor: None,
                     limit: 3,
+                    max_bytes: None,
                 },
                 move |value| {
                     observed.fetch_add(1, AtomicOrdering::Relaxed);
@@ -2291,6 +2435,7 @@ mod tests {
                 PageRequest {
                     cursor: None,
                     limit: 2,
+                    max_bytes: None,
                 },
             )
             .await
@@ -2305,6 +2450,7 @@ mod tests {
                 PageRequest {
                     cursor: first.next_cursor,
                     limit: 2,
+                    max_bytes: None,
                 },
             )
             .await
@@ -2347,7 +2493,8 @@ mod tests {
                 attempts: 1,
                 shard: None,
                 cases: Vec::new(),
-                log_uri: None,
+                test_log_available: false,
+                test_log_unavailable_reason: None,
             }],
             test_counts: TestCounts {
                 passed: 1,
@@ -2791,6 +2938,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_removes_invocation_owned_failed_test_snapshots() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = InvocationRecord::queued(InvocationRequest::new(
+            root.path().to_owned(),
+            BazelCommand::Test,
+            vec!["//pkg:failing".into()],
+        ));
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        store
+            .transition(id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        tokio::fs::write(&paths.test_logs_raw, b"complete private failure log")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &paths.test_log_evidence,
+            b"{\"label\":\"//pkg:failing\",\"text\":\"assertion failed\"}\n",
+        )
+        .await
+        .unwrap();
+        store
+            .transition(
+                id,
+                InvocationState::Failed,
+                Some(Termination::Exit { code: 1 }),
+                Some(InvocationSummary::default()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .enforce_retention(Duration::ZERO, u64::MAX)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!paths.directory.exists());
+        assert!(matches!(
+            store.get_invocation(id).await,
+            Err(StoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn retention_age_cutoff_is_inclusive() {
+        assert!(retention_age_elapsed(42, 42));
+        assert!(retention_age_elapsed(41, 42));
+        assert!(!retention_age_elapsed(43, 42));
+    }
+
+    #[tokio::test]
     async fn corrupt_committed_records_fail_closed_without_overwriting_evidence() {
         let root = TempDir::new().unwrap();
         let store = Store::open(root.path()).await.unwrap();
@@ -2835,7 +3041,8 @@ mod tests {
                             attempts: 1,
                             shard: None,
                             cases: Vec::new(),
-                            log_uri: None,
+                            test_log_available: false,
+                            test_log_unavailable_reason: None,
                         }],
                         ..InvocationSummary::default()
                     },
@@ -2904,6 +3111,7 @@ mod tests {
                 PageRequest {
                     cursor: None,
                     limit: 3,
+                    max_bytes: None,
                 },
             )
             .await

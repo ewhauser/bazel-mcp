@@ -16,8 +16,15 @@ pub struct InvocationPaths {
     pub details: PathBuf,
     pub stdout: PathBuf,
     pub stderr: PathBuf,
+    /// Redacted, normalized, encoding-neutral failure evidence used by the
+    /// public `log` inspection view.
+    pub evidence: PathBuf,
     pub bep: PathBuf,
     pub artifacts: PathBuf,
+    /// Immutable raw snapshot of failed-test logs.
+    pub test_logs_raw: PathBuf,
+    /// Redacted line records used by the `test_log` inspection view.
+    pub test_log_evidence: PathBuf,
 }
 
 impl InvocationPaths {
@@ -39,8 +46,11 @@ impl InvocationPaths {
             details: directory.join("details.json"),
             stdout: directory.join("stdout.log"),
             stderr: directory.join("stderr.log"),
+            evidence: directory.join("failure-evidence.jsonl"),
             bep: directory.join("events.bep"),
             artifacts: directory.join("artifacts.json"),
+            test_logs_raw: directory.join("failed-test-logs.raw"),
+            test_log_evidence: directory.join("failed-test-evidence.jsonl"),
             directory,
         }
     }

@@ -244,13 +244,14 @@ The logical result contains:
   },
   "diagnostics": [
     {
+      "severity": "error",
+      "category": "test",
+      "message": "expected 3, received 4",
       "target": "//foo:foo_test",
-      "kind": "test_failure",
-      "summary": "expected 3, received 4",
-      "source": "bazel://invocations/019.../tests/foo_test"
+      "repetition_count": 1
     }
   ],
-  "available_views": ["diagnostics", "tests", "artifacts", "log"],
+  "available_views": ["diagnostics", "tests", "test_log", "artifacts", "log"],
   "more_available": true
 }
 ```
@@ -280,7 +281,7 @@ Read a filtered, paginated view of one invocation.
 | Field | Required | Type | Requirements |
 | --- | --- | --- | --- |
 | `invocation_id` | Yes | UUID string | Must identify a retained invocation. |
-| `view` | Yes | Enum | One of `summary`, `diagnostics`, `tests`, `coverage`, `artifacts`, `query_results`, or `log`. |
+| `view` | Yes | Enum | One of `summary`, `diagnostics`, `tests`, `test_log`, `coverage`, `artifacts`, `query_results`, or `log`. |
 | `filter` | No | String | Label glob or literal substring, depending on view; not an arbitrary regular expression. |
 | `limit` | No | Integer | Defaults to 20; range 1 through 100. |
 | `cursor` | No | Opaque string | Continues a prior view using stable server-side ordering. |
@@ -302,15 +303,18 @@ View requirements:
 - `diagnostics` returns reduced analysis, loading, action, and compiler failures.
 - `tests` returns target, run, shard, attempt, status, duration, cache status, and
   bounded failure details.
+- `test_log` returns redacted strings from invocation-owned snapshots of failed
+  test logs. A label filter selects a test without exposing a filesystem URI.
 - `coverage` returns per-file LCOV summaries when a local coverage artifact is
   available and otherwise returns artifact references plus an explicit
   availability reason.
 - `artifacts` resolves BEP `NamedSetOfFiles` references and returns bounded file
   metadata without reading artifact contents.
 - `query_results` returns stored query rows using stable pagination.
-- `log` returns a bounded logical page of captured stdout or stderr. It MUST NOT
-  return an entire unbounded file. The default is the combined failure-oriented
-  tail.
+- `log` returns `items` as a bounded array of redacted strings selected from
+  normalized failure evidence. Stream choice, sequencing, and cursors are
+  internal; the public MCP shape has no stdout/stderr selector or source field.
+  Actionable, deduplicated lines precede a bounded fallback tail.
 
 ### 8.3 `bazel.cancel`
 
@@ -339,8 +343,9 @@ Cancel a queued or running invocation.
 
 ### 8.4 MCP resources
 
-Tools MAY return `bazel://` resource links for stored details. Resource links are
-references, not a mechanism for bypassing response limits. Any `read_resource`
+Tools MAY return `bazel://` resource links for stored details. Failed-test logs
+use the `test_log` inspect view instead of a synthetic or local-file URI.
+Resource links are references, not a mechanism for bypassing response limits. Any `read_resource`
 implementation MUST enforce the same filtering, pagination, permissions, and
 byte ceilings as `bazel.inspect`.
 
@@ -442,7 +447,7 @@ For test-like commands, the server additionally applies terminal-output policy
 equivalent to:
 
 ```text
---test_output=summary
+--test_output=errors
 --test_summary=none
 ```
 
@@ -596,16 +601,18 @@ The parser MUST tolerate:
 
 ### 14.1 Diagnostic priority
 
-The default failure response selects evidence in this order:
+The default failure response selects evidence in this order, before applying
+item or byte limits:
 
 1. Loading or analysis `Aborted` events and structured failure details.
-2. Failed root-cause actions and their target labels.
-3. The first actionable compiler or tool error from each failed root-cause
-   action.
-4. Failed test cases or bounded failed-test log excerpts.
-5. A bounded stderr tail when structured evidence is absent.
+2. Concrete actionable compiler, tool, and loading errors.
+3. Failed test cases or bounded failed-test log excerpts.
+4. Other failure text and structured Bazel failures.
+5. Aggregated action-failure summaries.
 
-The response SHOULD favor root causes over cascading target failures.
+Equivalent action failures across targets are one diagnostic with `target: null`
+and an incremented `repetition_count`. The response SHOULD favor root causes
+over cascading target failures.
 
 ### 14.2 Text normalization
 
@@ -625,7 +632,6 @@ diagnostics that may refer to different source locations.
 ### 14.3 Default diagnostic limits
 
 - At most 20 diagnostics per `bazel.run` response.
-- At most two text diagnostics per failed action before global selection.
 - At most 1,000 UTF-8 bytes per diagnostic item.
 - At most two lines of leading and trailing context unless necessary to include
   a source location or explicit cause.
@@ -638,8 +644,12 @@ diagnostics that may refer to different source locations.
 - Aggregate passed, failed, flaky, skipped, incomplete, and cached test counts.
 - Preserve run, shard, and attempt identity.
 - Prefer structured `test.xml` failure names and messages when locally
-  available.
-- Fall back to a bounded `test.log` excerpt.
+  available, accepting both `<testsuite>` and `<testsuites>` roots.
+- Fall back to a bounded, deterministic `test.log` excerpt and always emit an
+  actionable diagnostic for a failed, timed-out, or incomplete test.
+- Snapshot complete failed-test logs into private invocation storage before
+  workspace output paths can be reused. Expose only redacted, paginated strings
+  through `view=test_log`, with explicit unavailability reasons.
 - Never include logs for passing tests in the default result.
 - `include_all_results` is intentionally not part of `bazel.run`; callers use
   the paginated `tests` view instead.
@@ -678,6 +688,9 @@ All limits apply to the serialized model-visible tool result, before MCP framing
 - Byte ceilings take precedence over item limits.
 - Every response stopped by a ceiling sets `truncated: true` and, when possible,
   returns a continuation cursor.
+- `limit` is a maximum, not a target. Page packing measures serialized records;
+  a continuation cursor encodes the last emitted record so a smaller byte
+  budget cannot create duplicates or gaps.
 - No default result includes base64 data, artifact contents, a complete BEP
   event, or a complete raw log.
 - Tool descriptions and JSON schemas SHOULD remain concise because tool
@@ -700,8 +713,11 @@ There is no embedded or hosted database.
       details.json
       stdout.log
       stderr.log
+      failure-evidence.jsonl
       events.bep
       artifacts.json
+      failed-test-logs.raw
+      failed-test-evidence.jsonl
 ```
 
 The exact platform cache root is configurable. It defaults to an OS-appropriate
@@ -853,8 +869,7 @@ may use the generic bounded-text adapter only when explicitly configured.
 
 For every invocation, record:
 
-- Raw stdout bytes
-- Raw stderr bytes
+- Aggregate raw process-output bytes (stream identity remains internal)
 - BEP bytes and event count
 - Model-visible result bytes
 - Number of progress notifications

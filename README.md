@@ -109,6 +109,35 @@ and selected informational commands. Successful results are limited to 2 KiB
 and unsuccessful results to 8 KiB. Follow-up `bazel.inspect` calls are also
 bounded and paginated, so an agent only retrieves the evidence it needs.
 
+Failure results rank concrete root causes before aggregated action failures.
+Equivalent fanout failures are represented once with `target: null` and a
+`repetition_count`. Test and coverage commands use Bazel's
+`--test_output=errors`. Failed-test logs are copied into private invocation
+storage before they are exposed; test results report `test_log_available` or an
+explicit `test_log_unavailable_reason`, never a synthetic or local failure-log
+URI.
+
+The `summary` view returns structured counts and bounded diagnostics. The `log`
+and `test_log` views deliberately have the simpler logical shape below in every
+result encoding:
+
+```json
+{
+  "invocation_id": "019...",
+  "view": "test_log",
+  "items": [
+    "[//foo:foo_test] assertion error: expected 3, received 4"
+  ],
+  "next_cursor": null,
+  "truncated": false
+}
+```
+
+The MCP shape has no stdout/stderr field or selector. The server automatically
+normalizes, redacts, exactly deduplicates, filters, and sequences both captured
+streams. Requested item limits are maxima; serialized byte packing may return
+fewer items with an opaque cursor that resumes after the last emitted item.
+
 Long calls can be returned as durable task handles when the MCP client declares
 task support. With the default `auto` policy, the server discovers the
 negotiated protocol and chooses synchronous execution, MCP `2025-11-25` legacy

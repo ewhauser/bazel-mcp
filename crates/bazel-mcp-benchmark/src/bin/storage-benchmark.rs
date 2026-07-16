@@ -656,6 +656,7 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
             PageRequest {
                 cursor: None,
                 limit: 3,
+                max_bytes: None,
             },
         )
         .await?;
@@ -685,6 +686,7 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
             PageRequest {
                 cursor: None,
                 limit: 100,
+                max_bytes: None,
             },
         )
         .await?;
@@ -703,6 +705,7 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
             PageRequest {
                 cursor: page.next_cursor,
                 limit: 100,
+                max_bytes: None,
             },
         )
         .await?;
@@ -725,6 +728,7 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
             PageRequest {
                 cursor: None,
                 limit: 100,
+                max_bytes: None,
             },
         )
         .await?;
@@ -797,7 +801,8 @@ async fn benchmark_terminal(query_count_and_finalize_ms: f64) -> anyhow::Result<
             attempts: 1,
             shard: None,
             cases: Vec::new(),
-            log_uri: None,
+            test_log_available: false,
+            test_log_unavailable_reason: None,
         })
         .collect();
     let started = Instant::now();
