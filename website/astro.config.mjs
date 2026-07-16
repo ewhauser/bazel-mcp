@@ -58,6 +58,10 @@ export default defineConfig({
             { label: 'Tools', slug: 'tools' },
             { label: 'Debug a failure', slug: 'guides/debugging-failures' },
             { label: 'Long-running builds', slug: 'guides/long-running-builds' },
+            {
+              label: 'Write a Starlark reducer',
+              slug: 'guides/writing-starlark-reducers',
+            },
           ],
         },
         {
