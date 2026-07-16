@@ -145,6 +145,7 @@ struct PreparedSubmission {
 #[serde(rename_all = "snake_case")]
 pub enum InspectView {
     Summary,
+    Metrics,
     Diagnostics,
     Tests,
     TestLog,
@@ -848,6 +849,17 @@ impl InvocationService {
                         .as_ref()
                         .is_some_and(|summary| summary.truncated),
                 )
+            }
+            InspectView::Metrics => {
+                let items = vec![serde_json::json!({
+                    "state": record.state,
+                    "requested_at_ms": record.request.requested_at_ms,
+                    "started_at_ms": record.started_at_ms,
+                    "finished_at_ms": record.finished_at_ms,
+                    "termination": record.termination,
+                    "metrics": record.metrics,
+                })];
+                (serde_json::to_value(items)?, Some(1), Some(1), None, false)
             }
             InspectView::Diagnostics => {
                 let (page, total, filtered) = self

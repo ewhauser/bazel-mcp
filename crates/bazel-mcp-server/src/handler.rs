@@ -68,7 +68,7 @@ pub struct InspectParams {
     pub state: Option<String>,
     /// Optional Bazel command used to filter retained invocation listings.
     pub command: Option<String>,
-    /// summary, diagnostics, tests, coverage, artifacts, query_results, log, test_log, or invocations.
+    /// summary, metrics, diagnostics, tests, coverage, artifacts, query_results, log, test_log, or invocations.
     pub view: String,
     /// Optional literal substring or label glob filter.
     pub filter: Option<String>,
@@ -230,6 +230,7 @@ impl BazelMcpServer {
     ) -> Result<CallToolResult, String> {
         let view = match params.view.as_str() {
             "summary" => InspectView::Summary,
+            "metrics" => InspectView::Metrics,
             "diagnostics" => InspectView::Diagnostics,
             "tests" => InspectView::Tests,
             "log" => InspectView::Log,
@@ -379,6 +380,7 @@ impl BazelMcpServer {
                     || query_sample_count < summary.query_sample.len(),
                 available_views: &[
                     "summary",
+                    "metrics",
                     "diagnostics",
                     "tests",
                     "test_log",
@@ -1337,6 +1339,27 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
         assert_eq!(value["items"].as_array().unwrap().len(), 1);
         assert_eq!(value["items"][0]["request"]["command"], "build");
+
+        let result = server
+            .bazel_inspect(Parameters(InspectParams {
+                invocation_id: Some(id.to_string()),
+                workspace: None,
+                state: None,
+                command: None,
+                view: "metrics".to_owned(),
+                filter: None,
+                limit: Some(20),
+                max_bytes: Some(2_048),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("metrics result did not contain one text block");
+        };
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["view"], "metrics");
+        assert_eq!(value["items"][0]["state"], "failed");
     }
 
     #[test]
