@@ -712,6 +712,21 @@ impl Store {
         Ok(())
     }
 
+    pub async fn flush_pending_telemetry(&self) -> Result<usize, StoreError> {
+        let ids = {
+            let index = self.inner.index.read().await;
+            index
+                .entries
+                .iter()
+                .filter_map(|(id, entry)| entry.telemetry_flush_scheduled.then_some(*id))
+                .collect::<Vec<_>>()
+        };
+        for id in &ids {
+            while !self.flush_telemetry_once(*id).await? {}
+        }
+        Ok(ids.len())
+    }
+
     fn schedule_telemetry_flush(&self, id: InvocationId) {
         let inner = Arc::downgrade(&self.inner);
         let cache_root = self.cache_root.clone();
@@ -2743,6 +2758,30 @@ mod tests {
         assert_eq!(durable.metrics.model_visible_bytes, 1_000);
         assert_eq!(durable.metrics.inspect_calls, 100);
         assert_eq!(durable.metrics.progress_notifications, 7);
+    }
+
+    #[tokio::test]
+    async fn pending_telemetry_can_be_flushed_before_shutdown() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        succeed(&store, id).await;
+        let before = store.io_stats().manifest_commits;
+        store
+            .record_model_visible_result(id, 321, true)
+            .await
+            .unwrap();
+        assert_eq!(store.io_stats().manifest_commits, before);
+        assert_eq!(store.flush_pending_telemetry().await.unwrap(), 1);
+        assert_eq!(store.io_stats().manifest_commits, before + 1);
+        drop(store);
+
+        let reopened = Store::open(root.path()).await.unwrap();
+        let durable = reopened.get_invocation(id).await.unwrap();
+        assert_eq!(durable.metrics.model_visible_bytes, 321);
+        assert_eq!(durable.metrics.inspect_calls, 1);
     }
 
     #[tokio::test]
