@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Read},
+    io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -12,17 +12,13 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::{
-    io::{Seek, Write},
-    os::unix::{fs::FileTypeExt, fs::OpenOptionsExt},
-};
+use std::os::unix::{fs::FileTypeExt, fs::OpenOptionsExt};
 
-#[cfg(unix)]
-use bazel_mcp_bep::IncrementalStreamControl;
 use bazel_mcp_bep::{
     DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, DEFAULT_MAX_STREAM_EVENTS,
-    IncrementalStreamDecoder, StreamOutcome, visit_stream_partial_bounded,
+    IncrementalStreamControl, IncrementalStreamDecoder, StreamOutcome,
 };
+use bazel_mcp_bes::BesCapture;
 use bazel_mcp_reducer::BepAccumulator;
 use bazel_mcp_store::InvocationPaths;
 use blake3::Hasher;
@@ -41,6 +37,7 @@ const PARALLEL_MMAP_HASH_THRESHOLD: u64 = 1024 * 1024;
 pub(crate) enum BepReductionSource {
     Incremental,
     Fifo,
+    Bes,
     PostHocFallback,
 }
 
@@ -55,14 +52,19 @@ pub(crate) enum LiveBepCapture {
     Tail(IncrementalBepCapture),
     #[cfg(unix)]
     Fifo(FifoBepCapture),
+    Bes(BesBepCapture),
 }
 
 impl LiveBepCapture {
-    pub(crate) async fn finish(self) -> Result<BepReduction, RunnerError> {
+    pub(crate) async fn finish(
+        self,
+        bes_completion_grace: Duration,
+    ) -> Result<BepReduction, RunnerError> {
         match self {
             Self::Tail(capture) => capture.finish().await,
             #[cfg(unix)]
             Self::Fifo(capture) => capture.finish().await,
+            Self::Bes(capture) => capture.finish(bes_completion_grace).await,
         }
     }
 }
@@ -145,6 +147,81 @@ impl IncrementalBepCapture {
 impl Drop for IncrementalBepCapture {
     fn drop(&mut self) {
         self.finishing.store(true, Ordering::Release);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Owns the transport-neutral capture pipeline fed by the loopback BES.
+///
+/// The BES service forwards ordered framed payloads over a bounded channel and
+/// waits for each acknowledgement. This worker acknowledges a frame only after
+/// the private evidence writer has accepted it and before reduction observes
+/// it, keeping durable raw evidence authoritative.
+pub(crate) struct BesBepCapture {
+    control: Option<BesCapture>,
+    task: Option<JoinHandle<Result<BepReduction, RunnerError>>>,
+    evidence_path: PathBuf,
+    extension_limits: Option<(usize, usize)>,
+}
+
+impl BesBepCapture {
+    pub(crate) fn start(
+        mut control: BesCapture,
+        evidence_path: PathBuf,
+        extension_limits: Option<(usize, usize)>,
+    ) -> Result<Self, RunnerError> {
+        let events = control.take_events()?;
+        let task_path = evidence_path.clone();
+        let task = task::spawn_blocking(move || read_bes_bep(events, task_path, extension_limits));
+        Ok(Self {
+            control: Some(control),
+            task: Some(task),
+            evidence_path,
+            extension_limits,
+        })
+    }
+
+    async fn finish(mut self, completion_grace: Duration) -> Result<BepReduction, RunnerError> {
+        let started = Instant::now();
+        let capture_result = self
+            .control
+            .take()
+            .expect("BES capture control must exist")
+            .finish(completion_grace)
+            .await;
+        if let Err(error) = &capture_result {
+            tracing::warn!(%error, "BES capture did not complete cleanly; reducing retained prefix");
+        }
+        let result = match self.task.take().expect("BES capture task must exist").await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "BES pipeline failed; decoding retained prefix");
+                post_hoc_reduction(self.evidence_path.clone(), self.extension_limits).await?
+            }
+            Err(error) => {
+                tracing::warn!(%error, "BES pipeline task failed; decoding retained prefix");
+                post_hoc_reduction(self.evidence_path.clone(), self.extension_limits).await?
+            }
+        };
+        if let Ok(stats) = capture_result {
+            tracing::debug!(
+                events = stats.event_count,
+                bytes = stats.bep_bytes,
+                "completed BES capture"
+            );
+        }
+        Ok(BepReduction {
+            finalize_ms: duration_millis(started.elapsed()),
+            ..result
+        })
+    }
+}
+
+impl Drop for BesBepCapture {
+    fn drop(&mut self) {
+        self.control.take();
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -315,39 +392,25 @@ impl Drop for FifoBepCapture {
     }
 }
 
-#[cfg(unix)]
-struct FifoAttempt {
+struct ReductionSubscriber {
     accumulator: BepAccumulator,
-    hasher: Hasher,
-    framed_bytes: u64,
     decoded_bytes: usize,
     event_count: usize,
 }
 
-#[cfg(unix)]
-impl FifoAttempt {
+impl ReductionSubscriber {
     fn new(extension_limits: Option<(usize, usize)>) -> Self {
         Self {
             accumulator: new_accumulator(extension_limits),
-            hasher: Hasher::new(),
-            framed_bytes: 0,
             decoded_bytes: 0,
             event_count: 0,
         }
     }
 
-    fn observe(&mut self, event: bazel_mcp_bep::BepEvent, framed: &[u8]) {
-        self.retain_raw(framed);
+    fn observe(&mut self, event: bazel_mcp_bep::BepEvent) {
         self.decoded_bytes = self.decoded_bytes.saturating_add(event.frame_bytes().len());
         self.event_count = self.event_count.saturating_add(1);
         self.accumulator.observe(event);
-    }
-
-    fn retain_raw(&mut self, bytes: &[u8]) {
-        self.hasher.update(bytes);
-        self.framed_bytes = self
-            .framed_bytes
-            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
     }
 
     fn outcome(&self) -> StreamOutcome {
@@ -359,95 +422,256 @@ impl FifoAttempt {
     }
 }
 
+enum DurableBepWriter {
+    /// Tail and post-hoc sources read bytes only after Bazel has written them to
+    /// the private evidence file. The gate still accounts and hashes those
+    /// exact bytes before downstream subscribers observe decoded events.
+    AlreadyPersisted { hasher: Hasher, bytes: u64 },
+    /// FIFO and BES sources must append exact framed bytes before reduction or
+    /// any future externally visible subscriber can observe them.
+    Append {
+        file: File,
+        hasher: Hasher,
+        bytes: u64,
+    },
+}
+
+impl DurableBepWriter {
+    fn already_persisted() -> Self {
+        Self::AlreadyPersisted {
+            hasher: Hasher::new(),
+            bytes: 0,
+        }
+    }
+
+    fn append(file: File) -> Self {
+        Self::Append {
+            file,
+            hasher: Hasher::new(),
+            bytes: 0,
+        }
+    }
+
+    fn commit(&mut self, raw: &[u8]) -> io::Result<()> {
+        match self {
+            Self::AlreadyPersisted { hasher, bytes } => {
+                hasher.update(raw);
+                *bytes = bytes.saturating_add(u64::try_from(raw.len()).unwrap_or(u64::MAX));
+            }
+            Self::Append {
+                file,
+                hasher,
+                bytes,
+            } => {
+                file.write_all(raw)?;
+                hasher.update(raw);
+                *bytes = bytes.saturating_add(u64::try_from(raw.len()).unwrap_or(u64::MAX));
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_retry(&mut self) -> io::Result<()> {
+        if let Self::Append {
+            file,
+            hasher,
+            bytes,
+        } = self
+        {
+            file.flush()?;
+            file.set_len(0)?;
+            file.seek(io::SeekFrom::Start(0))?;
+            *hasher = Hasher::new();
+            *bytes = 0;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Self::Append { file, .. } = self {
+            file.flush()?;
+        }
+        Ok(())
+    }
+
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::AlreadyPersisted { bytes, .. } | Self::Append { bytes, .. } => *bytes,
+        }
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        match self {
+            Self::AlreadyPersisted { hasher, .. } | Self::Append { hasher, .. } => {
+                *hasher.clone().finalize().as_bytes()
+            }
+        }
+    }
+}
+
+struct CapturePipeline {
+    decoder: IncrementalStreamDecoder,
+    durable: DurableBepWriter,
+    reduction: ReductionSubscriber,
+    saved_attempt: Option<ReductionSubscriber>,
+    expecting_retry: bool,
+    pending_raw: Vec<u8>,
+    extension_limits: Option<(usize, usize)>,
+}
+
+struct CapturePipelineOutput {
+    reduction: BepReduction,
+    durable_bytes: u64,
+    durable_digest: [u8; 32],
+}
+
+impl CapturePipeline {
+    fn new(durable: DurableBepWriter, extension_limits: Option<(usize, usize)>) -> Self {
+        Self {
+            decoder: IncrementalStreamDecoder::new(
+                DEFAULT_MAX_FRAME_BYTES,
+                DEFAULT_MAX_STREAM_BYTES,
+                DEFAULT_MAX_STREAM_EVENTS,
+            ),
+            durable,
+            reduction: ReductionSubscriber::new(extension_limits),
+            saved_attempt: None,
+            expecting_retry: false,
+            pending_raw: Vec::new(),
+            extension_limits,
+        }
+    }
+
+    fn ingest(&mut self, input: &[u8]) -> Result<(), RunnerError> {
+        use bazel_mcp_bep::view::build_event::Payload;
+
+        if input.is_empty() {
+            return Ok(());
+        }
+        if self.decoder.is_terminal() {
+            self.durable.commit(input)?;
+            return Ok(());
+        }
+
+        self.pending_raw.extend_from_slice(input);
+        let durable = &mut self.durable;
+        let reduction = &mut self.reduction;
+        let saved_attempt = &mut self.saved_attempt;
+        let expecting_retry = &mut self.expecting_retry;
+        let pending_raw = &mut self.pending_raw;
+        let extension_limits = self.extension_limits;
+        let mut pipeline_error = None;
+        self.decoder.push_framed(input, |event, framed| {
+            if pipeline_error.is_some() {
+                return IncrementalStreamControl::Continue;
+            }
+            let is_started = matches!(event.view().payload.as_ref(), Some(Payload::Started(_)));
+            let is_remote_cache_evicted = matches!(
+                event.view().payload.as_ref(),
+                Some(Payload::Finished(finished))
+                    if finished.exit_code.as_option().is_some_and(|code| code.code == 39)
+            );
+            let Some(raw) = pending_raw.get(..framed.len()) else {
+                pipeline_error = Some(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "BEP frame exceeded retained source bytes",
+                ));
+                return IncrementalStreamControl::Continue;
+            };
+            if raw != framed {
+                pipeline_error = Some(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decoded BEP frame did not match retained source bytes",
+                ));
+                return IncrementalStreamControl::Continue;
+            }
+            if *expecting_retry && is_started {
+                if let Err(error) = durable.begin_retry() {
+                    pipeline_error = Some(error);
+                    return IncrementalStreamControl::Continue;
+                }
+                *saved_attempt = None;
+                *expecting_retry = false;
+            }
+            // This is the security boundary: exact raw bytes are accepted by
+            // the local durable writer before reduction observes the event.
+            if let Err(error) = durable.commit(raw) {
+                pipeline_error = Some(error);
+                return IncrementalStreamControl::Continue;
+            }
+            reduction.observe(event);
+            pending_raw.drain(..framed.len());
+            if is_remote_cache_evicted {
+                *saved_attempt = Some(std::mem::replace(
+                    reduction,
+                    ReductionSubscriber::new(extension_limits),
+                ));
+                *expecting_retry = true;
+                IncrementalStreamControl::ResetAfterFrame
+            } else {
+                IncrementalStreamControl::Continue
+            }
+        });
+        if let Some(error) = pipeline_error {
+            return Err(error.into());
+        }
+        if self.decoder.is_terminal() && !self.pending_raw.is_empty() {
+            self.durable.commit(&self.pending_raw)?;
+            self.pending_raw.clear();
+        }
+        Ok(())
+    }
+
+    fn durable_bytes(&self) -> u64 {
+        self.durable.bytes()
+    }
+
+    fn finish(mut self, source: BepReductionSource) -> Result<CapturePipelineOutput, RunnerError> {
+        if !self.pending_raw.is_empty() {
+            self.durable.commit(&self.pending_raw)?;
+            self.pending_raw.clear();
+        }
+        self.durable.flush()?;
+        let decoder_outcome = self.decoder.finish();
+        let (reduction, outcome) = if self.expecting_retry && self.reduction.event_count == 0 {
+            let saved = self.saved_attempt.unwrap_or(self.reduction);
+            let outcome = saved.outcome();
+            (saved, outcome)
+        } else {
+            (self.reduction, decoder_outcome)
+        };
+        Ok(CapturePipelineOutput {
+            reduction: BepReduction {
+                accumulator: reduction.accumulator,
+                outcome,
+                source,
+                finalize_ms: 0,
+            },
+            durable_bytes: self.durable.bytes(),
+            durable_digest: self.durable.digest(),
+        })
+    }
+}
+
 #[cfg(unix)]
 fn read_fifo_bep(
     mut reader: File,
-    mut evidence: File,
+    evidence: File,
     extension_limits: Option<(usize, usize)>,
     finishing: &AtomicBool,
     observed_bytes: &AtomicU64,
     server_pid: u32,
     client_pid: u32,
 ) -> Result<BepReduction, RunnerError> {
-    use bazel_mcp_bep::view::build_event::Payload;
-
-    let mut decoder = IncrementalStreamDecoder::new(
-        DEFAULT_MAX_FRAME_BYTES,
-        DEFAULT_MAX_STREAM_BYTES,
-        DEFAULT_MAX_STREAM_EVENTS,
-    );
-    let mut attempt = FifoAttempt::new(extension_limits);
-    let mut saved_attempt = None;
-    let mut expecting_retry = false;
+    let verification_file = evidence.try_clone()?;
+    let mut pipeline = CapturePipeline::new(DurableBepWriter::append(evidence), extension_limits);
     let mut buffer = [0_u8; 64 * 1024];
-    let mut unwritten = Vec::new();
     let mut server_exit_observed = false;
     loop {
         match reader.read(&mut buffer) {
             Ok(read) if read > 0 => {
-                unwritten.extend_from_slice(&buffer[..read]);
-                let mut write_error = None;
-                decoder.push_framed(&buffer[..read], |event, framed| {
-                    let is_started =
-                        matches!(event.view().payload.as_ref(), Some(Payload::Started(_)));
-                    let is_remote_cache_evicted = matches!(
-                        event.view().payload.as_ref(),
-                        Some(Payload::Finished(finished))
-                            if finished.exit_code.as_option().is_some_and(|code| code.code == 39)
-                    );
-
-                    if expecting_retry && is_started {
-                        if let Err(error) = evidence
-                            .flush()
-                            .and_then(|()| evidence.set_len(0))
-                            .and_then(|()| evidence.seek(io::SeekFrom::Start(0)).map(|_| ()))
-                        {
-                            write_error = Some(error);
-                            return IncrementalStreamControl::Continue;
-                        }
-                        saved_attempt = None;
-                        expecting_retry = false;
-                    }
-                    let Some(raw) = unwritten.get(..framed.len()) else {
-                        write_error = Some(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "FIFO BEP frame exceeded retained input",
-                        ));
-                        return IncrementalStreamControl::Continue;
-                    };
-                    if raw != framed {
-                        write_error = Some(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "FIFO BEP frame did not match retained input",
-                        ));
-                        return IncrementalStreamControl::Continue;
-                    }
-                    if let Err(error) = evidence.write_all(raw) {
-                        write_error = Some(error);
-                        return IncrementalStreamControl::Continue;
-                    }
-                    attempt.observe(event, framed);
-                    unwritten.drain(..framed.len());
-                    if is_remote_cache_evicted {
-                        saved_attempt = Some(std::mem::replace(
-                            &mut attempt,
-                            FifoAttempt::new(extension_limits),
-                        ));
-                        expecting_retry = true;
-                        IncrementalStreamControl::ResetAfterFrame
-                    } else {
-                        IncrementalStreamControl::Continue
-                    }
-                });
-                if let Some(error) = write_error {
-                    return Err(error.into());
-                }
-                if decoder.is_terminal() && !unwritten.is_empty() {
-                    evidence.write_all(&unwritten)?;
-                    attempt.retain_raw(&unwritten);
-                    unwritten.clear();
-                }
-                observed_bytes.store(attempt.framed_bytes, Ordering::Release);
+                pipeline.ingest(&buffer[..read])?;
+                observed_bytes.store(pipeline.durable_bytes(), Ordering::Release);
             }
             Ok(0) => {
                 let client_alive = is_process_alive(client_pid);
@@ -484,31 +708,57 @@ fn read_fifo_bep(
             Err(error) => return Err(error.into()),
         }
     }
-    if !unwritten.is_empty() {
-        evidence.write_all(&unwritten)?;
-        attempt.retain_raw(&unwritten);
-    }
-    evidence.flush()?;
-    let decoder_outcome = decoder.finish();
-    let (attempt, outcome) = if expecting_retry && attempt.event_count == 0 {
-        let saved = saved_attempt.unwrap_or(attempt);
-        let outcome = saved.outcome();
-        (saved, outcome)
-    } else {
-        (attempt, decoder_outcome)
-    };
-    let retained_digest = *attempt.hasher.finalize().as_bytes();
-    let (final_bytes, final_digest) = hash_open_file(&evidence)?;
-    if attempt.framed_bytes != final_bytes || retained_digest != final_digest {
+    let output = pipeline.finish(BepReductionSource::Fifo)?;
+    let (final_bytes, final_digest) = hash_open_file(&verification_file)?;
+    if output.durable_bytes != final_bytes || output.durable_digest != final_digest {
         return Err(io::Error::other("FIFO BEP evidence did not match captured bytes").into());
     }
-    observed_bytes.store(attempt.framed_bytes, Ordering::Release);
-    Ok(BepReduction {
-        accumulator: attempt.accumulator,
-        outcome,
-        source: BepReductionSource::Fifo,
-        finalize_ms: 0,
-    })
+    observed_bytes.store(output.durable_bytes, Ordering::Release);
+    Ok(output.reduction)
+}
+
+fn read_bes_bep(
+    mut events: tokio::sync::mpsc::Receiver<bazel_mcp_bes::BesStreamEvent>,
+    evidence_path: PathBuf,
+    extension_limits: Option<(usize, usize)>,
+) -> Result<BepReduction, RunnerError> {
+    let evidence = private_file(&evidence_path)?;
+    let mut pipeline = Some(CapturePipeline::new(
+        DurableBepWriter::append(evidence),
+        extension_limits,
+    ));
+    while let Some(event) = events.blocking_recv() {
+        if event.is_finished() {
+            let result = pipeline
+                .take()
+                .expect("BES pipeline must exist before finish")
+                .finish(BepReductionSource::Bes);
+            event.acknowledge(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            return result.map(|output| output.reduction);
+        }
+
+        let pipeline = pipeline
+            .as_mut()
+            .expect("BES pipeline must exist while receiving frames");
+        let mut result = Ok(());
+        for framed in event
+            .framed_events()
+            .expect("non-terminal BES events must carry framed bytes")
+        {
+            if let Err(error) = pipeline.ingest(framed) {
+                result = Err(error);
+                break;
+            }
+        }
+        event.acknowledge(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        result?;
+    }
+
+    pipeline
+        .take()
+        .expect("BES pipeline must exist when event channel closes")
+        .finish(BepReductionSource::Bes)
+        .map(|output| output.reduction)
 }
 
 #[cfg(unix)]
@@ -584,22 +834,14 @@ fn tail_bep(
     observed_bytes: &AtomicU64,
 ) -> Result<BepReduction, RunnerError> {
     let mut file = File::open(&path)?;
-    let mut accumulator = new_accumulator(extension_limits);
-    let mut decoder = IncrementalStreamDecoder::new(
-        DEFAULT_MAX_FRAME_BYTES,
-        DEFAULT_MAX_STREAM_BYTES,
-        DEFAULT_MAX_STREAM_EVENTS,
-    );
+    let mut pipeline =
+        CapturePipeline::new(DurableBepWriter::already_persisted(), extension_limits);
     let mut buffer = [0_u8; 64 * 1024];
-    let mut hasher = Hasher::new();
-    let mut tailed_bytes = 0_u64;
     loop {
         let read = file.read(&mut buffer)?;
         if read > 0 {
-            hasher.update(&buffer[..read]);
-            tailed_bytes = tailed_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-            decoder.push(&buffer[..read], |event| accumulator.observe(event));
-            observed_bytes.store(tailed_bytes, Ordering::Release);
+            pipeline.ingest(&buffer[..read])?;
+            observed_bytes.store(pipeline.durable_bytes(), Ordering::Release);
             continue;
         }
         if finishing.load(Ordering::Acquire) {
@@ -608,20 +850,14 @@ fn tail_bep(
         thread::sleep(BEP_TAIL_POLL_INTERVAL);
     }
 
-    let outcome = decoder.finish();
-    let tailed_digest = *hasher.finalize().as_bytes();
+    let output = pipeline.finish(BepReductionSource::Incremental)?;
     let (final_bytes, final_digest) = hash_file(&path)?;
-    if tailed_bytes == final_bytes && tailed_digest == final_digest {
-        return Ok(BepReduction {
-            accumulator,
-            outcome,
-            source: BepReductionSource::Incremental,
-            finalize_ms: 0,
-        });
+    if output.durable_bytes == final_bytes && output.durable_digest == final_digest {
+        return Ok(output.reduction);
     }
 
     tracing::debug!(
-        tailed_bytes,
+        tailed_bytes = output.durable_bytes,
         final_bytes,
         "BEP file changed while it was tailed; decoding retained file"
     );
@@ -659,16 +895,19 @@ fn reduce_bep_file(
     extension_limits: Option<(usize, usize)>,
 ) -> Result<(BepAccumulator, StreamOutcome), RunnerError> {
     match File::open(path) {
-        Ok(file) => {
-            let mut accumulator = new_accumulator(extension_limits);
-            let outcome = visit_stream_partial_bounded(
-                file,
-                DEFAULT_MAX_FRAME_BYTES,
-                DEFAULT_MAX_STREAM_BYTES,
-                DEFAULT_MAX_STREAM_EVENTS,
-                |event| accumulator.observe(event),
-            );
-            Ok((accumulator, outcome))
+        Ok(mut file) => {
+            let mut pipeline =
+                CapturePipeline::new(DurableBepWriter::already_persisted(), extension_limits);
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                pipeline.ingest(&buffer[..read])?;
+            }
+            let output = pipeline.finish(BepReductionSource::PostHocFallback)?;
+            Ok((output.reduction.accumulator, output.reduction.outcome))
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((
             BepAccumulator::default(),
@@ -820,6 +1059,52 @@ mod tests {
         assert_reductions_match(incremental.accumulator, post_hoc);
     }
 
+    #[test]
+    fn persisted_and_streamed_sources_share_one_ordered_capture_pipeline() {
+        let root = tempdir().unwrap();
+        let fixture =
+            include_bytes!("../../bazel-mcp-reducer/tests/fixtures/bazel-9/test-outcomes.bep");
+
+        let mut persisted = CapturePipeline::new(DurableBepWriter::already_persisted(), None);
+        for chunk in fixture.chunks(113) {
+            persisted.ingest(chunk).unwrap();
+        }
+        let persisted = persisted.finish(BepReductionSource::Incremental).unwrap();
+
+        let streamed_path = root.path().join("streamed.bep");
+        let mut streamed = CapturePipeline::new(
+            DurableBepWriter::append(private_file(&streamed_path).unwrap()),
+            None,
+        );
+        for chunk in fixture.chunks(97) {
+            streamed.ingest(chunk).unwrap();
+        }
+        let streamed = streamed.finish(BepReductionSource::Bes).unwrap();
+
+        assert_eq!(std::fs::read(streamed_path).unwrap(), fixture);
+        assert_eq!(persisted.durable_bytes, streamed.durable_bytes);
+        assert_eq!(persisted.durable_digest, streamed.durable_digest);
+        assert_outcomes_match(&persisted.reduction.outcome, &streamed.reduction.outcome);
+        assert_reductions_match(
+            persisted.reduction.accumulator,
+            streamed.reduction.accumulator,
+        );
+    }
+
+    #[test]
+    fn durability_failure_prevents_reduction_from_observing_the_frame() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("read-only.bep");
+        std::fs::write(&path, []).unwrap();
+        let read_only = File::open(path).unwrap();
+        let mut pipeline = CapturePipeline::new(DurableBepWriter::append(read_only), None);
+        let frame = retry_attempt(0, "must-not-be-reduced");
+
+        assert!(pipeline.ingest(&frame).is_err());
+        assert_eq!(pipeline.reduction.event_count, 0);
+        assert_eq!(pipeline.durable_bytes(), 0);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn fifo_capture_reconnects_and_retains_only_the_successful_retry() {
@@ -920,7 +1205,6 @@ mod tests {
         assert!(!fifo_path.exists());
     }
 
-    #[cfg(unix)]
     fn retry_attempt(code: i32, marker: &str) -> Vec<u8> {
         use bazel_mcp_bep::{
             encode_frame,

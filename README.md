@@ -389,6 +389,9 @@ remote BES and BuildBuddy configurations keep working. Set
 `bep_transport = "fifo"` for the measured POSIX named-pipe optimization (with
 automatic file-tail fallback on Windows or setup failure), or
 `bep_transport = "bes"` to use bazel-mcp's loopback gRPC Build Event Service.
+All three modes feed one ordered capture pipeline: raw frames are committed or
+verified in the private evidence file before reduction observes them, and only
+redacted projections may reach metadata, telemetry, or model-visible output.
 See [BEP transport performance](docs/bep-transport-performance.md) for the
 design tradeoffs, measured results, and reproduction commands.
 

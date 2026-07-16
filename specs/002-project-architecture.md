@@ -638,8 +638,9 @@ bazel-mcp-runner
       ├────────────► Bazel/Bazelisk/repo wrapper
       │               stdout.log + stderr.log + tail events.bep
       ├────────────► bazel-mcp-bes (optional loopback gRPC)
-      │               BES stream -> events.bep
-      ├─ spawn_blocking ─► bazel-mcp-bep + bazel-mcp-reducer
+      │               validated ordered BES frame batches
+      ├─ spawn_blocking ─► shared BEP capture pipeline
+      │                     durable raw frame gate -> reducer subscriber
       └────── await ─────► bazel-mcp-store
                               atomic manifest + detail sidecars
 ```

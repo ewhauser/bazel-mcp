@@ -102,8 +102,9 @@ BEP file directly, so an existing remote `--bes_backend` or BuildBuddy setup
 continues to receive events.
 
 `fifo` is an opt-in POSIX optimization. bazel-mcp creates a private named pipe,
-streams and reduces events from it, and mirrors the exact bytes into the same
-retained `events.bep` evidence file. It probes the persistent Bazel server PID
+feeds its ordered frames through the shared capture pipeline, and commits the
+exact bytes to `events.bep` before the reduction subscriber observes them. It
+probes the persistent Bazel server PID
 and separately tracks the spawned invocation-client PID so a writer may close
 and reconnect during a Bazel retry without EOF ending the capture. FIFO setup
 or PID-discovery failures fall back to `tail`; Windows always uses that portable
@@ -113,7 +114,10 @@ fallback.
 port and configures Bazel to publish to it with
 `--bes_upload_mode=wait_for_upload_complete`. The service validates the
 invocation ID and stream sequence with Buffa views, then reconstructs the same
-private varint-delimited `events.bep` file used by reducers and inspection.
+private varint-delimited `events.bep` file through the shared capture pipeline.
+Small bounded event batches amortize transport handoff, but Bazel receives no
+acknowledgement until the corresponding raw frames have been accepted by the
+private evidence writer. Reduction observes those frames only afterward.
 Select this mode explicitly because Bazel supports only one `--bes_backend`;
 caller-supplied remote BES flags are rejected in this mode. The listener is
 never exposed outside the local host.
