@@ -1,14 +1,20 @@
 {
   "packages": {
     ".": {
-      "release-type": "rust",
+      "release-type": "bazel",
       "package-name": "bazel-mcp",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
       "extra-files": [
         {
-          "type": "generic",
-          "path": "MODULE.bazel"
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==\"bazel-mcp-benchmark\" || @.name.value==\"bazel-mcp-bep\" || @.name.value==\"bazel-mcp-policy\" || @.name.value==\"bazel-mcp-reducer\" || @.name.value==\"bazel-mcp-runner\" || @.name.value==\"bazel-mcp-server\" || @.name.value==\"bazel-mcp-store\" || @.name.value==\"bazel-mcp-types\")].version"
         },
         {
           "type": "generic",
