@@ -5,7 +5,7 @@ versions=${MATRIX_VERSIONS:-"7.6.1 8.4.2 9.1.0"}
 server=${BAZEL_MCP_SERVER_BIN:-"$PWD/target/debug/bazel-mcp"}
 bazel=${BAZEL_MCP_BAZEL:-$(command -v bazelisk || command -v bazel)}
 run_id=${BAZEL_MATRIX_RUN_ID:-"$(date +%s)-$$"}
-matrix_root="$PWD/.cache/bazel-matrix/$run_id"
+matrix_root=${BAZEL_MATRIX_ROOT:-"${TMPDIR:-/tmp}/bazel-mcp-matrix/$run_id"}
 mkdir -p "$matrix_root"
 cargo build -p bazel-mcp-server --bin bazel-mcp
 printf 'version\tcase\tstate\texit\n'
