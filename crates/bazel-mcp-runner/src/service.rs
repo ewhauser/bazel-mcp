@@ -16,10 +16,11 @@ use bazel_mcp_policy::{
     validate_workspace,
 };
 use bazel_mcp_reducer::{
-    Budget, JavaTestDiagnosticParser, PythonDiagnosticParser, REDUCER_API_VERSION, ReducerContext,
-    ReducerPipeline, StarlarkReducerConfig, StreamReductionOutput, TestFailureAccumulator,
-    TestFailureEvidence, finalize_diagnostics, load_starlark_reducers, normalize_terminal_text,
-    parse_go_diagnostic, parse_lcov_reader, parse_test_xml,
+    Budget, JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
+    REDUCER_API_VERSION, ReducerContext, ReducerPipeline, StarlarkReducerConfig,
+    StreamReductionOutput, TestFailureAccumulator, TestFailureEvidence, finalize_diagnostics,
+    load_starlark_reducers, normalize_terminal_text, parse_go_diagnostic, parse_lcov_reader,
+    parse_test_xml,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
@@ -1909,6 +1910,7 @@ impl InvocationService {
                 let Ok(file) = tokio::fs::File::open(&path).await else {
                     continue;
                 };
+                let mut javascript_parser = JavaScriptTestDiagnosticParser::default();
                 let mut java_parser = JavaTestDiagnosticParser::default();
                 let mut python_parser = PythonDiagnosticParser::default();
                 let marker = format!("\n===== {} :: {} =====\n", test.label, log.name);
@@ -1945,9 +1947,14 @@ impl InvocationService {
                             4 * 1024,
                         );
                         failure_accumulator.observe_line(&text);
+                        let javascript_diagnostic = javascript_parser.observe_line(&text);
                         let java_diagnostic = java_parser.observe_line(&text);
                         let candidate = if let Some(mut diagnostic) = parse_go_diagnostic(&text) {
                             diagnostic.category = DiagnosticCategory::Test;
+                            diagnostic.target = Some(test.label.clone());
+                            diagnostic.message = bounded_text(&diagnostic.message, 1_000);
+                            Some((0, diagnostic))
+                        } else if let Some(mut diagnostic) = javascript_diagnostic {
                             diagnostic.target = Some(test.label.clone());
                             diagnostic.message = bounded_text(&diagnostic.message, 1_000);
                             Some((0, diagnostic))
@@ -2006,16 +2013,21 @@ impl InvocationService {
                         break;
                     }
                 }
-                if complete && let Some(mut diagnostic) = java_parser.finish() {
-                    diagnostic.target = Some(test.label.clone());
-                    diagnostic.message = bounded_text(&diagnostic.message, 1_000);
-                    if fallback_excerpt.as_ref().is_none_or(|(priority, current)| {
-                        *priority > 0
-                            || (*priority == 0
-                                && diagnostic.location.is_some()
-                                && current.location.is_none())
-                    }) {
-                        fallback_excerpt = Some((0, diagnostic));
+                if complete {
+                    for mut diagnostic in [javascript_parser.finish(), java_parser.finish()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        diagnostic.target = Some(test.label.clone());
+                        diagnostic.message = bounded_text(&diagnostic.message, 1_000);
+                        if fallback_excerpt.as_ref().is_none_or(|(priority, current)| {
+                            *priority > 0
+                                || (*priority == 0
+                                    && diagnostic.location.is_some()
+                                    && current.location.is_none())
+                        }) {
+                            fallback_excerpt = Some((0, diagnostic));
+                        }
                     }
                 }
                 if complete {

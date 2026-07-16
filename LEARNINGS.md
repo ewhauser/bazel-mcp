@@ -93,3 +93,11 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   editable import declaration and dependent type errors; rank the located
   declaration first and preserve the follow-on diagnostics. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- TypeScript compiler diagnostics use `file(line,column): error TS...` without
+  the generic marker the reducer expected, leaving Bazel's completion wrapper
+  as the headline; parse the tsc code and location directly. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Node exceptions were retained as unlocated compilation evidence while their
+  source headers and application stack frames stayed only in `test.log`; pair
+  bounded Node frames and prefer the test-scoped diagnostic. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
