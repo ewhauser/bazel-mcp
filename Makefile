@@ -8,6 +8,8 @@
 	mcp-conformance test-claude-code test-claude-code-live generate-sbom
 
 ARGS ?= --help
+BAZEL ?= bazelisk
+BAZEL_BUILD_FLAGS ?=
 FUZZ_TARGET ?= bep_framing
 FUZZ_ARGS ?= -max_total_time=60
 NIX_DEVELOP ?= nix --extra-experimental-features 'nix-command flakes' develop --command
@@ -27,7 +29,7 @@ setup-hooks:
 	git config core.hooksPath .githooks
 
 build:
-	cargo build --workspace
+	$(BAZEL) build $(BAZEL_BUILD_FLAGS) //:bazel-mcp
 
 test:
 	cargo test --workspace --all-features
@@ -50,7 +52,7 @@ test-token-integration:
 		--samples $(TOKEN_SAMPLES) --assert-gates
 
 run:
-	cargo run -p bazel-mcp-server -- $(ARGS)
+	$(BAZEL) run //:bazel-mcp -- $(ARGS)
 
 check:
 	cargo fmt --all -- --check

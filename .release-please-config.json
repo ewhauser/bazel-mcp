@@ -4,7 +4,17 @@
       "release-type": "rust",
       "package-name": "bazel-mcp",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": false
+      "include-component-in-tag": false,
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "MODULE.bazel"
+        },
+        {
+          "type": "generic",
+          "path": "crates/bazel-mcp-server/BUILD.bazel"
+        }
+      ]
     }
   }
 }

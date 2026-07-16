@@ -1,0 +1,2 @@
+common --enable_platform_specific_config
+common:windows --host_platform=//platforms:local_windows_msvc

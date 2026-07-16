@@ -1,10 +1,19 @@
 use std::{env, ffi::OsString, path::PathBuf, process::Command};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let protoc = protoc_bin_vendored::protoc_bin_path()?;
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
-    let descriptor = out_dir.join("bazel-mcp-bep-descriptor.bin");
-    generate_descriptor(protoc.into_os_string(), &descriptor)?;
+    let descriptor = match env::var_os("BAZEL_BEP_DESCRIPTOR") {
+        Some(descriptor) => PathBuf::from(descriptor),
+        None => {
+            let protoc = match env::var_os("PROTOC") {
+                Some(protoc) => protoc,
+                None => protoc_bin_vendored::protoc_bin_path()?.into_os_string(),
+            };
+            let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
+            let descriptor = out_dir.join("bazel-mcp-bep-descriptor.bin");
+            generate_descriptor(protoc, &descriptor)?;
+            descriptor
+        }
+    };
 
     buffa_build::Config::new()
         .files(&["build_event_stream_subset.proto"])

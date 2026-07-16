@@ -1,0 +1,48 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "bazel_mcp_reducer",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bazel_mcp_reducer",
+    deps = [
+        "//crates/bazel-mcp-bep:bazel_mcp_bep",
+        "//crates/bazel-mcp-types:bazel_mcp_types",
+    ] + all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":bazel_mcp_reducer",
+    size = "small",
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "golden_test",
+    srcs = ["tests/golden.rs"],
+    data = glob(["tests/fixtures/bazel-*/*"]) + [
+        "//crates/bazel-mcp-bep:adversarial_fixtures",
+    ],
+    size = "small",
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/bazel-mcp-reducer",
+    },
+    deps = [
+        ":bazel_mcp_reducer",
+        "//crates/bazel-mcp-bep:bazel_mcp_bep",
+        "//crates/bazel-mcp-types:bazel_mcp_types",
+    ] + all_crate_deps(
+        cargo_only = True,
+        normal = True,
+        normal_dev = True,
+    ),
+)

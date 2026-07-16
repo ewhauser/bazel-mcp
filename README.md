@@ -34,7 +34,7 @@ toolchains, and remote execution settings.
 - macOS or Linux
 - Bazel 7, 8, or 9, Bazelisk, or an executable workspace-local `tools/bazel`
 - an MCP-compatible client
-- Rust 1.94.1 when building from source
+- Bazelisk when building from source (the repository pins Bazel and Rust)
 
 ### Install with Homebrew
 
@@ -55,15 +55,16 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 ### Build from source
 
-Clone the repository and build the server with the pinned Rust toolchain:
+Clone the repository and build the server with the pinned Bazel and Rust
+toolchains:
 
 ```sh
 git clone https://github.com/ewhauser/bazel-mcp.git
 cd bazel-mcp
-cargo build --release -p bazel-mcp-server
+bazelisk build -c opt //:bazel-mcp
 ```
 
-The binary is written to `target/release/bazel-mcp`.
+The binary is written to `bazel-bin/crates/bazel-mcp-server/bazel-mcp`.
 
 ### Connect your MCP client
 
@@ -81,7 +82,7 @@ on your client.
 ```
 
 If you built from source without installing the binary, use the absolute path
-to `target/release/bazel-mcp` instead.
+to `bazel-bin/crates/bazel-mcp-server/bazel-mcp` instead.
 
 Restart the client, open a Bazel workspace, and try prompts such as:
 
