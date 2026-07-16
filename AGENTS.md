@@ -21,7 +21,8 @@ Always use the Bazel MCP tools instead of invoking Bazel or Bazelisk directly.
 When using Bazel MCP reveals a performance issue, bug, or agent-workflow
 inefficiency caused by MCP behavior, create or update the repository-root
 `LEARNINGS.md`. Record the concrete MCP symptom, its impact on tool calls or
-model-visible tokens when applicable, and an actionable follow-up.
+model-visible tokens when applicable, an actionable follow-up, and the Codex
+Thread ID where the observation occurred.
 Agent-workflow observations are especially valuable when they expose
 inefficient protocol behavior, result reduction, or inspection flows. Do not
 add general project, Bazel, CI, release, or unrelated workflow learnings. Do not
