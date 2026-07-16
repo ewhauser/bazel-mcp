@@ -87,14 +87,14 @@ body {
   width: 100%;
 }
 
-[data-has-hero] .main-frame,
-[data-has-hero] .content-panel,
-[data-has-hero] .sl-container {
+body:has(.landing) .main-frame,
+body:has(.landing) .content-panel,
+body:has(.landing) .sl-container {
   max-width: none;
   padding: 0;
 }
 
-[data-has-hero] .content-panel { overflow: hidden; }
+body:has(.landing) .content-panel { overflow: hidden; }
 
 @media (max-width: 50rem) {
   .sl-markdown-content table { display: block; }

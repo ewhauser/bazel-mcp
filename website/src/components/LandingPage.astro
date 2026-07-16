@@ -188,16 +188,6 @@ const tools = [
     </div>
   </section>
 
-  <section class="closing" aria-labelledby="closing-title">
-    <p class="kicker">Your Bazel. Your workspace. Your credentials.</p>
-    <h2 id="closing-title">Make the next build useful to the agent.</h2>
-    <div>
-      <a class="button primary" href={withBase('getting-started/')}>Install bazel-mcp</a>
-      <a class="button quiet" href={withBase('reference/generated/configuration/')}>
-        Read the configuration reference
-      </a>
-    </div>
-  </section>
 </main>
 
 <script>
@@ -300,8 +290,7 @@ const tools = [
     max-width: 38rem;
   }
 
-  .hero-actions,
-  .closing > div { display: flex; flex-wrap: wrap; gap: 0.85rem; margin-top: 2rem; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 0.85rem; margin-top: 2rem; }
 
   .button {
     align-items: center;
@@ -322,10 +311,8 @@ const tools = [
   .button:hover { transform: translateY(-2px); }
   .button.primary { background: var(--mint); color: #04110a; }
   .button.primary:hover { background: var(--mint-bright); }
-  .button.secondary,
-  .button.quiet { background: rgba(255,255,255,0.025); border-color: var(--line); color: #dff8e9; }
-  .button.secondary:hover,
-  .button.quiet:hover { border-color: rgba(124,245,182,0.45); }
+  .button.secondary { background: rgba(255,255,255,0.025); border-color: var(--line); color: #dff8e9; }
+  .button.secondary:hover { border-color: rgba(124,245,182,0.45); }
 
   .install {
     align-items: center;
@@ -536,8 +523,7 @@ const tools = [
     padding: clamp(5rem, 10vw, 9rem) 1.25rem;
   }
   .section-heading { max-width: 48rem; }
-  .section h2,
-  .closing h2 {
+  .section h2 {
     color: #effff5;
     font-size: clamp(2.2rem, 5vw, 4.2rem);
     letter-spacing: -0.045em;
@@ -597,21 +583,6 @@ const tools = [
   .sequence strong { color: #e3f5e9; font-size: 0.9rem; }
   .sequence p { color: #789183; font-size: 0.82rem; line-height: 1.55; margin: 0; }
 
-  .closing {
-    align-items: end;
-    background: linear-gradient(120deg, rgba(124,245,182,0.09), rgba(104,217,255,0.04));
-    border: 1px solid var(--line);
-    border-radius: 1rem;
-    display: grid;
-    gap: 2rem;
-    grid-template-columns: minmax(0, 1fr) auto;
-    margin: 0 auto 5rem;
-    max-width: 83.5rem;
-    padding: clamp(2rem, 5vw, 4rem);
-  }
-  .closing h2 { max-width: 17ch; }
-  .closing > div { justify-content: flex-end; margin: 0; }
-
   @keyframes log-pulse {
     0%, 80%, 100% { transform: translateY(0); opacity: 0.75; }
     12% { transform: translateY(-0.18rem); opacity: 1; }
@@ -640,16 +611,12 @@ const tools = [
     .proof a:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
     .proof a:nth-child(4) { border-top: 1px solid var(--line); }
     .tool-grid,
-    .evidence-section,
-    .closing { grid-template-columns: 1fr; }
+    .evidence-section { grid-template-columns: 1fr; }
     .tool-card { min-height: 17rem; }
-    .closing { margin-left: 1rem; margin-right: 1rem; }
-    .closing > div { justify-content: flex-start; }
   }
 
   @media (max-width: 480px) {
-    .hero-actions .button,
-    .closing .button { width: 100%; }
+    .hero-actions .button { width: 100%; }
     .install code { font-size: 0.66rem; }
     .proof { grid-template-columns: 1fr; }
     .proof a + a { border-left: 0; border-top: 1px solid var(--line); }
