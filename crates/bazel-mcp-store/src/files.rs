@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use bazel_mcp_types::{Artifact, InvocationId, InvocationRecord};
+use bazel_mcp_types::InvocationId;
 use tokio::fs;
 
 use crate::StoreError;
@@ -12,12 +12,11 @@ use crate::StoreError;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationPaths {
     pub directory: PathBuf,
-    pub request: PathBuf,
-    pub metadata: PathBuf,
+    pub manifest: PathBuf,
+    pub details: PathBuf,
     pub stdout: PathBuf,
     pub stderr: PathBuf,
     pub bep: PathBuf,
-    pub summary: PathBuf,
     pub artifacts: PathBuf,
 }
 
@@ -36,12 +35,11 @@ impl InvocationPaths {
             .join(format!("{shard:02x}"))
             .join(id.to_string());
         Self {
-            request: directory.join("request.json"),
-            metadata: directory.join("record.json"),
+            manifest: directory.join("manifest.json"),
+            details: directory.join("details.json"),
             stdout: directory.join("stdout.log"),
             stderr: directory.join("stderr.log"),
             bep: directory.join("events.bep"),
-            summary: directory.join("summary.json"),
             artifacts: directory.join("artifacts.json"),
             directory,
         }
@@ -64,23 +62,6 @@ impl InvocationPaths {
         }
         Ok(())
     }
-
-    pub async fn write_request(&self, record: &InvocationRecord) -> Result<(), StoreError> {
-        write_json_atomic(&self.request, &record.request).await
-    }
-
-    pub async fn write_summary(&self, record: &InvocationRecord) -> Result<(), StoreError> {
-        if let Some(summary) = &record.summary {
-            write_json_atomic(&self.summary, summary).await?;
-        } else {
-            remove_if_exists(&self.summary).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn write_artifacts(&self, artifacts: &[Artifact]) -> Result<(), StoreError> {
-        write_json_atomic(&self.artifacts, artifacts).await
-    }
 }
 
 pub(crate) async fn write_json_atomic<T: serde::Serialize + ?Sized>(
@@ -88,6 +69,10 @@ pub(crate) async fn write_json_atomic<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec(value)?;
+    write_bytes_atomic(path, &bytes).await
+}
+
+pub(crate) async fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, bytes).await?;
     set_private_file(&temporary).await?;
@@ -95,7 +80,7 @@ pub(crate) async fn write_json_atomic<T: serde::Serialize + ?Sized>(
     Ok(())
 }
 
-async fn remove_if_exists(path: &Path) -> Result<(), StoreError> {
+pub(crate) async fn remove_if_exists(path: &Path) -> Result<(), StoreError> {
     match fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

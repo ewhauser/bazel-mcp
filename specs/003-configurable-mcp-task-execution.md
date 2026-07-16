@@ -571,7 +571,7 @@ selected protocol's Task type. Protocol-specific distinctions such as legacy
 ### Filesystem record
 
 Deferred metadata is an optional typed field in the invocation's versioned
-`record.json`. Invocation acceptance writes request metadata and this deferred
+`manifest.json`. Invocation acceptance writes request metadata and this deferred
 handle before the record rename commits the submission. Startup rebuilds the
 retrieval and expiry indexes from records; there is no database migration or
 legacy schema.

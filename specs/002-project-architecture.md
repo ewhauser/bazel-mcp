@@ -309,13 +309,24 @@ crates/bazel-mcp-store/
     └── recovery.rs
 ```
 
-`Store` owns an exclusive cache-root lock, a short async write coordinator, and
-bounded in-memory indexes rebuilt from versioned `record.json` files. UUIDv7
-maps deterministically to a day bucket and bounded shard. Record and sidecar
+`Store` owns an exclusive cache-root process lock, a `RwLock`-protected compact
+index, and per-invocation mutation locks. Index locks are never held across
+awaited filesystem I/O, so independent invocations and inspections can proceed
+concurrently. The index is rebuilt from versioned `manifest.json` files. UUIDv7
+maps deterministically to a day bucket and bounded shard. Manifest and sidecar
 commits use write-private-temp plus atomic rename; deletion uses rename to a
-cache-root trash directory followed by unlink. Store methods accept and return
-`bazel-mcp-types` and do not mention MCP or BEP protobufs. There is intentionally
-no database, migration layer, or legacy-layout reader.
+cache-root trash directory, immediate index removal, and unlink outside the
+index lock. Store methods accept and return `bazel-mcp-types` and do not mention
+MCP or BEP protobufs. There is intentionally no database, migration layer, or
+legacy-layout reader.
+
+The manifest is the sole durable representation of the redacted request and
+compact summary header. Large target, test, and per-file coverage collections
+live in `details.json`; artifacts live in `artifacts.json`. Startup does not read
+either sidecar. Telemetry counters are accumulated in the index and coalesced at
+a bounded interval or into the next durable mutation. A terminal completion
+coalesces state, termination, summary, metrics, canonical arguments, artifact
+accounting, and detailed results.
 
 Complete stdout, stderr, and BEP evidence remains ordinary files written
 directly by the Bazel child. Query pagination scans stdout using opaque byte
@@ -595,7 +606,7 @@ bazel-mcp-runner
       │               stdout.log + stderr.log + events.bep
       ├─ spawn_blocking ─► bazel-mcp-bep + bazel-mcp-reducer
       └────── await ─────► bazel-mcp-store
-                              atomic records + invocation files
+                              atomic manifest + detail sidecars
 ```
 
 The live registry stores only running/queued control state and cancellation

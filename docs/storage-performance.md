@@ -2,69 +2,190 @@
 
 ## Decision
 
-Bazel MCP does not need a database for its short-lived invocation evidence.
-The production store is a database-free filesystem design:
+Bazel MCP does not need a database for short-lived invocation evidence. The
+production store uses private, database-free invocation directories. Bazel
+writes raw evidence directly to disk while it runs; the service retains compact
+indexes and reducer state in memory, but never duplicates complete stdout,
+stderr, or BEP streams in application buffers.
 
-- Bazel writes stdout, stderr, and binary BEP directly to their final private
-  files. These writes use the OS page cache; the MCP process does not pipe or
-  retain a second raw-output buffer.
-- UUIDv7 maps each invocation to
-  `invocations/<day>/<16-way-shard>/<uuid>/`, providing deterministic lookup and
-  bounded directory fan-out.
-- `record.json` is a versioned atomic commit point. A cache-root `LOCK` permits
-  one writer process, and startup rebuilds compact in-memory indexes from the
-  retained time buckets.
-- Query rows are not normalized or duplicated. Post-processing and inspection
-  scan `stdout.log` with bounded lines and opaque byte-offset cursors. The
-  runner redacts each row before filtering or returning it.
-- BEP is decoded frame by frame into a bounded reducer accumulator. Complete
-  protobuf frames are not retained in a stream-sized vector.
-- GC uses per-record accounted bytes and an 80% low watermark. It never walks
-  the entire cache during a normal pass. Terminal deletion atomically renames a
-  directory into `trash/` before unlinking it; startup completes abandoned
-  trash deletion. Live invocations and compact deferred results are protected;
-  raw deferred evidence can be pruned independently.
+The canonical per-invocation layout is:
 
-There is no database migration or legacy-layout reader because no released
-installation depends on the previous layout.
+```text
+invocations/<uuidv7-day>/<16-way-shard>/<invocation-id>/
+  manifest.json    redacted request + lifecycle + compact summary + accounting
+  details.json     detailed targets, tests, and per-file coverage
+  artifacts.json   artifact array
+  stdout.log       raw bytes written directly by Bazel
+  stderr.log       raw bytes written directly by Bazel
+  events.bep       Bazel varint-delimited protobuf frames
+```
 
-## Controlled comparison
+The request exists only in `manifest.json`. The summary header exists only in
+`manifest.json`; large collections exist only in their sidecars. Empty detail
+and artifact sidecars are omitted. There is no migration or legacy-layout
+reader because no released installation uses the previous layout.
+
+## Logical data flow and formats
+
+```text
+1. MCP request
+   input:  MCP JSON object for bazel.run
+   memory: typed InvocationRequest
+      |
+      | validate argv/workspace/environment; redact durable fields
+      v
+2. Acceptance commit
+   disk:   manifest.json (versioned compact JSON)
+   method: private manifest.tmp -> atomic rename
+   index:  compact IndexEntry under RwLock<Index>
+      |
+      | spawn Bazel directly with an argv vector and file handles
+      v
+3. Bazel execution
+   disk:   stdout.log / stderr.log (raw bytes, direct child output)
+           events.bep (varint-length-delimited protobuf, direct Bazel output)
+   memory: only process state, cancellation handle, progress counters
+      |
+      | process exits, is cancelled, or times out
+      v
+4. Bounded reduction
+   reads:  events.bep frame by frame into BepAccumulator
+           stdout.log query rows in 1 MiB byte chunks for newline counting
+           returned query rows only, capped at 64 KiB retained / 4 KiB visible
+           2 MiB log tails with complete BEP, otherwise 8 MiB tails
+   memory: bounded reducer state + bounded log tails; no whole raw stream
+      |
+      | redact summaries, canonical argv, artifacts, filters, and output
+      v
+5. Terminal commit
+   disk:   details.json (compact JSON object of arrays, if nonempty)
+           artifacts.json (compact JSON array, if nonempty)
+           manifest.json (one coalesced atomic JSON replacement)
+   fields: state + termination + summary + final metrics + canonical argv
+           + payload byte accounting + deferred-result expiry
+      |
+      v
+6. bazel.inspect read
+   lookup: RwLock<Index> point lookup, then per-invocation read lock/serialization
+   reads:  manifest-backed compact record, selected JSON sidecar, or a bounded
+           byte range from a raw log/query file
+   cursor: versioned fixed binary payload, URL-safe base64 without padding
+      |
+      | redact before filtering/counting whenever a filter is present
+      v
+7. MCP result
+   output: existing JSON, TOON, or structured MCP representation
+   limits: serialized model-visible byte budget, opaque continuation cursor
+```
+
+`details.json` and `artifacts.json` use compact JSON rather than NDJSON or
+framed protobuf. They are short-lived, bounded reducer outputs, and JSON keeps
+atomic replacement and corruption handling simple. Query output remains raw
+newline-delimited stdout because byte-offset pagination and zero-copy newline
+counting are more valuable than a second normalized format.
+
+## Concurrency, durability, and collection
+
+The cache root has one exclusive process `LOCK`. Within a process,
+`RwLock<Index>` protects only compact in-memory state and per-invocation mutexes
+serialize mutations to the same invocation. No index lock spans an awaited
+read, write, rename, permission update, directory creation, or recursive
+deletion.
+
+Lifecycle state is durable. Inspect/model-visible/progress counters are updated
+in memory immediately and coalesced after 250 ms or into the next durable
+mutation. A crash may lose the most recent telemetry interval, but cannot
+regress committed lifecycle state. Atomic writes use a private temporary file
+and rename. The contract covers process interruption; it does not claim
+power-loss durability and therefore does not add an `fsync` to every short-lived
+metadata update. Corrupt committed JSON fails closed.
+
+GC accounts terminal bytes in the manifest. It protects live invocations and
+unexpired deferred results, preserves the 80% low-water mark, and uses rename to
+`trash/` as its deletion commit. The index entry is removed immediately after a
+successful rename. Recursive unlink runs outside the index lock; a failed
+unlink leaves trash absent from the live index and startup retries cleanup.
+
+## Controlled filesystem comparison
 
 Both release-mode runs used macOS arm64, 1,000,000 query rows (40 MB raw
 stdout), 2,000 retained terminal invocations, 1,000 point lookups, and 2,000 GC
-candidates. The baseline was captured from clean commit
-`2cdf8e9d95bf6f1123d5ec3336f8bdc2da2f28aa` before replacement. Raw normalized
-results are checked in beside the benchmark fixtures.
+candidates. The baseline is clean commit
+`0b1eb8d8087b665f232f9dfd0121af2c2c960685`; raw results and workload metadata
+are checked in with the benchmark fixtures.
 
-| Workload | Embedded database | Filesystem | Change |
+| Workload | Filesystem before | Optimized | Result |
 | --- | ---: | ---: | ---: |
-| Query store bytes | 186.0 MB | 40.0 MB | 78.5% less |
-| Query post-process | 9,302.5 ms | 117.6 ms | 79.1x faster |
-| First 100-row page | 142.3 ms | 0.046 ms | 3,100x faster |
-| Rare filtered page | 1,341.2 ms | 110.3 ms | 12.2x faster |
-| Point lookup p50 | 23.292 us | 0.125 us | 186x faster |
-| Point lookup p95 | 25.417 us | 0.167 us | 152x faster |
-| 2,000-record startup | 27.4 ms | 48.7 ms | 21.3 ms slower |
-| 2,000-record store bytes | 9.34 MB | 3.24 MB | 65.3% less |
-| Quota GC | 864.9 ms | 434.4 ms | 1.99x faster |
-| Whole benchmark wall time | 18.79 s | 7.64 s | 2.46x faster |
-| Peak memory footprint | 18.40 MB | 8.95 MB | 51.4% less |
+| Query count + 3-row sample | 118.540 ms | 2.779 ms | 42.6x faster |
+| First 100-row page | 0.040 ms | 0.046 ms | +0.006 ms |
+| Continued 100-row page | not recorded | 0.036 ms | bounded seek |
+| Rare filtered million-row scan | 126.810 ms | 112.134 ms | 11.6% faster |
+| Point lookup p95 | 0.167 us | 0.167 us | unchanged |
+| 2,000-record startup | 51.234 ms | 49.514 ms | 3.4% faster |
+| 2,000-record store bytes | 3.24 MB | 2.21 MB | 31.9% less |
+| Quota GC | 432.168 ms | 318.928 ms | 26.2% faster |
+| GC shared-index write time | not recorded | 1.668 ms | 0.52% of GC |
 
-Startup is the only measured regression. It is bounded by the number of
-retained records and costs 48.7 ms for 2,000 records on this machine. That
-21.3 ms absolute cost is acceptable for a server startup path, especially given
-the removal of database allocation, migration, and failure modes. Terminal
-records trust atomically committed byte accounting, so startup performs one
-record read rather than restatting every evidence file.
+One representative invocation uses four manifest commits—acceptance, starting,
+running, and one coalesced terminal commit—writing 3,145 metadata bytes and
+recounting evidence twice. The terminal storage finalization measured 0.436 ms
+for build, 0.806 ms for 500 test results, and 3.158 ms for a million-row query
+count plus commit.
 
-The old quota pass ended at 9.01 MB against an 8.77 MB target. The filesystem
-pass crossed its high watermark, deleted to the configured 80% low watermark,
-and ended at 4.57 MB against a 5.72 MB high watermark. Directory renames make
-the deletion state recoverable without a database transaction.
+| Writers | Throughput | p50 | p95 | p99 | Lookup p95 during writes | Inspect p95 during writes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,002/s | 0.961 ms | 1.152 ms | 1.216 ms | 0.375 us | 0.459 us |
+| 8 | 1,513/s | 5.284 ms | 6.290 ms | 6.645 ms | 0.417 us | 0.500 us |
+| 32 | 946/s | 33.035 ms | 42.217 ms | 49.624 ms | 0.792 us | 0.958 us |
+
+At 20,000 retained records, startup took 643.273 ms: 230.300 ms traversing
+directories, 375.158 ms reading manifests, 20.950 ms decoding JSON, and
+16.366 ms building indexes. The expanded benchmark took 33.980 seconds and its
+storage workloads reached 83.8 MB peak RSS. The older schema did not record an
+equivalent expanded-harness wall time or RSS, so those two values are reported
+but are not used as comparative gates.
+
+The optional 100,000-record run took 10.638 seconds to reopen 110.7 MB of
+manifests: 1.463 seconds traversal, 8.836 seconds reads, 178.493 ms JSON decode,
+and 158.850 ms index construction. That deliberately extreme cardinality is a
+useful threshold for reconsidering a rebuildable startup snapshot, but not a
+reason to add snapshot invalidation and checkpoint writes to the expected
+short-lived workload. Even there, changing each manifest to protobuf would
+address only 1.7% of startup time.
+
+## Tailing and protocol-buffer decisions
+
+Concurrent BEP tailing is not shipped. The largest checked Bazel fixture is
+65,322 bytes / 158 events and reduces after exit in 0.101 ms. The concurrent
+partial-frame experiment consumed all 158 events and finalized in 0.071 ms, a
+0.030 ms saving. Even a synthetic 67.1 MB / 162,266-event stream reduces in
+50.816 ms within the existing bounds. The representative saving is smaller than
+the coordination, partial-frame, cancellation, and fallback complexity. The
+same decision applies to live query counting: the optimized million-row
+post-exit count is 2.779 ms, while the concurrent completed-line experiment
+finalized in 0.052 ms. A roughly 2.7 ms saving does not justify live counter
+recovery and cancellation state; direct-to-disk stdout preserves the simpler
+design.
+
+No new protobuf format is justified:
+
+- BEP is already the correct varint-delimited protobuf stream.
+- Raw logs and query stdout need cheap seeks and byte-offset cursors.
+- At 2,000 records JSON decode is 2.463 ms of 49.514 ms startup; at 20,000 it
+  is 20.950 ms of 643.273 ms. File reads and traversal, not JSON, dominate.
+- Fixed binary cursors already remove JSON/base64 token overhead where the
+  representation is model-visible.
+- Detailed JSON sidecars are bounded and not read during startup. Framed
+  protobuf should be reconsidered only if real retained detail cardinality
+  makes sidecar decode or memory a measured bottleneck.
+
+Log memory is adaptive: a complete BEP uses at most 2 MiB from each relevant
+log; missing or partial BEP uses at most 8 MiB. Existing reducer fixtures and
+goldens guard diagnostic quality.
 
 ## Reproduction
 
-Build, run, and enforce the checked-in comparison gates with:
+Build, run, and enforce the checked-in filesystem comparison gates with:
 
 ```sh
 make bench-storage-compare
@@ -73,10 +194,9 @@ make bench-storage-compare
 Override the workload through `STORAGE_BENCHMARK_ARGS`, for example:
 
 ```sh
-make bench-storage STORAGE_BENCHMARK_ARGS='--label local --query-rows 1000000 --invocations 2000 --lookup-samples 1000'
+make bench-storage STORAGE_BENCHMARK_ARGS='--label local --revision working-tree --query-rows 1000000 --invocations 2000 --lookup-samples 1000'
 ```
 
-For process-level memory and wall-time accounting on macOS, prefix the release
-binary with `/usr/bin/time -l`. Measurements are single controlled runs and
-should be treated as engineering comparisons rather than statistical
-confidence intervals.
+Use `--extended-startup` to add the optional 100,000-record startup workload.
+Measurements are single controlled runs and should be treated as engineering
+comparisons rather than statistical confidence intervals.

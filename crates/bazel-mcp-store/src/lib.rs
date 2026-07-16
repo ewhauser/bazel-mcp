@@ -5,7 +5,7 @@ mod files;
 mod storage;
 
 pub use files::InvocationPaths;
-pub use storage::{Store, StoreError};
+pub use storage::{InvocationCompletion, Store, StoreError, StoreIoStats, StoreStartupStats};
 
 /// Parser entry point used by adversarial cursor tests and fuzzing.
 #[must_use]

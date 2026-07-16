@@ -696,12 +696,11 @@ There is no embedded or hosted database.
   LOCK
   trash/
   invocations/<uuidv7-day>/<bounded-shard>/<invocation-id>/
-      request.json
-      record.json
+      manifest.json
+      details.json
       stdout.log
       stderr.log
       events.bep
-      summary.json
       artifacts.json
 ```
 
@@ -712,9 +711,17 @@ user cache directory and MUST NOT be placed inside the Bazel workspace.
 
 - UUIDv7 determines a time bucket and bounded shard, so locating an invocation
   never requires a database or an unbounded directory.
-- A versioned `record.json` is the atomic commit point for invocation and
-  deferred-result metadata. There is no migration or legacy-layout reader.
+- A versioned `manifest.json` is the atomic commit point for the request,
+  lifecycle, compact summary header, metrics, byte accounting, and optional
+  deferred-result metadata. The request and summary have no duplicate durable
+  representation. There is no migration or legacy-layout reader.
+- `details.json` contains detailed target, test, and per-file coverage
+  collections. `artifacts.json` contains artifacts. Startup reads neither
+  sidecar while rebuilding the compact index.
 - One exclusive cache-root lock prevents multiple writer processes.
+- A read/write lock protects only the compact index. Per-invocation mutation
+  locks serialize writers for one invocation; no index lock is held across
+  awaited filesystem I/O.
 - Startup removes committed trash, discards uncommitted temporary files,
   rebuilds bounded indexes, and terminalizes orphaned nonterminal records.
 - Stdout, stderr, and BEP are written directly by Bazel to their final evidence
@@ -726,10 +733,16 @@ user cache directory and MUST NOT be placed inside the Bazel workspace.
 
 - Request metadata is written before the child is spawned.
 - Terminal state and exit information are committed atomically.
+- Canonical arguments, artifacts, final metrics, termination, state, and summary
+  are coalesced into one terminal manifest commit. Noncritical telemetry is
+  buffered and may lose its most recent interval on a process crash.
 - On startup, nonterminal invocations without a tracked live child transition to
   `interrupted`.
 - Complete captured files remain inspectable after server restart.
 - A partially written BEP is parsed up to the last complete message.
+- File replacement uses a private temporary file followed by atomic rename.
+  The contract covers process interruption and committed-file corruption, not
+  power loss; the store does not add an `fsync` to every short-lived update.
 
 ### 16.4 Retention
 
@@ -742,8 +755,9 @@ Defaults:
 - An unexpired deferred result protects its compact record and summary, but raw
   stdout, stderr, BEP, and artifact sidecars may be pruned independently.
 - Deleting an invocation first renames its directory into `trash/`, removes it
-  from the in-memory index, and then unlinks it. Startup completes interrupted
-  deletions. Accounted bytes and high/low watermarks avoid full-tree quota scans.
+  from the in-memory index, and then unlinks it outside the index lock. Failed
+  unlinks remain recoverable trash; startup completes interrupted deletions.
+  Accounted bytes and high/low watermarks avoid full-tree quota scans.
 
 Retention is configurable by deployment.
 

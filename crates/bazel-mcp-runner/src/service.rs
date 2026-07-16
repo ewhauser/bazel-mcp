@@ -17,7 +17,7 @@ use bazel_mcp_policy::{
 use bazel_mcp_reducer::{
     Budget, StreamReductionOutput, normalize_terminal_text, parse_lcov_reader, parse_test_xml,
 };
-use bazel_mcp_store::{InvocationPaths, Store, StoreError};
+use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
     ArtifactKind, BazelCommand, CommandClass, DeferredFailure, DeferredFailureKind,
     DeferredResultRecord, DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic,
@@ -39,7 +39,8 @@ use crate::{
     version::detect_bazel_version,
 };
 
-const REDUCTION_LOG_LIMIT: usize = 16 * 1024 * 1024;
+const COMPLETE_BEP_LOG_LIMIT: usize = 2 * 1024 * 1024;
+const FALLBACK_LOG_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RunnerConfig {
@@ -163,7 +164,7 @@ pub struct InspectRequest {
     pub max_bytes: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 struct LogCursor {
     invocation_id: InvocationId,
     end: u64,
@@ -171,14 +172,30 @@ struct LogCursor {
 
 impl LogCursor {
     fn encode(&self) -> Result<String, RunnerError> {
-        Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
+        let mut bytes = Vec::with_capacity(26);
+        bytes.extend_from_slice(&[1, 5]);
+        bytes.extend_from_slice(self.invocation_id.as_uuid().as_bytes());
+        bytes.extend_from_slice(&self.end.to_le_bytes());
+        Ok(URL_SAFE_NO_PAD.encode(bytes))
     }
 
     fn decode(value: &str) -> Result<Self, RunnerError> {
-        let raw = URL_SAFE_NO_PAD
+        let bytes = URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| RunnerError::InvalidOffset)?;
-        serde_json::from_slice(&raw).map_err(|_| RunnerError::InvalidOffset)
+        if bytes.len() != 26 || bytes[0] != 1 || bytes[1] != 5 {
+            return Err(RunnerError::InvalidOffset);
+        }
+        let uuid = uuid::Uuid::from_slice(&bytes[2..18]).map_err(|_| RunnerError::InvalidOffset)?;
+        let end = u64::from_le_bytes(
+            bytes[18..26]
+                .try_into()
+                .map_err(|_| RunnerError::InvalidOffset)?,
+        );
+        Ok(Self {
+            invocation_id: InvocationId::from_uuid(uuid),
+            end,
+        })
     }
 
     fn decode_for(value: &str, invocation_id: InvocationId) -> Result<Self, RunnerError> {
@@ -1167,12 +1184,19 @@ impl InvocationService {
                 } else {
                     (0, Vec::new())
                 };
-            let stdout = capture::read_bounded_tail(&paths.stdout, REDUCTION_LOG_LIMIT).await?;
-            let stderr = capture::read_bounded_tail(&paths.stderr, REDUCTION_LOG_LIMIT).await?;
             let (bep, bep_outcome) = capture::reduce_bep(paths.bep.clone()).await?;
             if let Some(error) = &bep_outcome.terminal_error {
                 tracing::warn!(invocation_id = %queued.request.id, %error, "partially decoded BEP");
             }
+            // Complete structured evidence needs only a small diagnostic tail;
+            // partial or missing BEP retains a larger bounded fallback.
+            let log_limit = if bep_outcome.event_count > 0 && bep_outcome.terminal_error.is_none() {
+                COMPLETE_BEP_LOG_LIMIT
+            } else {
+                FALLBACK_LOG_LIMIT
+            };
+            let stdout = capture::read_bounded_tail(&paths.stdout, log_limit).await?;
+            let stderr = capture::read_bounded_tail(&paths.stderr, log_limit).await?;
             let exit_code = status.as_ref().and_then(ExitStatus::code);
             let reduced = catch_unwind(AssertUnwindSafe(|| {
                 bep.finish(
@@ -1198,7 +1222,7 @@ impl InvocationService {
                     canonical_arguments: None,
                 }
             });
-            if let Some(mut arguments) = canonical_arguments {
+            let canonical_arguments = canonical_arguments.map(|mut arguments| {
                 let workspace = queued.request.workspace.to_string_lossy();
                 for argument in &mut arguments {
                     *argument = self.redactor.redact_bounded(
@@ -1206,17 +1230,12 @@ impl InvocationService {
                         64 * 1024,
                     );
                 }
-                self.store
-                    .update_canonical_arguments(queued.request.id, &arguments)
-                    .await?;
-            }
+                arguments
+            });
             for artifact in &mut artifacts {
                 artifact.name = self.redactor.redact_bounded(&artifact.name, 1_000);
                 artifact.uri = self.redactor.redact_bounded(&artifact.uri, 1_000);
             }
-            self.store
-                .replace_artifacts(queued.request.id, &artifacts)
-                .await?;
             if queued.request.command.class() == CommandClass::Query && exit_code == Some(0) {
                 summary.headline = format!("Bazel query returned {query_row_count} rows");
                 summary.inspect_hint = (query_row_count > 0).then(|| "query_results".to_owned());
@@ -1256,14 +1275,16 @@ impl InvocationService {
                 ..Default::default()
             };
             self.store
-                .update_metrics(queued.request.id, metrics)
-                .await?;
-            self.store
-                .transition(
+                .finish_invocation(
                     queued.request.id,
-                    state,
-                    Some(termination.clone()),
-                    Some(summary),
+                    InvocationCompletion {
+                        state,
+                        termination: termination.clone(),
+                        summary,
+                        metrics,
+                        canonical_arguments,
+                        artifacts,
+                    },
                 )
                 .await
                 .map_err(Into::into)

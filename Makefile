@@ -75,8 +75,9 @@ bench-storage:
 
 bench-storage-compare:
 	cargo run --release -p bazel-mcp-benchmark --bin storage-benchmark -- \
-		--label filesystem-current \
-		--baseline crates/bazel-mcp-benchmark/fixtures/storage/baseline-turso-2cdf8e9-macos-aarch64.json
+		--label filesystem-optimized \
+		--revision "$$(git rev-parse HEAD)" \
+		--baseline crates/bazel-mcp-benchmark/fixtures/storage/filesystem-pre-optimization-0b1eb8d-macos-aarch64.json
 
 bench-token: test-token-integration
 

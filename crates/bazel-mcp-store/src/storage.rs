@@ -3,24 +3,33 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 use bazel_mcp_types::{
     Artifact, CoverageFile, DeferredFailure, DeferredResultRecord, DeferredResultView,
     DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId, InvocationMetrics,
-    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow, Termination,
-    TestResult,
+    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow,
+    TargetResult, Termination, TestResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     InvocationPaths,
     cursor::{DeferredCursor, FileCursor, InvocationCursor, OrdinalCursor},
-    files::{set_private_directory, set_private_file, write_json_atomic},
+    files::{
+        remove_if_exists, set_private_directory, set_private_file, write_bytes_atomic,
+        write_json_atomic,
+    },
 };
 
 const RECORD_SCHEMA_VERSION: u32 = 1;
@@ -58,8 +67,50 @@ pub struct Store {
 }
 
 struct StoreInner {
-    index: Mutex<Index>,
+    index: RwLock<Index>,
+    mutation_locks: Mutex<BTreeMap<InvocationId, Weak<Mutex<()>>>>,
+    manifest_commits: AtomicU64,
+    manifest_bytes_written: AtomicU64,
+    payload_recounts: AtomicU64,
+    gc_renames: AtomicU64,
+    gc_unlinks: AtomicU64,
+    gc_rename_us: AtomicU64,
+    gc_index_write_us: AtomicU64,
+    gc_unlink_us: AtomicU64,
+    #[cfg(test)]
+    fail_next_gc_unlink: AtomicBool,
+    startup_stats: StoreStartupStats,
     _lock_file: File,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StoreIoStats {
+    pub manifest_commits: u64,
+    pub manifest_bytes_written: u64,
+    pub payload_recounts: u64,
+    pub gc_renames: u64,
+    pub gc_unlinks: u64,
+    pub gc_rename_us: u64,
+    pub gc_index_write_us: u64,
+    pub gc_unlink_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StoreStartupStats {
+    pub directory_traversal_us: u64,
+    pub manifest_read_us: u64,
+    pub manifest_decode_us: u64,
+    pub index_build_us: u64,
+}
+
+/// One coalesced terminal metadata commit for a completed Bazel invocation.
+pub struct InvocationCompletion {
+    pub state: InvocationState,
+    pub termination: Termination,
+    pub summary: InvocationSummary,
+    pub metrics: InvocationMetrics,
+    pub canonical_arguments: Option<Vec<String>>,
+    pub artifacts: Vec<Artifact>,
 }
 
 #[derive(Default)]
@@ -76,7 +127,9 @@ struct Index {
 struct IndexEntry {
     record: InvocationRecord,
     deferred: Option<DeferredResultRecord>,
-    evidence_bytes: u64,
+    retained_bytes: u64,
+    telemetry_generation: u64,
+    telemetry_flush_scheduled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,15 +139,51 @@ struct DurableRecord {
     #[serde(default)]
     deferred: Option<DeferredResultRecord>,
     #[serde(default)]
-    evidence_bytes: u64,
+    payload_bytes: u64,
 }
 
 impl DurableRecord {
-    fn index_entry(&self) -> IndexEntry {
+    fn index_entry(&self, retained_bytes: u64) -> IndexEntry {
         IndexEntry {
             record: compact_record(&self.invocation),
             deferred: self.deferred.clone(),
-            evidence_bytes: self.evidence_bytes,
+            retained_bytes,
+            telemetry_generation: 0,
+            telemetry_flush_scheduled: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct InvocationDetails {
+    targets: Vec<TargetResult>,
+    tests: Vec<TestResult>,
+    coverage_files: Vec<CoverageFile>,
+}
+
+impl InvocationDetails {
+    fn from_record(record: &InvocationRecord) -> Self {
+        let Some(summary) = &record.summary else {
+            return Self::default();
+        };
+        Self {
+            targets: summary.targets.clone(),
+            tests: summary.tests.clone(),
+            coverage_files: summary
+                .coverage
+                .as_ref()
+                .map_or_else(Vec::new, |coverage| coverage.files.clone()),
+        }
+    }
+
+    fn hydrate(self, record: &mut InvocationRecord) {
+        let Some(summary) = record.summary.as_mut() else {
+            return;
+        };
+        summary.targets = self.targets;
+        summary.tests = self.tests;
+        if let Some(coverage) = summary.coverage.as_mut() {
+            coverage.files = self.coverage_files;
         }
     }
 }
@@ -126,13 +215,25 @@ impl Store {
         }
 
         recover_trash(&cache_root).await?;
-        let mut index = load_index(&cache_root).await?;
+        let (mut index, startup_stats) = load_index(&cache_root).await?;
         recover_interrupted(&cache_root, &mut index).await?;
 
         Ok(Self {
             cache_root,
             inner: Arc::new(StoreInner {
-                index: Mutex::new(index),
+                index: RwLock::new(index),
+                mutation_locks: Mutex::new(BTreeMap::new()),
+                manifest_commits: AtomicU64::new(0),
+                manifest_bytes_written: AtomicU64::new(0),
+                payload_recounts: AtomicU64::new(0),
+                gc_renames: AtomicU64::new(0),
+                gc_unlinks: AtomicU64::new(0),
+                gc_rename_us: AtomicU64::new(0),
+                gc_index_write_us: AtomicU64::new(0),
+                gc_unlink_us: AtomicU64::new(0),
+                #[cfg(test)]
+                fail_next_gc_unlink: AtomicBool::new(false),
+                startup_stats,
                 _lock_file: lock_file,
             }),
         })
@@ -145,6 +246,53 @@ impl Store {
 
     fn paths_for_id(&self, id: InvocationId) -> InvocationPaths {
         InvocationPaths::new(&self.cache_root, id)
+    }
+
+    async fn mutation_lock(&self, id: InvocationId) -> Arc<Mutex<()>> {
+        let mut locks = self.inner.mutation_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(id, Arc::downgrade(&lock));
+        lock
+    }
+
+    #[must_use]
+    pub fn io_stats(&self) -> StoreIoStats {
+        StoreIoStats {
+            manifest_commits: self.inner.manifest_commits.load(Ordering::Relaxed),
+            manifest_bytes_written: self.inner.manifest_bytes_written.load(Ordering::Relaxed),
+            payload_recounts: self.inner.payload_recounts.load(Ordering::Relaxed),
+            gc_renames: self.inner.gc_renames.load(Ordering::Relaxed),
+            gc_unlinks: self.inner.gc_unlinks.load(Ordering::Relaxed),
+            gc_rename_us: self.inner.gc_rename_us.load(Ordering::Relaxed),
+            gc_index_write_us: self.inner.gc_index_write_us.load(Ordering::Relaxed),
+            gc_unlink_us: self.inner.gc_unlink_us.load(Ordering::Relaxed),
+        }
+    }
+
+    #[must_use]
+    pub fn startup_stats(&self) -> StoreStartupStats {
+        self.inner.startup_stats
+    }
+
+    async fn persist_durable(
+        &self,
+        paths: &InvocationPaths,
+        durable: &mut DurableRecord,
+        recount_payload: bool,
+    ) -> Result<u64, StoreError> {
+        self.inner.manifest_commits.fetch_add(1, Ordering::Relaxed);
+        if recount_payload {
+            self.inner.payload_recounts.fetch_add(1, Ordering::Relaxed);
+        }
+        let outcome = persist_durable(paths, durable, recount_payload).await?;
+        self.inner
+            .manifest_bytes_written
+            .fetch_add(outcome.manifest_bytes, Ordering::Relaxed);
+        Ok(outcome.retained_bytes)
     }
 
     pub async fn create_invocation(
@@ -160,8 +308,10 @@ impl Store {
         deferred: Option<&DeferredResultRecord>,
     ) -> Result<InvocationPaths, StoreError> {
         let paths = self.paths_for(record);
-        let mut index = self.inner.index.lock().await;
-        if index.entries.contains_key(&record.request.id) {
+        let id = record.request.id;
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        if self.inner.index.read().await.entries.contains_key(&id) {
             return Err(StoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "invocation already exists",
@@ -169,25 +319,25 @@ impl Store {
         }
         paths.create().await?;
         let result = async {
-            paths.write_request(record).await?;
             let mut durable = DurableRecord {
                 schema_version: RECORD_SCHEMA_VERSION,
-                invocation: record.clone(),
+                invocation: compact_record(record),
                 deferred: deferred.cloned(),
-                evidence_bytes: 0,
+                payload_bytes: 0,
             };
-            persist_durable(&paths, &mut durable).await?;
-            Ok::<DurableRecord, StoreError>(durable)
+            let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+            Ok::<_, StoreError>((durable, retained_bytes))
         }
         .await;
-        let durable = match result {
+        let (durable, retained_bytes) = match result {
             Ok(durable) => durable,
             Err(error) => {
                 let _ = tokio::fs::remove_dir_all(&paths.directory).await;
                 return Err(error);
             }
         };
-        insert_index_entry(&mut index, record.request.id, durable.index_entry());
+        let mut index = self.inner.index.write().await;
+        insert_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         Ok(paths)
     }
 
@@ -197,25 +347,34 @@ impl Store {
         retrieval: DeferredRetrieval,
         now_ms: i64,
     ) -> Result<DeferredResultView, StoreError> {
-        let mut index = self.inner.index.lock().await;
-        let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
-        let Some(deferred) = entry.deferred.clone() else {
-            return Err(StoreError::DeferredNotFound(id));
+        let (deferred, record) = {
+            let index = self.inner.index.read().await;
+            let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
+            let Some(deferred) = entry.deferred.clone() else {
+                return Err(StoreError::DeferredNotFound(id));
+            };
+            (deferred, entry.record.clone())
         };
         if deferred.retrieval != retrieval
-            || deferred.is_expired(now_ms, entry.record.state.is_terminal())
+            || deferred.is_expired(now_ms, record.state.is_terminal())
         {
-            if deferred.is_expired(now_ms, entry.record.state.is_terminal()) {
-                let mut durable = read_durable(&self.paths_for_id(id).metadata).await?;
-                durable.deferred = None;
-                persist_durable(&self.paths_for_id(id), &mut durable).await?;
-                replace_index_entry(&mut index, id, durable.index_entry());
+            if deferred.is_expired(now_ms, record.state.is_terminal()) {
+                self.mutate(id, false, |durable| {
+                    durable.deferred = None;
+                    Ok(())
+                })
+                .await?;
             }
             return Err(StoreError::DeferredNotFound(id));
         }
+        let invocation = if record.state.is_terminal() {
+            self.read_full_invocation(id).await?
+        } else {
+            record
+        };
         Ok(DeferredResultView {
             deferred,
-            invocation: entry.record.clone(),
+            invocation,
         })
     }
 
@@ -231,7 +390,7 @@ impl Store {
             .as_deref()
             .map(|value| DeferredCursor::decode_for(value, retrieval.as_str()))
             .transpose()?;
-        let index = self.inner.index.lock().await;
+        let index = self.inner.index.read().await;
         let mut items: Vec<_> = index
             .deferred_by_created
             .iter()
@@ -282,7 +441,7 @@ impl Store {
         id: InvocationId,
         requested_at_ms: i64,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
+        self.mutate(id, false, |durable| {
             let deferred = durable
                 .deferred
                 .as_mut()
@@ -302,7 +461,7 @@ impl Store {
         state: DeferredTerminalState,
         updated_at_ms: i64,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
+        self.mutate(id, false, |durable| {
             let deferred = durable
                 .deferred
                 .as_mut()
@@ -320,7 +479,7 @@ impl Store {
         failure: &DeferredFailure,
         updated_at_ms: i64,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
+        self.mutate(id, false, |durable| {
             let deferred = durable
                 .deferred
                 .as_mut()
@@ -338,7 +497,7 @@ impl Store {
         minimum_expires_at_ms: i64,
         updated_at_ms: i64,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
+        self.mutate(id, false, |durable| {
             let deferred = durable
                 .deferred
                 .as_mut()
@@ -351,26 +510,28 @@ impl Store {
     }
 
     pub async fn delete_expired_deferred_results(&self, now_ms: i64) -> Result<usize, StoreError> {
-        let mut index = self.inner.index.lock().await;
-        let ids: Vec<_> = index
-            .entries
-            .iter()
-            .filter_map(|(id, entry)| {
-                entry
-                    .deferred
-                    .as_ref()
-                    .is_some_and(|deferred| {
-                        deferred.is_expired(now_ms, entry.record.state.is_terminal())
-                    })
-                    .then_some(*id)
-            })
-            .collect();
+        let ids: Vec<_> = {
+            let index = self.inner.index.read().await;
+            index
+                .entries
+                .iter()
+                .filter_map(|(id, entry)| {
+                    entry
+                        .deferred
+                        .as_ref()
+                        .is_some_and(|deferred| {
+                            deferred.is_expired(now_ms, entry.record.state.is_terminal())
+                        })
+                        .then_some(*id)
+                })
+                .collect()
+        };
         for id in &ids {
-            let paths = self.paths_for_id(*id);
-            let mut durable = read_durable(&paths.metadata).await?;
-            durable.deferred = None;
-            persist_durable(&paths, &mut durable).await?;
-            replace_index_entry(&mut index, *id, durable.index_entry());
+            self.mutate(*id, false, |durable| {
+                durable.deferred = None;
+                Ok(())
+            })
+            .await?;
         }
         Ok(ids.len())
     }
@@ -378,7 +539,7 @@ impl Store {
     pub async fn get_invocation(&self, id: InvocationId) -> Result<InvocationRecord, StoreError> {
         self.inner
             .index
-            .lock()
+            .read()
             .await
             .entries
             .get(&id)
@@ -393,15 +554,21 @@ impl Store {
         termination: Option<Termination>,
         summary: Option<InvocationSummary>,
     ) -> Result<InvocationRecord, StoreError> {
-        let mut index = self.inner.index.lock().await;
-        ensure_exists(&index, id)?;
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
         let paths = self.paths_for_id(id);
-        let mut durable = match read_durable(&paths.metadata).await {
+        let (mut durable, _) = match read_durable(&paths.manifest).await {
             Ok(durable) => durable,
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut index = self.inner.index.write().await;
                 return transition_lost_evidence(&mut index, id, next, termination, summary);
             }
             Err(error) => return Err(error),
+        };
+        let telemetry_generation = {
+            let index = self.inner.index.read().await;
+            merge_index_telemetry(&index, id, &mut durable.invocation.metrics)
         };
         durable.invocation.transition(next)?;
         durable.invocation.termination = termination.clone();
@@ -415,34 +582,82 @@ impl Store {
                 .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms);
             deferred.extend_terminal_expiry(terminal_at_ms);
         }
-        // The summary becomes durable before the terminal record is committed.
-        if let Err(error) = paths.write_summary(&durable.invocation).await {
-            if error_is_not_found(&error) {
-                return transition_lost_evidence(&mut index, id, next, termination, summary);
-            }
-            return Err(error);
-        }
-        if let Err(error) = persist_durable(&paths, &mut durable).await {
-            if error_is_not_found(&error) {
-                return transition_lost_evidence(&mut index, id, next, termination, summary);
-            }
-            return Err(error);
-        }
         let result = durable.invocation.clone();
-        replace_index_entry(&mut index, id, durable.index_entry());
+        if next.is_terminal() {
+            write_details(&paths, &result).await?;
+            durable.invocation = compact_record(&result);
+        }
+        let retained_bytes = match self
+            .persist_durable(&paths, &mut durable, next.is_terminal())
+            .await
+        {
+            Ok(retained_bytes) => retained_bytes,
+            Err(error) if error_is_not_found(&error) => {
+                let mut index = self.inner.index.write().await;
+                return transition_lost_evidence(&mut index, id, next, termination, summary);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut index = self.inner.index.write().await;
+        replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
+        mark_telemetry_flushed(&mut index, id, telemetry_generation);
         Ok(result)
     }
 
-    pub async fn update_metrics(
+    pub async fn finish_invocation(
         &self,
         id: InvocationId,
-        metrics: InvocationMetrics,
-    ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
-            durable.invocation.metrics = metrics;
-            Ok(())
-        })
-        .await
+        completion: InvocationCompletion,
+    ) -> Result<InvocationRecord, StoreError> {
+        let InvocationCompletion {
+            state,
+            termination,
+            summary,
+            metrics,
+            canonical_arguments,
+            artifacts,
+        } = completion;
+        if !state.is_terminal() {
+            return Err(StoreError::State(bazel_mcp_types::StateTransitionError {
+                current: self.get_invocation(id).await?.state,
+                next: state,
+            }));
+        }
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
+        let paths = self.paths_for_id(id);
+        let (mut durable, _) = read_durable(&paths.manifest).await?;
+        durable.invocation.transition(state)?;
+        durable.invocation.termination = Some(termination);
+        durable.invocation.summary = Some(summary);
+        durable.invocation.metrics = metrics;
+        let telemetry_generation = {
+            let index = self.inner.index.read().await;
+            merge_index_telemetry(&index, id, &mut durable.invocation.metrics)
+        };
+        durable.invocation.canonical_arguments = canonical_arguments;
+        if let Some(deferred) = durable.deferred.as_mut() {
+            deferred.extend_terminal_expiry(
+                durable
+                    .invocation
+                    .finished_at_ms
+                    .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms),
+            );
+        }
+        let result = durable.invocation.clone();
+        if artifacts.is_empty() {
+            remove_if_exists(&paths.artifacts).await?;
+        } else {
+            write_json_atomic(&paths.artifacts, &artifacts).await?;
+        }
+        write_details(&paths, &result).await?;
+        durable.invocation = compact_record(&result);
+        let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+        let mut index = self.inner.index.write().await;
+        replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
+        mark_telemetry_flushed(&mut index, id, telemetry_generation);
+        Ok(result)
     }
 
     pub async fn record_model_visible_result(
@@ -451,15 +666,26 @@ impl Store {
         bytes: u64,
         inspection: bool,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
-            let metrics = &mut durable.invocation.metrics;
+        let schedule = {
+            let mut index = self.inner.index.write().await;
+            let entry = index.entries.get_mut(&id).ok_or(StoreError::NotFound(id))?;
+            let metrics = &mut entry.record.metrics;
             metrics.model_visible_bytes = metrics.model_visible_bytes.saturating_add(bytes);
             if inspection {
                 metrics.inspect_calls = metrics.inspect_calls.saturating_add(1);
             }
-            Ok(())
-        })
-        .await
+            entry.telemetry_generation = entry.telemetry_generation.saturating_add(1);
+            if entry.telemetry_flush_scheduled {
+                false
+            } else {
+                entry.telemetry_flush_scheduled = true;
+                true
+            }
+        };
+        if schedule {
+            self.schedule_telemetry_flush(id);
+        }
+        Ok(())
     }
 
     pub async fn record_progress_notifications(
@@ -467,24 +693,87 @@ impl Store {
         id: InvocationId,
         count: u64,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
-            let metrics = &mut durable.invocation.metrics;
+        let schedule = {
+            let mut index = self.inner.index.write().await;
+            let entry = index.entries.get_mut(&id).ok_or(StoreError::NotFound(id))?;
+            let metrics = &mut entry.record.metrics;
             metrics.progress_notifications = metrics.progress_notifications.saturating_add(count);
-            Ok(())
-        })
-        .await
+            entry.telemetry_generation = entry.telemetry_generation.saturating_add(1);
+            if entry.telemetry_flush_scheduled {
+                false
+            } else {
+                entry.telemetry_flush_scheduled = true;
+                true
+            }
+        };
+        if schedule {
+            self.schedule_telemetry_flush(id);
+        }
+        Ok(())
     }
 
-    pub async fn update_canonical_arguments(
-        &self,
-        id: InvocationId,
-        arguments: &[String],
-    ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
-            durable.invocation.canonical_arguments = Some(arguments.to_vec());
-            Ok(())
-        })
-        .await
+    fn schedule_telemetry_flush(&self, id: InvocationId) {
+        let inner = Arc::downgrade(&self.inner);
+        let cache_root = self.cache_root.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
+                let store = Store {
+                    cache_root: cache_root.clone(),
+                    inner,
+                };
+                match store.flush_telemetry_once(id).await {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(_) => {
+                        if let Some(entry) = store.inner.index.write().await.entries.get_mut(&id) {
+                            entry.telemetry_flush_scheduled = false;
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    async fn flush_telemetry_once(&self, id: InvocationId) -> Result<bool, StoreError> {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        let (metrics, generation) = {
+            let index = self.inner.index.read().await;
+            let Some(entry) = index.entries.get(&id) else {
+                return Ok(true);
+            };
+            if !entry.telemetry_flush_scheduled {
+                return Ok(true);
+            }
+            (entry.record.metrics.clone(), entry.telemetry_generation)
+        };
+        let paths = self.paths_for_id(id);
+        let (mut durable, _) = read_durable(&paths.manifest).await?;
+        durable.invocation.metrics.model_visible_bytes = metrics.model_visible_bytes;
+        durable.invocation.metrics.progress_notifications = metrics.progress_notifications;
+        durable.invocation.metrics.inspect_calls = metrics.inspect_calls;
+        let retained_bytes = self.persist_durable(&paths, &mut durable, false).await?;
+        let mut index = self.inner.index.write().await;
+        let (previous, clean) = {
+            let Some(entry) = index.entries.get_mut(&id) else {
+                return Ok(true);
+            };
+            let previous = entry.retained_bytes;
+            entry.retained_bytes = retained_bytes;
+            let clean = entry.telemetry_generation == generation;
+            if clean {
+                entry.telemetry_flush_scheduled = false;
+            }
+            (previous, clean)
+        };
+        index.retained_bytes = index.retained_bytes.saturating_sub(previous);
+        index.retained_bytes = index.retained_bytes.saturating_add(retained_bytes);
+        Ok(clean)
     }
 
     pub async fn update_cancellation_reason(
@@ -492,7 +781,7 @@ impl Store {
         id: InvocationId,
         reason: &str,
     ) -> Result<(), StoreError> {
-        self.mutate(id, |durable| {
+        self.mutate(id, false, |durable| {
             durable.invocation.cancellation_reason = Some(reason.to_owned());
             Ok(())
         })
@@ -511,7 +800,7 @@ impl Store {
             .as_deref()
             .map(|value| InvocationCursor::decode_for(value, workspace_text.as_deref()))
             .transpose()?;
-        let index = self.inner.index.lock().await;
+        let index = self.inner.index.read().await;
         let collect = |ordered: &BTreeSet<(i64, InvocationId)>| {
             ordered
                 .iter()
@@ -568,41 +857,51 @@ impl Store {
         self.delete_expired_deferred_results(now_ms).await?;
         let cutoff =
             now_ms.saturating_sub(i64::try_from(maximum_age.as_millis()).unwrap_or(i64::MAX));
-        let mut index = self.inner.index.lock().await;
         // Running evidence can grow without metadata commits. Refresh only the
         // bounded live set; terminal bytes remain commit-accounted, so normal
         // GC never walks the cache tree.
-        let live_ids: Vec<_> = index
+        let live_ids: Vec<_> = self
+            .inner
+            .index
+            .read()
+            .await
             .entries
             .iter()
             .filter_map(|(id, entry)| (!entry.record.state.is_terminal()).then_some(*id))
             .collect();
         for id in live_ids {
             let current = evidence_size(&self.paths_for_id(id)).await?;
-            let previous = index.entries.get_mut(&id).map(|entry| {
-                let previous = entry.evidence_bytes;
-                entry.evidence_bytes = current;
-                previous
+            let mut index = self.inner.index.write().await;
+            let previous = index.entries.get_mut(&id).and_then(|entry| {
+                if entry.record.state.is_terminal() {
+                    return None;
+                }
+                let previous = entry.retained_bytes;
+                entry.retained_bytes = current;
+                Some(previous)
             });
             if let Some(previous) = previous {
                 index.retained_bytes = index.retained_bytes.saturating_sub(previous);
                 index.retained_bytes = index.retained_bytes.saturating_add(current);
             }
         }
-        let candidates: Vec<_> = index
-            .terminal_by_finished
-            .iter()
-            .filter_map(|(finished, id)| {
-                let entry = index.entries.get(id)?;
-                Some((
-                    *id,
-                    *finished,
-                    entry.deferred.as_ref().is_some_and(|deferred| {
-                        !deferred.is_expired(now_ms, entry.record.state.is_terminal())
-                    }),
-                ))
-            })
-            .collect();
+        let candidates: Vec<_> = {
+            let index = self.inner.index.read().await;
+            index
+                .terminal_by_finished
+                .iter()
+                .filter_map(|(finished, id)| {
+                    let entry = index.entries.get(id)?;
+                    Some((
+                        *id,
+                        *finished,
+                        entry.deferred.as_ref().is_some_and(|deferred| {
+                            !deferred.is_expired(now_ms, entry.record.state.is_terminal())
+                        }),
+                    ))
+                })
+                .collect()
+        };
 
         let low_watermark = maximum_bytes
             .saturating_mul(GC_LOW_WATERMARK_PERCENT)
@@ -612,18 +911,18 @@ impl Store {
         let mut processed = BTreeSet::new();
         for (id, finished, protected) in &candidates {
             if *finished < cutoff {
-                if self.reclaim_terminal(&mut index, *id, *protected).await? {
+                if self.reclaim_terminal(*id, *protected).await? {
                     reclaimed += 1;
                 }
                 processed.insert(*id);
             }
         }
-        if index.retained_bytes > maximum_bytes {
+        if self.inner.index.read().await.retained_bytes > maximum_bytes {
             for (id, _, protected) in candidates {
-                if index.retained_bytes <= low_watermark {
+                if self.inner.index.read().await.retained_bytes <= low_watermark {
                     break;
                 }
-                if processed.insert(id) && self.reclaim_terminal(&mut index, id, protected).await? {
+                if processed.insert(id) && self.reclaim_terminal(id, protected).await? {
                     reclaimed += 1;
                 }
             }
@@ -633,46 +932,99 @@ impl Store {
 
     async fn reclaim_terminal(
         &self,
-        index: &mut Index,
         id: InvocationId,
         deferred_protected: bool,
     ) -> Result<bool, StoreError> {
-        if deferred_protected {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        let (before, currently_protected) = {
+            let index = self.inner.index.read().await;
+            let Some(entry) = index.entries.get(&id) else {
+                return Ok(false);
+            };
+            if !entry.record.state.is_terminal() {
+                return Ok(false);
+            }
+            (entry.retained_bytes, entry.deferred.is_some())
+        };
+        if deferred_protected && currently_protected {
             let paths = self.paths_for_id(id);
-            let before = index
-                .entries
-                .get(&id)
-                .map_or(0, |entry| entry.evidence_bytes);
-            let mut durable = read_durable(&paths.metadata).await?;
+            let (mut durable, _) = read_durable(&paths.manifest).await?;
             stage_raw_evidence(&self.cache_root, id, &paths).await?;
-            persist_durable(&paths, &mut durable).await?;
-            let after = durable.evidence_bytes;
-            replace_index_entry(index, id, durable.index_entry());
-            finish_staged_evidence(&self.cache_root, id).await?;
-            return Ok(after < before);
+            let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+            {
+                let mut index = self.inner.index.write().await;
+                replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
+            }
+            // The rename and manifest update committed pruning. Unlinking the
+            // staged evidence is deliberately outside the shared index lock.
+            let _ = finish_staged_evidence(&self.cache_root, id).await;
+            return Ok(retained_bytes < before);
         }
+        let rename_started = Instant::now();
         if let Some(trash) = rename_to_trash(&self.cache_root, id).await? {
-            remove_index_entry(index, id);
+            self.inner
+                .gc_rename_us
+                .fetch_add(elapsed_us(rename_started.elapsed()), Ordering::Relaxed);
+            self.inner.gc_renames.fetch_add(1, Ordering::Relaxed);
+            {
+                let index_started = Instant::now();
+                let mut index = self.inner.index.write().await;
+                remove_index_entry(&mut index, id);
+                self.inner
+                    .gc_index_write_us
+                    .fetch_add(elapsed_us(index_started.elapsed()), Ordering::Relaxed);
+            }
             // Rename is the deletion commit. If unlinking fails, the index
             // stays removed and startup finishes this trash entry.
-            tokio::fs::remove_dir_all(trash).await?;
+            let unlink_started = Instant::now();
+            #[cfg(test)]
+            let unlink_result = if self
+                .inner
+                .fail_next_gc_unlink
+                .swap(false, Ordering::Relaxed)
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected GC unlink failure",
+                ))
+            } else {
+                tokio::fs::remove_dir_all(trash).await
+            };
+            #[cfg(not(test))]
+            let unlink_result = tokio::fs::remove_dir_all(trash).await;
+            if unlink_result.is_ok() {
+                self.inner.gc_unlinks.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner
+                .gc_unlink_us
+                .fetch_add(elapsed_us(unlink_started.elapsed()), Ordering::Relaxed);
             return Ok(true);
         }
         Ok(false)
     }
 
+    /// Replace the artifact sidecar outside the normal coalesced terminal path.
+    /// This is retained for tests and recovery-oriented callers; production
+    /// completion writes artifacts through `finish_invocation`.
     pub async fn replace_artifacts(
         &self,
         id: InvocationId,
         artifacts: &[Artifact],
     ) -> Result<(), StoreError> {
-        let mut index = self.inner.index.lock().await;
-        ensure_exists(&index, id)?;
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
         let paths = self.paths_for_id(id);
-        paths.write_artifacts(artifacts).await?;
-        let mut durable = read_durable(&paths.metadata).await?;
-        persist_durable(&paths, &mut durable).await?;
-        replace_index_entry(&mut index, id, durable.index_entry());
+        if artifacts.is_empty() {
+            remove_if_exists(&paths.artifacts).await?;
+        } else {
+            write_json_atomic(&paths.artifacts, artifacts).await?;
+        }
+        let (mut durable, _) = read_durable(&paths.manifest).await?;
+        let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+        let mut index = self.inner.index.write().await;
+        replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         Ok(())
     }
 
@@ -682,7 +1034,7 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
     ) -> Result<(Page<Diagnostic>, u64, u64), StoreError> {
-        let record = self.read_full_invocation(id).await?;
+        let record = self.get_invocation(id).await?;
         let items = record
             .summary
             .map_or_else(Vec::new, |summary| summary.diagnostics);
@@ -701,10 +1053,8 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
     ) -> Result<(Page<TestResult>, u64, u64), StoreError> {
-        let record = self.read_full_invocation(id).await?;
-        let items = record
-            .summary
-            .map_or_else(Vec::new, |summary| summary.tests);
+        let details = self.read_details(id).await?;
+        let items = details.tests;
         page_records("test_results", id, filter, page, items, |item| {
             item.label.clone()
         })
@@ -716,6 +1066,8 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
     ) -> Result<(Page<Artifact>, u64, u64), StoreError> {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
         let path = self.paths_for_id(id).artifacts;
         let items: Vec<Artifact> = read_json_or_default(&path).await?;
@@ -730,11 +1082,8 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
     ) -> Result<(Page<CoverageFile>, u64, u64), StoreError> {
-        let record = self.read_full_invocation(id).await?;
-        let items = record
-            .summary
-            .and_then(|summary| summary.coverage)
-            .map_or_else(Vec::new, |coverage| coverage.files);
+        let details = self.read_details(id).await?;
+        let items = details.coverage_files;
         page_records("coverage_files", id, filter, page, items, |item| {
             item.path.clone()
         })
@@ -763,8 +1112,10 @@ impl Store {
     where
         F: Fn(&str) -> String + Send + 'static,
     {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
         let known_total = {
-            let index = self.inner.index.lock().await;
+            let index = self.inner.index.read().await;
             let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
             filter
                 .is_none()
@@ -807,31 +1158,62 @@ impl Store {
         .await?
     }
 
-    async fn mutate<F>(&self, id: InvocationId, operation: F) -> Result<(), StoreError>
+    async fn mutate<F>(
+        &self,
+        id: InvocationId,
+        recount_payload: bool,
+        operation: F,
+    ) -> Result<(), StoreError>
     where
         F: FnOnce(&mut DurableRecord) -> Result<(), StoreError>,
     {
-        let mut index = self.inner.index.lock().await;
-        ensure_exists(&index, id)?;
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
         let paths = self.paths_for_id(id);
-        let mut durable = read_durable(&paths.metadata).await?;
+        let (mut durable, _) = read_durable(&paths.manifest).await?;
+        let telemetry_generation = {
+            let index = self.inner.index.read().await;
+            merge_index_telemetry(&index, id, &mut durable.invocation.metrics)
+        };
         operation(&mut durable)?;
-        persist_durable(&paths, &mut durable).await?;
-        replace_index_entry(&mut index, id, durable.index_entry());
+        let retained_bytes = self
+            .persist_durable(&paths, &mut durable, recount_payload)
+            .await?;
+        let mut index = self.inner.index.write().await;
+        replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
+        mark_telemetry_flushed(&mut index, id, telemetry_generation);
         Ok(())
     }
 
     async fn ensure_invocation(&self, id: InvocationId) -> Result<(), StoreError> {
-        let index = self.inner.index.lock().await;
+        let index = self.inner.index.read().await;
         ensure_exists(&index, id)
     }
 
     async fn read_full_invocation(&self, id: InvocationId) -> Result<InvocationRecord, StoreError> {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
-        Ok(read_durable(&self.paths_for_id(id).metadata)
+        let paths = self.paths_for_id(id);
+        let (durable, _) = read_durable(&paths.manifest).await?;
+        let mut record = durable.invocation;
+        read_json_or_default::<InvocationDetails>(&paths.details)
             .await?
-            .invocation)
+            .hydrate(&mut record);
+        Ok(record)
     }
+
+    async fn read_details(&self, id: InvocationId) -> Result<InvocationDetails, StoreError> {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
+        read_json_or_default(&self.paths_for_id(id).details).await
+    }
+}
+
+fn elapsed_us(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn ensure_exists(index: &Index, id: InvocationId) -> Result<(), StoreError> {
@@ -844,25 +1226,55 @@ fn ensure_exists(index: &Index, id: InvocationId) -> Result<(), StoreError> {
 
 fn insert_index_entry(index: &mut Index, id: InvocationId, entry: IndexEntry) {
     add_secondary_indexes(index, id, &entry);
-    index.retained_bytes = index.retained_bytes.saturating_add(entry.evidence_bytes);
+    index.retained_bytes = index.retained_bytes.saturating_add(entry.retained_bytes);
     index.entries.insert(id, entry);
 }
 
-fn replace_index_entry(index: &mut Index, id: InvocationId, entry: IndexEntry) {
+fn replace_index_entry(index: &mut Index, id: InvocationId, mut entry: IndexEntry) {
     if let Some(previous) = index.entries.remove(&id) {
+        merge_telemetry(&previous.record.metrics, &mut entry.record.metrics);
+        entry.telemetry_generation = previous.telemetry_generation;
+        entry.telemetry_flush_scheduled = previous.telemetry_flush_scheduled;
         remove_secondary_indexes(index, id, &previous);
-        index.retained_bytes = index.retained_bytes.saturating_sub(previous.evidence_bytes);
+        index.retained_bytes = index.retained_bytes.saturating_sub(previous.retained_bytes);
     }
     add_secondary_indexes(index, id, &entry);
-    index.entries.insert(id, entry.clone());
-    index.retained_bytes = index.retained_bytes.saturating_add(entry.evidence_bytes);
+    index.retained_bytes = index.retained_bytes.saturating_add(entry.retained_bytes);
+    index.entries.insert(id, entry);
 }
 
 fn remove_index_entry(index: &mut Index, id: InvocationId) {
     if let Some(entry) = index.entries.remove(&id) {
         remove_secondary_indexes(index, id, &entry);
-        index.retained_bytes = index.retained_bytes.saturating_sub(entry.evidence_bytes);
+        index.retained_bytes = index.retained_bytes.saturating_sub(entry.retained_bytes);
     }
+}
+
+fn merge_index_telemetry(index: &Index, id: InvocationId, metrics: &mut InvocationMetrics) -> u64 {
+    if let Some(entry) = index.entries.get(&id) {
+        merge_telemetry(&entry.record.metrics, metrics);
+        entry.telemetry_generation
+    } else {
+        0
+    }
+}
+
+fn mark_telemetry_flushed(index: &mut Index, id: InvocationId, generation: u64) {
+    if let Some(entry) = index.entries.get_mut(&id)
+        && entry.telemetry_generation == generation
+    {
+        entry.telemetry_flush_scheduled = false;
+    }
+}
+
+fn merge_telemetry(source: &InvocationMetrics, destination: &mut InvocationMetrics) {
+    destination.model_visible_bytes = destination
+        .model_visible_bytes
+        .max(source.model_visible_bytes);
+    destination.progress_notifications = destination
+        .progress_notifications
+        .max(source.progress_notifications);
+    destination.inspect_calls = destination.inspect_calls.max(source.inspect_calls);
 }
 
 fn add_secondary_indexes(index: &mut Index, id: InvocationId, entry: &IndexEntry) {
@@ -914,32 +1326,32 @@ fn remove_secondary_indexes(index: &mut Index, id: InvocationId, entry: &IndexEn
 async fn persist_durable(
     paths: &InvocationPaths,
     durable: &mut DurableRecord,
-) -> Result<(), StoreError> {
-    let payload_bytes = evidence_payload_size(paths).await?;
-    let mut accounted = payload_bytes;
-    // The decimal byte count changes record length by at most a few digits;
-    // converge before the one atomic write rather than committing twice.
-    for _ in 0..4 {
-        durable.evidence_bytes = accounted;
-        let record_bytes = u64::try_from(serde_json::to_vec(durable)?.len()).unwrap_or(u64::MAX);
-        let next = payload_bytes.saturating_add(record_bytes);
-        if next == accounted {
-            break;
-        }
-        accounted = next;
+    recount_payload: bool,
+) -> Result<PersistOutcome, StoreError> {
+    if recount_payload {
+        durable.payload_bytes = evidence_payload_size(paths).await?;
     }
-    durable.evidence_bytes = accounted;
-    write_json_atomic(&paths.metadata, durable).await
+    let bytes = serde_json::to_vec(durable)?;
+    let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    write_bytes_atomic(&paths.manifest, &bytes).await?;
+    Ok(PersistOutcome {
+        retained_bytes: durable.payload_bytes.saturating_add(manifest_bytes),
+        manifest_bytes,
+    })
+}
+
+struct PersistOutcome {
+    retained_bytes: u64,
+    manifest_bytes: u64,
 }
 
 async fn evidence_payload_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
     let mut size = 0_u64;
     for path in [
-        &paths.request,
+        &paths.details,
         &paths.stdout,
         &paths.stderr,
         &paths.bep,
-        &paths.summary,
         &paths.artifacts,
     ] {
         match tokio::fs::symlink_metadata(path).await {
@@ -957,12 +1369,11 @@ async fn evidence_payload_size(paths: &InvocationPaths) -> Result<u64, StoreErro
 async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
     let mut size = 0_u64;
     for path in [
-        &paths.request,
-        &paths.metadata,
+        &paths.manifest,
+        &paths.details,
         &paths.stdout,
         &paths.stderr,
         &paths.bep,
-        &paths.summary,
         &paths.artifacts,
     ] {
         match tokio::fs::symlink_metadata(path).await {
@@ -977,9 +1388,10 @@ async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
     Ok(size)
 }
 
-async fn read_durable(path: &Path) -> Result<DurableRecord, StoreError> {
+async fn read_durable(path: &Path) -> Result<(DurableRecord, u64), StoreError> {
     let bytes = tokio::fs::read(path).await?;
-    decode_durable(path, &bytes)
+    let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    Ok((decode_durable(path, &bytes)?, manifest_bytes))
 }
 
 fn decode_durable(path: &Path, bytes: &[u8]) -> Result<DurableRecord, StoreError> {
@@ -1011,13 +1423,15 @@ async fn recover_trash(cache_root: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-async fn load_index(cache_root: &Path) -> Result<Index, StoreError> {
+async fn load_index(cache_root: &Path) -> Result<(Index, StoreStartupStats), StoreError> {
     let cache_root = cache_root.to_owned();
     tokio::task::spawn_blocking(move || load_index_blocking(&cache_root)).await?
 }
 
-fn load_index_blocking(cache_root: &Path) -> Result<Index, StoreError> {
+fn load_index_blocking(cache_root: &Path) -> Result<(Index, StoreStartupStats), StoreError> {
+    let total_started = Instant::now();
     let mut index = Index::default();
+    let mut stats = StoreStartupStats::default();
     let invocations = cache_root.join("invocations");
     for day in std::fs::read_dir(&invocations)? {
         let day = day?;
@@ -1047,54 +1461,75 @@ fn load_index_blocking(cache_root: &Path) -> Result<Index, StoreError> {
                     });
                 }
                 for temporary in [
-                    expected.metadata.with_extension("tmp"),
-                    expected.request.with_extension("tmp"),
-                    expected.summary.with_extension("tmp"),
+                    expected.manifest.with_extension("tmp"),
+                    expected.details.with_extension("tmp"),
                     expected.artifacts.with_extension("tmp"),
                 ] {
                     let _ = std::fs::remove_file(temporary);
                 }
-                match std::fs::read(&expected.metadata)
-                    .map_err(StoreError::from)
-                    .and_then(|bytes| decode_durable(&expected.metadata, &bytes))
-                {
-                    Ok(mut durable) => {
+                let read_started = Instant::now();
+                let bytes = std::fs::read(&expected.manifest);
+                stats.manifest_read_us = stats
+                    .manifest_read_us
+                    .saturating_add(elapsed_micros(read_started.elapsed()));
+                match bytes {
+                    Ok(bytes) => {
+                        let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                        let decode_started = Instant::now();
+                        let mut durable = decode_durable(&expected.manifest, &bytes)?;
+                        stats.manifest_decode_us = stats
+                            .manifest_decode_us
+                            .saturating_add(elapsed_micros(decode_started.elapsed()));
                         if durable.invocation.request.id != id {
                             return Err(StoreError::CorruptRecord {
-                                path: expected.metadata,
+                                path: expected.manifest,
                                 message: "record ID does not match directory".into(),
                             });
                         }
                         // Terminal records commit byte accounting after every
                         // evidence-producing operation. Only a nonterminal
                         // record can have grown since its last commit.
-                        if !durable.invocation.state.is_terminal() || durable.evidence_bytes == 0 {
-                            durable.evidence_bytes = evidence_size_blocking(&expected)?;
+                        if !durable.invocation.state.is_terminal() {
+                            durable.payload_bytes = evidence_payload_size_blocking(&expected)?;
                         }
-                        insert_index_entry(&mut index, id, durable.index_entry());
+                        let retained_bytes = durable.payload_bytes.saturating_add(manifest_bytes);
+                        let index_started = Instant::now();
+                        insert_index_entry(&mut index, id, durable.index_entry(retained_bytes));
+                        stats.index_build_us = stats
+                            .index_build_us
+                            .saturating_add(elapsed_micros(index_started.elapsed()));
                     }
-                    Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                        // Creation is committed by record.json. A directory without
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // Creation is committed by manifest.json. A directory without
                         // it is an uncommitted crash remnant.
                         std::fs::remove_dir_all(directory.path())?;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
     }
-    Ok(index)
+    let total_us = elapsed_micros(total_started.elapsed());
+    stats.directory_traversal_us = total_us.saturating_sub(
+        stats
+            .manifest_read_us
+            .saturating_add(stats.manifest_decode_us)
+            .saturating_add(stats.index_build_us),
+    );
+    Ok((index, stats))
 }
 
-fn evidence_size_blocking(paths: &InvocationPaths) -> Result<u64, StoreError> {
+fn elapsed_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn evidence_payload_size_blocking(paths: &InvocationPaths) -> Result<u64, StoreError> {
     let mut size = 0_u64;
     for path in [
-        &paths.request,
-        &paths.metadata,
+        &paths.details,
         &paths.stdout,
         &paths.stderr,
         &paths.bep,
-        &paths.summary,
         &paths.artifacts,
     ] {
         match std::fs::symlink_metadata(path) {
@@ -1117,7 +1552,7 @@ async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<(),
         .collect();
     for id in ids {
         let paths = InvocationPaths::new(cache_root, id);
-        let mut durable = read_durable(&paths.metadata).await?;
+        let (mut durable, _) = read_durable(&paths.manifest).await?;
         durable.invocation.state = InvocationState::Interrupted;
         durable.invocation.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms());
         durable.invocation.termination = Some(Termination::Interrupted);
@@ -1138,9 +1573,11 @@ async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<(),
                     .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms),
             );
         }
-        paths.write_summary(&durable.invocation).await?;
-        persist_durable(&paths, &mut durable).await?;
-        replace_index_entry(index, id, durable.index_entry());
+        let full_record = durable.invocation.clone();
+        write_details(&paths, &full_record).await?;
+        durable.invocation = compact_record(&full_record);
+        let outcome = persist_durable(&paths, &mut durable, true).await?;
+        replace_index_entry(index, id, durable.index_entry(outcome.retained_bytes));
     }
     Ok(())
 }
@@ -1193,6 +1630,18 @@ async fn finish_staged_evidence(cache_root: &Path, id: InvocationId) -> Result<(
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+async fn write_details(
+    paths: &InvocationPaths,
+    record: &InvocationRecord,
+) -> Result<(), StoreError> {
+    let details = InvocationDetails::from_record(record);
+    if details.targets.is_empty() && details.tests.is_empty() && details.coverage_files.is_empty() {
+        remove_if_exists(&paths.details).await
+    } else {
+        write_json_atomic(&paths.details, &details).await
     }
 }
 
@@ -1301,9 +1750,12 @@ where
         }
         Err(error) => return Err(error.into()),
     };
-    if filter.is_none()
-        && let Some(total) = request.known_total
-    {
+    if filter.is_none() {
+        let total = if let Some(total) = request.known_total {
+            total
+        } else {
+            count_query_rows(&file)?
+        };
         return page_unfiltered_query_file(
             file,
             invocation_id,
@@ -1363,6 +1815,31 @@ where
         total,
         filtered,
     ))
+}
+
+fn count_query_rows(mut file: &File) -> Result<u64, StoreError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    file.seek(SeekFrom::Start(0))?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut rows = 0_u64;
+    let mut saw_bytes = false;
+    let mut last_byte = b'\n';
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        saw_bytes = true;
+        last_byte = buffer[read - 1];
+        rows = rows.saturating_add(
+            u64::try_from(memchr::memchr_iter(b'\n', &buffer[..read]).count()).unwrap_or(u64::MAX),
+        );
+    }
+    if saw_bytes && last_byte != b'\n' {
+        rows = rows.saturating_add(1);
+    }
+    Ok(rows)
 }
 
 fn page_unfiltered_query_file<F>(
@@ -1540,9 +2017,11 @@ fn transition_lost_evidence(
         index,
         id,
         IndexEntry {
-            record: record.clone(),
+            record: compact_record(&record),
             deferred: None,
-            evidence_bytes: 0,
+            retained_bytes: 0,
+            telemetry_generation: 0,
+            telemetry_flush_scheduled: false,
         },
     );
     Ok(record)
@@ -1559,7 +2038,14 @@ fn parse_id(value: &str) -> Option<InvocationId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bazel_mcp_types::{BazelCommand, InvocationRequest};
+    use std::{
+        io::Write as _,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
+
+    use bazel_mcp_types::{
+        BazelCommand, CoverageSummary, InvocationRequest, TargetCounts, TestCounts, TestStatus,
+    };
     use tempfile::TempDir;
 
     fn record(workspace: &Path) -> InvocationRecord {
@@ -1608,6 +2094,42 @@ mod tests {
         let recovered = reopened.get_invocation(id).await.unwrap();
         assert_eq!(recovered.state, InvocationState::Interrupted);
         assert_eq!(recovered.termination, Some(Termination::Interrupted));
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_every_nonterminal_lifecycle_state() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let queued = record(root.path());
+        let queued_id = queued.request.id;
+        store.create_invocation(&queued).await.unwrap();
+        let starting = record(root.path());
+        let starting_id = starting.request.id;
+        store.create_invocation(&starting).await.unwrap();
+        store
+            .transition(starting_id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        let running = record(root.path());
+        let running_id = running.request.id;
+        store.create_invocation(&running).await.unwrap();
+        store
+            .transition(running_id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(running_id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(root.path()).await.unwrap();
+        for id in [queued_id, starting_id, running_id] {
+            let recovered = reopened.get_invocation(id).await.unwrap();
+            assert_eq!(recovered.state, InvocationState::Interrupted);
+            assert_eq!(recovered.termination, Some(Termination::Interrupted));
+            assert!(recovered.summary.is_some());
+        }
     }
 
     #[tokio::test]
@@ -1720,6 +2242,394 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unfiltered_query_count_decodes_only_the_returned_page() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        let contents = (0..100)
+            .map(|ordinal| format!("row-{ordinal}\n"))
+            .collect::<String>();
+        tokio::fs::write(&paths.stdout, contents).await.unwrap();
+        let transformed = Arc::new(AtomicUsize::new(0));
+        let observed = transformed.clone();
+        let (page, total, filtered) = store
+            .page_query_rows_mapped(
+                id,
+                None,
+                PageRequest {
+                    cursor: None,
+                    limit: 3,
+                },
+                move |value| {
+                    observed.fetch_add(1, AtomicOrdering::Relaxed);
+                    value.to_owned()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!((total, filtered), (100, 100));
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(transformed.load(AtomicOrdering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn query_count_handles_crlf_invalid_utf8_and_unterminated_rows() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        tokio::fs::write(&paths.stdout, b"first\r\ninvalid-\xff\nlast")
+            .await
+            .unwrap();
+        let (first, total, filtered) = store
+            .page_query_rows(
+                id,
+                None,
+                PageRequest {
+                    cursor: None,
+                    limit: 2,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!((total, filtered), (3, 3));
+        assert_eq!(first.items[0].value, "first");
+        assert_eq!(first.items[1].value, "invalid-�");
+        let (last, _, _) = store
+            .page_query_rows(
+                id,
+                None,
+                PageRequest {
+                    cursor: first.next_cursor,
+                    limit: 2,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(last.items[0].value, "last");
+        assert_eq!(last.items[0].ordinal, 2);
+    }
+
+    #[tokio::test]
+    async fn canonical_manifest_excludes_large_details_and_survives_restart() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        store
+            .transition(id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        let summary = InvocationSummary {
+            success: true,
+            headline: "complete".into(),
+            targets: vec![TargetResult {
+                label: "//private:large-target-detail".into(),
+                success: true,
+            }],
+            target_counts: TargetCounts {
+                requested: 1,
+                succeeded: 1,
+                failed: 0,
+            },
+            tests: vec![TestResult {
+                label: "//private:large-test-detail".into(),
+                status: TestStatus::Passed,
+                duration_ms: Some(1),
+                attempts: 1,
+                shard: None,
+                cases: Vec::new(),
+                log_uri: None,
+            }],
+            test_counts: TestCounts {
+                passed: 1,
+                ..TestCounts::default()
+            },
+            coverage: Some(CoverageSummary {
+                lines_found: 1,
+                lines_hit: 1,
+                coverage_percent: 100.0,
+                files: vec![CoverageFile {
+                    path: "private/large-coverage-detail.rs".into(),
+                    lines_found: 1,
+                    lines_hit: 1,
+                    coverage_percent: 100.0,
+                }],
+            }),
+            ..InvocationSummary::default()
+        };
+        store
+            .finish_invocation(
+                id,
+                InvocationCompletion {
+                    state: InvocationState::Succeeded,
+                    termination: Termination::Exit { code: 0 },
+                    summary,
+                    metrics: InvocationMetrics::default(),
+                    canonical_arguments: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let manifest = tokio::fs::read_to_string(&paths.manifest).await.unwrap();
+        assert_eq!(manifest.matches("\"request\"").count(), 1);
+        assert_eq!(manifest.matches("\"summary\"").count(), 1);
+        assert!(!manifest.contains("large-target-detail"));
+        assert!(!manifest.contains("large-test-detail"));
+        assert!(!manifest.contains("large-coverage-detail"));
+        assert!(!paths.directory.join("request.json").exists());
+        assert!(!paths.directory.join("summary.json").exists());
+        assert!(!paths.artifacts.exists());
+        drop(store);
+
+        let reopened = Store::open(root.path()).await.unwrap();
+        assert_eq!(
+            reopened
+                .page_tests(id, None, PageRequest::default())
+                .await
+                .unwrap()
+                .0
+                .items[0]
+                .label,
+            "//private:large-test-detail"
+        );
+        assert_eq!(
+            reopened
+                .page_coverage(id, None, PageRequest::default())
+                .await
+                .unwrap()
+                .0
+                .items[0]
+                .path,
+            "private/large-coverage-detail.rs"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn canonical_directories_and_files_remain_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let paths = store.create_invocation(&record).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&paths.directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&paths.manifest)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn invocation_locks_serialize_one_id_without_blocking_another() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let first = record(root.path());
+        let first_id = first.request.id;
+        store.create_invocation(&first).await.unwrap();
+        let second = record(root.path());
+        let second_id = second.request.id;
+        store.create_invocation(&second).await.unwrap();
+
+        let first_lock = store.mutation_lock(first_id).await;
+        let guard = first_lock.lock().await;
+        let blocked_store = store.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_store
+                .transition(first_id, InvocationState::Starting, None, None)
+                .await
+        });
+        let independent_store = store.clone();
+        let independent = tokio::spawn(async move {
+            independent_store
+                .transition(second_id, InvocationState::Starting, None, None)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), independent)
+            .await
+            .expect("independent invocation was blocked by another invocation's lock")
+            .unwrap()
+            .unwrap();
+        assert!(!blocked.is_finished());
+        drop(guard);
+        blocked.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn racing_terminal_mutations_cannot_lose_or_regress_state() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        store
+            .transition(id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        let succeeded = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .transition(
+                        id,
+                        InvocationState::Succeeded,
+                        Some(Termination::Exit { code: 0 }),
+                        Some(InvocationSummary::default()),
+                    )
+                    .await
+            })
+        };
+        let cancelled = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                store
+                    .transition(
+                        id,
+                        InvocationState::Cancelled,
+                        Some(Termination::Cancelled),
+                        Some(InvocationSummary::default()),
+                    )
+                    .await
+            })
+        };
+        let outcomes = [succeeded.await.unwrap(), cancelled.await.unwrap()];
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert!(store.get_invocation(id).await.unwrap().state.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn telemetry_updates_are_coalesced_and_eventually_durable() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        succeed(&store, id).await;
+        let before = store.io_stats();
+        for _ in 0..100 {
+            store
+                .record_model_visible_result(id, 10, true)
+                .await
+                .unwrap();
+        }
+        store.record_progress_notifications(id, 7).await.unwrap();
+        assert_eq!(store.io_stats().manifest_commits, before.manifest_commits);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let after = store.io_stats();
+        assert_eq!(after.manifest_commits, before.manifest_commits + 1);
+        let current = store.get_invocation(id).await.unwrap();
+        assert_eq!(current.metrics.model_visible_bytes, 1_000);
+        assert_eq!(current.metrics.inspect_calls, 100);
+        assert_eq!(current.metrics.progress_notifications, 7);
+        drop(store);
+        let reopened = Store::open(root.path()).await.unwrap();
+        let durable = reopened.get_invocation(id).await.unwrap();
+        assert_eq!(durable.metrics.model_visible_bytes, 1_000);
+        assert_eq!(durable.metrics.inspect_calls, 100);
+        assert_eq!(durable.metrics.progress_notifications, 7);
+    }
+
+    #[tokio::test]
+    async fn terminal_commit_absorbs_pending_telemetry_flush() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        store
+            .transition(id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        store.record_progress_notifications(id, 3).await.unwrap();
+        let before = store.io_stats().manifest_commits;
+        store
+            .transition(
+                id,
+                InvocationState::Succeeded,
+                Some(Termination::Exit { code: 0 }),
+                Some(InvocationSummary::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.io_stats().manifest_commits, before + 1);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(store.io_stats().manifest_commits, before + 1);
+        drop(store);
+        let reopened = Store::open(root.path()).await.unwrap();
+        assert_eq!(
+            reopened
+                .get_invocation(id)
+                .await
+                .unwrap()
+                .metrics
+                .progress_notifications,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_waiting_on_one_invocation_does_not_block_index_lookups() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let first = record(root.path());
+        let first_id = first.request.id;
+        let first_paths = store.create_invocation(&first).await.unwrap();
+        tokio::fs::write(&first_paths.stdout, vec![b'x'; 4096])
+            .await
+            .unwrap();
+        succeed(&store, first_id).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second = record(root.path());
+        let second_id = second.request.id;
+        store.create_invocation(&second).await.unwrap();
+        succeed(&store, second_id).await;
+
+        let first_lock = store.mutation_lock(first_id).await;
+        let guard = first_lock.lock().await;
+        let gc_store = store.clone();
+        let gc =
+            tokio::spawn(
+                async move { gc_store.enforce_retention(Duration::from_secs(0), 1).await },
+            );
+        tokio::task::yield_now().await;
+        tokio::time::timeout(Duration::from_secs(1), store.get_invocation(second_id))
+            .await
+            .expect("GC held the shared index while waiting on another invocation")
+            .unwrap();
+        drop(guard);
+        gc.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn quota_gc_renames_then_removes_terminal_directories() {
         let root = TempDir::new().unwrap();
         let store = Store::open(root.path()).await.unwrap();
@@ -1786,7 +2696,10 @@ mod tests {
         succeed(&store, id).await;
         drop(store);
 
-        tokio::fs::write(paths.metadata.with_extension("tmp"), b"truncated")
+        tokio::fs::write(paths.manifest.with_extension("tmp"), b"truncated")
+            .await
+            .unwrap();
+        tokio::fs::write(paths.details.with_extension("tmp"), b"truncated")
             .await
             .unwrap();
         let reopened = Store::open(root.path()).await.unwrap();
@@ -1794,7 +2707,8 @@ mod tests {
             reopened.get_invocation(id).await.unwrap().state,
             InvocationState::Succeeded
         );
-        assert!(!paths.metadata.with_extension("tmp").exists());
+        assert!(!paths.manifest.with_extension("tmp").exists());
+        assert!(!paths.details.with_extension("tmp").exists());
     }
 
     #[tokio::test]
@@ -1860,7 +2774,7 @@ mod tests {
             .unwrap();
         // Force terminal expiry without waiting; deletion clears protection.
         store
-            .mutate(id, |durable| {
+            .mutate(id, false, |durable| {
                 durable.deferred.as_mut().unwrap().expires_at_ms = i64::MIN;
                 Ok(())
             })
@@ -1884,12 +2798,63 @@ mod tests {
         let paths = store.create_invocation(&record).await.unwrap();
         drop(store);
         let corrupt = b"{not-json";
-        tokio::fs::write(&paths.metadata, corrupt).await.unwrap();
+        tokio::fs::write(&paths.manifest, corrupt).await.unwrap();
         assert!(matches!(
             Store::open(root.path()).await,
             Err(StoreError::CorruptRecord { .. })
         ));
-        assert_eq!(tokio::fs::read(paths.metadata).await.unwrap(), corrupt);
+        assert_eq!(tokio::fs::read(paths.manifest).await.unwrap(), corrupt);
+    }
+
+    #[tokio::test]
+    async fn corrupt_detail_sidecars_fail_inspection_without_damaging_manifest() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        store
+            .transition(id, InvocationState::Starting, None, None)
+            .await
+            .unwrap();
+        store
+            .transition(id, InvocationState::Running, None, None)
+            .await
+            .unwrap();
+        store
+            .finish_invocation(
+                id,
+                InvocationCompletion {
+                    state: InvocationState::Succeeded,
+                    termination: Termination::Exit { code: 0 },
+                    summary: InvocationSummary {
+                        tests: vec![TestResult {
+                            label: "//test:one".into(),
+                            status: TestStatus::Passed,
+                            duration_ms: None,
+                            attempts: 1,
+                            shard: None,
+                            cases: Vec::new(),
+                            log_uri: None,
+                        }],
+                        ..InvocationSummary::default()
+                    },
+                    metrics: InvocationMetrics::default(),
+                    canonical_arguments: None,
+                    artifacts: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let manifest = tokio::fs::read(&paths.manifest).await.unwrap();
+        tokio::fs::write(&paths.details, b"{not-json")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.page_tests(id, None, PageRequest::default()).await,
+            Err(StoreError::Json(_))
+        ));
+        assert_eq!(tokio::fs::read(&paths.manifest).await.unwrap(), manifest);
     }
 
     #[tokio::test]
@@ -1908,5 +2873,78 @@ mod tests {
             .unwrap();
         assert_eq!((total, filtered), (1, 1));
         assert_eq!(page.items[0].value.len(), QUERY_LINE_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn query_reader_handles_empty_and_million_row_files() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let empty = record(root.path());
+        let empty_id = empty.request.id;
+        store.create_invocation(&empty).await.unwrap();
+        let (page, total, filtered) = store
+            .page_query_rows(empty_id, None, PageRequest::default())
+            .await
+            .unwrap();
+        assert!(page.items.is_empty());
+        assert_eq!((total, filtered), (0, 0));
+
+        let million = record(root.path());
+        let million_id = million.request.id;
+        let paths = store.create_invocation(&million).await.unwrap();
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&paths.stdout).unwrap());
+        for _ in 0..1_000_000 {
+            writer.write_all(b"row\n").unwrap();
+        }
+        writer.flush().unwrap();
+        let (page, total, filtered) = store
+            .page_query_rows(
+                million_id,
+                None,
+                PageRequest {
+                    cursor: None,
+                    limit: 3,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert_eq!((total, filtered), (1_000_000, 1_000_000));
+    }
+
+    #[tokio::test]
+    async fn failed_gc_unlink_leaves_recoverable_trash_without_reindexing() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        store.create_invocation(&record).await.unwrap();
+        succeed(&store, id).await;
+        store
+            .inner
+            .fail_next_gc_unlink
+            .store(true, Ordering::Relaxed);
+
+        assert_eq!(
+            store
+                .enforce_retention(Duration::from_secs(0), 0)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            store.get_invocation(id).await,
+            Err(StoreError::NotFound(_))
+        ));
+        let trash = root.path().join("trash").join(id.to_string());
+        assert!(trash.exists());
+        drop(store);
+
+        let reopened = Store::open(root.path()).await.unwrap();
+        assert!(!trash.exists());
+        assert!(matches!(
+            reopened.get_invocation(id).await,
+            Err(StoreError::NotFound(_))
+        ));
     }
 }
