@@ -70,7 +70,7 @@ impl Default for RunnerConfig {
             global_concurrency: 4,
             output_user_root: None,
             isolated_bazel_server_idle_timeout: Duration::from_secs(60),
-            supported_bazel_major_versions: [7, 8, 9].into_iter().collect(),
+            supported_bazel_major_versions: [8, 9].into_iter().collect(),
             allow_unsupported_bazel_versions: false,
             version_check_timeout: Duration::from_secs(30),
             maximum_pending_invocations: 256,

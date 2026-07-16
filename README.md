@@ -32,7 +32,7 @@ toolchains, and remote execution settings.
 ### Requirements
 
 - macOS or Linux
-- Bazel 7, 8, or 9, Bazelisk, or an executable workspace-local `tools/bazel`
+- Bazel 8 or 9, Bazelisk, or an executable workspace-local `tools/bazel`
 - an MCP-compatible client
 - Bazelisk when building from source (the repository pins Bazel and Rust)
 
@@ -405,7 +405,7 @@ redaction, and byte ceilings; they only change its model-visible representation.
 
 | Component | Supported |
 | --- | --- |
-| Bazel | Major versions 7, 8, and 9 |
+| Bazel | Major versions 8 and 9 |
 | Platforms | macOS and Linux |
 | Transport | Local MCP over stdio |
 | Bazel discovery | `tools/bazel`, then Bazelisk, then Bazel on `PATH` |

@@ -848,7 +848,7 @@ code-execution service even though it does not expose a shell.
 
 - macOS on Apple Silicon and x86_64
 - Linux on x86_64 and ARM64
-- Bazel 7.x, 8.x, and 9.x
+- Bazel 8.x and 9.x
 - Bazelisk and direct Bazel binaries
 - Repository wrapper scripts that ultimately execute Bazel
 

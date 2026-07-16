@@ -701,7 +701,7 @@ async fn rejects_unsupported_bazel_versions_before_creating_evidence() {
     let service = configured_service(
         &root,
         &workspace,
-        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 6.5.0'; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 7.6.1'; exit 0; fi\nexit 0\n",
         |_| {},
     )
     .await;
@@ -715,7 +715,7 @@ async fn rejects_unsupported_bazel_versions_before_creating_evidence() {
         .unwrap_err();
     assert!(matches!(
         error,
-        bazel_mcp_runner::RunnerError::UnsupportedBazelVersion { detected: 6, .. }
+        bazel_mcp_runner::RunnerError::UnsupportedBazelVersion { detected: 7, .. }
     ));
 }
 

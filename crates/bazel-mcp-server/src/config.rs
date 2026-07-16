@@ -98,7 +98,7 @@ impl Default for ServerConfig {
             retention_days: 7,
             maximum_storage_bytes: 10 * 1024 * 1024 * 1024,
             result_encoding: ResultEncoding::default(),
-            supported_bazel_major_versions: [7, 8, 9].into_iter().collect(),
+            supported_bazel_major_versions: [8, 9].into_iter().collect(),
             allow_unsupported_bazel_versions: false,
             version_check_timeout_seconds: 30,
             maximum_pending_invocations: 256,

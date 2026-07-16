@@ -3,7 +3,7 @@ set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 bazel=${BAZEL_MCP_BAZEL:-$(command -v bazelisk || command -v bazel)}
-versions=${MATRIX_VERSIONS:-"7.6.1 8.4.2 9.1.0"}
+versions=${MATRIX_VERSIONS:-"8.4.2 9.1.0"}
 source_workspace="$root/crates/bazel-mcp-reducer/tests/fixtures/workspace"
 destination="$root/crates/bazel-mcp-reducer/tests/fixtures"
 scratch="$root/.cache/bep-golden-generation"

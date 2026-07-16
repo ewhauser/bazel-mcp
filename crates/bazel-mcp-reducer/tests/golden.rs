@@ -7,7 +7,7 @@ use bazel_mcp_reducer::{
 use bazel_mcp_types::ArtifactKind;
 use serde::Serialize;
 
-const VERSIONS: [u32; 3] = [7, 8, 9];
+const VERSIONS: [u32; 2] = [8, 9];
 const CASES: [&str; 5] = [
     "loading",
     "visibility",

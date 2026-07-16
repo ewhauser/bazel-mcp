@@ -157,7 +157,7 @@ and must be between 100 and 60,000 milliseconds.
 | `maximum_storage_bytes` | `10737418240` | Maximum cache size before older evidence is removed. |
 | `retention_cleanup_interval_seconds` | `3600` | Interval between retention sweeps. |
 | `result_encoding` | `toon` | Model-visible result representation. |
-| `supported_bazel_major_versions` | `[7, 8, 9]` | Bazel major versions accepted by default. |
+| `supported_bazel_major_versions` | `[8, 9]` | Bazel major versions accepted by default. |
 | `allow_unsupported_bazel_versions` | `false` | Allow majors outside `supported_bazel_major_versions`. |
 | `version_check_timeout_seconds` | `30` | Timeout for the pre-invocation Bazel version check. |
 | `isolated_bazel_server_idle_seconds` | `60` | Bazel server idle timeout used with `output_user_root`. |

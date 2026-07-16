@@ -44,3 +44,8 @@ efficiency. Do not include secrets or raw sensitive output.
 - Keep production-default benchmark targets aligned with the server serialization default; retain explicit encoding adapters for controlled format comparisons.
 - Pin representation-sensitive protocol harnesses to an explicit result
   encoding so changing the production default does not invalidate their parser.
+- Supported Bazel majors are repeated across runtime defaults, matrix scripts,
+  golden generation, and docs; define one canonical source so compatibility
+  updates require less repository-wide discovery and cannot drift silently.
+- The matrix consumed smoke output through process substitution and hid producer
+  failures; complete the MCP client first so encoding regressions fail CI.

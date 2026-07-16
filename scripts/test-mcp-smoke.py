@@ -143,6 +143,7 @@ def main():
         + executable_config
         + "output_user_root = " + json.dumps(str(args.root / "bazel")) + "\n"
         + "environment_allowlist = [\"USE_BAZEL_VERSION\", \"BAZEL_MCP_WRAPPED_BAZEL\"]\n"
+        + 'result_encoding = "text"\n'
         + "redaction_patterns = [\"(?i)(authorization|x-buildbuddy-api-key)=[^\\\\s]+\"]\n",
         encoding="utf-8",
     )

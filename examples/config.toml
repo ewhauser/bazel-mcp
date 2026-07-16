@@ -21,7 +21,7 @@ maximum_storage_bytes = 10737418240
 # "structured", or "both".
 retention_cleanup_interval_seconds = 3600
 result_encoding = "toon"
-supported_bazel_major_versions = [7, 8, 9]
+supported_bazel_major_versions = [8, 9]
 # Set only to explicitly accept an untested Bazel major version.
 allow_unsupported_bazel_versions = false
 version_check_timeout_seconds = 30
