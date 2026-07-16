@@ -1449,6 +1449,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_run_response_keeps_primary_rust_test_evidence_under_budget() {
+        let root = tempdir().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let mut record = InvocationRecord::queued(InvocationRequest::new(
+            PathBuf::from("/workspace/rust-failure"),
+            BazelCommand::Test,
+            vec!["//pkg:unit_test".to_owned()],
+        ));
+        record.state = InvocationState::Failed;
+        record.termination = Some(Termination::Exit { code: 3 });
+        let primary = "Rust test tests::parses_value failed at src/test.rs:17:9: assertion `left == right` failed; left: 1; right: 2";
+        let mut diagnostics = vec![Diagnostic {
+            severity: bazel_mcp_types::Severity::Error,
+            category: bazel_mcp_types::DiagnosticCategory::Test,
+            message: primary.to_owned(),
+            location: Some(bazel_mcp_types::DiagnosticLocation {
+                path: "src/test.rs".to_owned(),
+                line: Some(17),
+                column: Some(9),
+            }),
+            target: Some("//pkg:unit_test".to_owned()),
+            action: None,
+            repetition_count: 1,
+        }];
+        diagnostics.extend((0..30).map(|index| Diagnostic {
+            severity: bazel_mcp_types::Severity::Error,
+            category: bazel_mcp_types::DiagnosticCategory::Action,
+            message: format!("noise-{index}-{}", "x".repeat(900)),
+            location: None,
+            target: None,
+            action: None,
+            repetition_count: 1,
+        }));
+        record.summary = Some(bazel_mcp_types::InvocationSummary {
+            success: false,
+            headline: format!("Bazel failed: {primary}"),
+            diagnostics,
+            test_counts: bazel_mcp_types::TestCounts {
+                failed: 1,
+                ..bazel_mcp_types::TestCounts::default()
+            },
+            ..bazel_mcp_types::InvocationSummary::default()
+        });
+        store.create_invocation(&record).await.unwrap();
+        let runner = InvocationService::new(store, RunnerConfig::default()).unwrap();
+        let server = BazelMcpServer::new(runner, ResultEncoding::Text);
+
+        let result = server.build_run_result(&record, false).await.unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("run result did not contain one text block");
+        };
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["headline"], format!("Bazel failed: {primary}"));
+        assert_eq!(value["diagnostics"][0]["message"], primary);
+        assert_eq!(value["diagnostics"][0]["category"], "test");
+        assert_eq!(value["diagnostics"][0]["location"]["line"], 17);
+        assert_eq!(value["tests"]["failed"], 1);
+        assert_eq!(value["truncated"], true);
+        assert!(content.text.len() <= 8 * 1024);
+    }
+
+    #[tokio::test]
     async fn negotiated_capabilities_and_tool_metadata_do_not_mix_dialects() {
         let root = tempdir().unwrap();
         let runner = InvocationService::new(

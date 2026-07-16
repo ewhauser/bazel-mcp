@@ -712,6 +712,110 @@ FAILED (failures=1)
 }
 
 #[tokio::test]
+async fn failed_rust_test_log_promotes_case_and_assertion_to_initial_summary() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let output_root = root.path().join("output-user-root");
+    let test_directory = output_root.join("execroot/ws/bazel-out/testlogs/pkg/failing");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&test_directory).await.unwrap();
+    let test_log = test_directory.join("test.log");
+    let test_xml = test_directory.join("test.xml");
+    tokio::fs::write(
+        &test_log,
+        "running 3 tests\n\
+test build::tests::successful_root_cause_test ... ok\n\
+test test::tests::parses_direct_testsuite_root ... FAILED\n\
+test test::tests::another_success ... ok\n\
+\n\
+failures:\n\
+\n\
+---- test::tests::parses_direct_testsuite_root stdout ----\n\
+thread 'test::tests::parses_direct_testsuite_root' (3670855) panicked at crates/bazel-mcp-reducer/src/test.rs:101:9:\n\
+assertion `left == right` failed\n\
+left: \"one\"\n\
+right: \"expected\"\n\
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\
+\n\
+failures:\n\
+    test::tests::parses_direct_testsuite_root\n\
+\n\
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        &test_xml,
+        r#"<testsuites><testsuite><testcase name="crates/bazel-mcp-reducer/unit_test" time="0.01"><failure message="exited with error code 101"/></testcase></testsuite></testsuites>"#,
+    )
+    .await
+    .unwrap();
+    let bep = root.path().join("failed-rust-test.bep");
+    tokio::fs::write(
+        &bep,
+        failed_test_bep(
+            &format!("file://{}", test_log.display()),
+            &format!("file://{}", test_xml.display()),
+        ),
+    )
+    .await
+    .unwrap();
+    let flag_marker = root.path().join("saw-test-output-errors");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --build_event_binary_file=*) bep_path=${{arg#*=}} ;;\n    --test_output=errors) touch '{}' ;;\n  esac\ndone\ncp '{}' \"$bep_path\"\nexit 1\n",
+        flag_marker.display(),
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//pkg:failing".into()],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(failed.state, InvocationState::Failed);
+    assert!(flag_marker.exists());
+    let summary = failed.summary.as_ref().unwrap();
+    assert!(
+        summary
+            .headline
+            .contains("test::tests::parses_direct_testsuite_root")
+    );
+    assert!(
+        summary
+            .headline
+            .contains("assertion `left == right` failed")
+    );
+    assert_eq!(summary.diagnostics[0].category, DiagnosticCategory::Test);
+    assert_eq!(
+        summary.diagnostics[0].location.as_ref().unwrap().path,
+        "crates/bazel-mcp-reducer/src/test.rs"
+    );
+    assert!(
+        summary
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.ends_with(" ... ok"))
+    );
+    assert!(summary.tests[0].test_log_available);
+    assert_eq!(
+        summary.tests[0].cases[0].name,
+        "test::tests::parses_direct_testsuite_root"
+    );
+    assert!(
+        summary.tests[0].cases[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("right: \"expected\"")
+    );
+}
+
+#[tokio::test]
 async fn cancellation_stops_a_running_process_group() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
