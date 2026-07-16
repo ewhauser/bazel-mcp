@@ -64,6 +64,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'Configuration', slug: 'reference/generated/configuration' },
+            { label: 'Custom reducers', slug: 'reference/generated/custom-reducers' },
             { label: 'Benchmarks', slug: 'reference/generated/benchmarks' },
             {
               label: 'Agentic benchmark',
@@ -80,6 +81,10 @@ export default defineConfig({
             {
               label: 'Storage performance',
               slug: 'reference/generated/storage-performance',
+            },
+            {
+              label: 'Starlark reducer performance',
+              slug: 'reference/generated/starlark-reducer-performance',
             },
           ],
         },

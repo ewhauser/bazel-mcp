@@ -21,6 +21,18 @@ const documents = [
     description: 'Configure workspace policy, Bazel discovery, retention, result encoding, and task execution.',
   },
   {
+    source: 'docs/custom-reducers.md',
+    destination: 'custom-reducers.md',
+    title: 'Custom reducers',
+    description: 'Extend built-in Bazel result reduction with explicitly configured Starlark reducers.',
+  },
+  {
+    source: 'docs/starlark-reducer-performance.md',
+    destination: 'starlark-reducer-performance.md',
+    title: 'Starlark reducer performance',
+    description: 'Native Rust and Starlark custom reducer latency comparison and methodology.',
+  },
+  {
     source: 'docs/benchmarks.md',
     destination: 'benchmarks.md',
     title: 'Token benchmark',
@@ -94,6 +106,14 @@ for (const document of documents) {
     .replace(
       /\.\.\/scripts\/benchmarks\/run-mcp-inspect-latency\.py/g,
       'https://github.com/ewhauser/bazel-mcp/blob/main/scripts/benchmarks/run-mcp-inspect-latency.py',
+    )
+    .replace(
+      /\.\.\/examples\/reducers\/custom_compiler\.star/g,
+      'https://github.com/ewhauser/bazel-mcp/blob/main/examples/reducers/custom_compiler.star',
+    )
+    .replace(
+      /\.\.\/crates\/bazel-mcp-benchmark\/benches\/custom_reducers\.rs/g,
+      'https://github.com/ewhauser/bazel-mcp/blob/main/crates/bazel-mcp-benchmark/benches/custom_reducers.rs',
     )
     .replace(
       /\]\((?:\.\/)?([a-z0-9-]+)\.md(#[^)]+)?\)/gi,
