@@ -2,6 +2,10 @@
 /bazel-*
 /user.bazelrc
 /scripts/compat/node_modules/
+/website/node_modules/
+/website/dist/
+/website/.astro/
+/website/src/content/docs/reference/generated/
 /.cache/
 /.codex/
 /.env
