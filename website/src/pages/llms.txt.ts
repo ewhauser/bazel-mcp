@@ -20,6 +20,7 @@ bazel-mcp exposes exactly three tools: bazel.run, bazel.inspect, and bazel.cance
 
 - [Debug a failure](${base}/guides/debugging-failures/): Root-cause-first debugging with targeted inspection.
 - [Long-running builds](${base}/guides/long-running-builds/): Negotiated MCP task execution and recovery.
+- [Write a Starlark reducer](${base}/guides/writing-starlark-reducers/): Create, configure, test, and troubleshoot target-specific diagnostics.
 - [Architecture](${base}/project/architecture/): Runtime flow and design specifications.
 
 ## Evidence
