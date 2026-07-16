@@ -3,6 +3,7 @@
 mod config;
 mod handler;
 
+pub use bazel_mcp_runner::BepTransport;
 pub use config::{Cli, McpExecutionPolicy, ResultEncoding, ServerConfig};
 pub use handler::BazelMcpServer;
 
@@ -31,7 +32,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         redaction_patterns: config.redaction_patterns.clone(),
         bazel_executable: config.bazel_executable.clone(),
     };
-    let runner = InvocationService::new(
+    let runner = InvocationService::start(
         store.clone(),
         RunnerConfig {
             policy,
@@ -54,8 +55,10 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
                 config.version_check_timeout_seconds,
             ),
             maximum_pending_invocations: config.maximum_pending_invocations,
+            bep_transport: config.bep_transport,
         },
-    )?;
+    )
+    .await?;
     let shutdown_runner = runner.clone();
     let server = BazelMcpServer::new(runner, config.result_encoding)
         .with_progress_timing(

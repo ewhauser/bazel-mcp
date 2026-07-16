@@ -12,7 +12,9 @@ use bazel_mcp_bep::proto::{
 };
 use bazel_mcp_bep::{encode_event_id, encode_frame};
 use bazel_mcp_policy::PolicyConfig;
-use bazel_mcp_runner::{InspectRequest, InspectView, InvocationService, RunnerConfig};
+use bazel_mcp_runner::{
+    BepTransport, InspectRequest, InspectView, InvocationService, RunnerConfig,
+};
 use bazel_mcp_store::Store;
 use bazel_mcp_types::{
     Artifact, ArtifactKind, BazelCommand, DeferredRetrieval, Diagnostic, DiagnosticCategory,
@@ -156,12 +158,13 @@ async fn configured_service(
         ..RunnerConfig::default()
     };
     configure(&mut config);
-    InvocationService::new(
+    InvocationService::start(
         Store::open(root.path().join("configured-store"))
             .await
             .unwrap(),
         config,
     )
+    .await
     .unwrap()
 }
 
@@ -892,6 +895,62 @@ async fn preserves_user_bes_flags_while_adding_the_private_bep_file() {
         .await
         .unwrap();
     assert_eq!(record.state, InvocationState::Succeeded);
+}
+
+#[tokio::test]
+async fn bes_transport_injects_the_loopback_backend_and_owns_upload_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = configured_service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'bazel 9.1.0'; exit 0; fi\nseen_bes=0\nseen_wait=0\nseen_bep=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --bes_backend=grpc://127.0.0.1:*) seen_bes=1 ;;\n    --bes_upload_mode=wait_for_upload_complete) seen_wait=1 ;;\n    --build_event_binary_file=*) seen_bep=1 ;;\n  esac\ndone\n[ \"$seen_bes\" -eq 1 ] && [ \"$seen_wait\" -eq 1 ] && [ \"$seen_bep\" -eq 0 ]\n",
+        |config| config.bep_transport = BepTransport::Bes,
+    )
+    .await;
+
+    let record = service
+        .run(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Build,
+            vec!["//:target".into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.state, InvocationState::Succeeded);
+
+    let error = service
+        .run(InvocationRequest::new(
+            workspace.clone(),
+            BazelCommand::Build,
+            vec![
+                "//:target".into(),
+                "--bes_backend=grpc://remote.example:1985".into(),
+            ],
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        bazel_mcp_runner::RunnerError::BesBackendConflict
+    ));
+
+    let error = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec![
+                "//:target".into(),
+                "--bes_upload_mode=nowait_for_upload_complete".into(),
+            ],
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        bazel_mcp_runner::RunnerError::BesUploadModeConflict
+    ));
 }
 
 #[tokio::test]

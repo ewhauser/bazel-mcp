@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
+use bazel_mcp_runner::BepTransport;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +75,7 @@ pub struct ServerConfig {
     pub mcp_execution_policy: McpExecutionPolicy,
     pub task_ttl_seconds: u64,
     pub task_poll_interval_ms: u64,
+    pub bep_transport: BepTransport,
 }
 
 impl Default for ServerConfig {
@@ -107,6 +109,7 @@ impl Default for ServerConfig {
             mcp_execution_policy: McpExecutionPolicy::Auto,
             task_ttl_seconds: 24 * 60 * 60,
             task_poll_interval_ms: 2_000,
+            bep_transport: BepTransport::Tail,
         }
     }
 }
@@ -421,6 +424,16 @@ mod tests {
             assert_eq!(decoded, expected, "policy {name}");
         }
         assert!(serde_json::from_str::<McpExecutionPolicy>("\"detached\"").is_err());
+    }
+
+    #[test]
+    fn bep_transport_defaults_to_tail_and_accepts_bes() {
+        assert_eq!(ServerConfig::default().bep_transport, BepTransport::Tail);
+        assert_eq!(
+            serde_json::from_str::<BepTransport>("\"bes\"").unwrap(),
+            BepTransport::Bes
+        );
+        assert!(serde_json::from_str::<BepTransport>("\"remote\"").is_err());
     }
 
     #[test]

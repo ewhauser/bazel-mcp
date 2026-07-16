@@ -91,6 +91,28 @@ redaction_patterns = [
 
 Raw evidence remains local and should still be treated as sensitive.
 
+### Choose BEP transport
+
+```toml
+bep_transport = "tail"
+```
+
+`tail` is the backwards-compatible default. Bazel writes the private binary
+BEP file directly, so an existing remote `--bes_backend` or BuildBuddy setup
+continues to receive events.
+
+`bes` starts a plaintext gRPC Build Event Service on an ephemeral loopback
+port and configures Bazel to publish to it with
+`--bes_upload_mode=wait_for_upload_complete`. The service validates the
+invocation ID and stream sequence with Buffa views, then reconstructs the same
+private varint-delimited `events.bep` file used by reducers and inspection.
+Select this mode explicitly because Bazel supports only one `--bes_backend`;
+caller-supplied remote BES flags are rejected in this mode. The listener is
+never exposed outside the local host.
+
+See [BEP transport performance](bep-transport-performance.md) for benchmark
+methodology, current results, and reproduction commands.
+
 ### Choose a result encoding
 
 ```toml
@@ -136,6 +158,7 @@ and must be between 100 and 60,000 milliseconds.
 | --- | --- | --- |
 | `allowed_roots` | `[]` | Absolute roots containing workspaces the server may access. An empty list allows any workspace. |
 | `cache_root` | Platform user cache under `bazel-mcp` | Directory for metadata, logs, and BEP evidence. |
+| `bep_transport` | `tail` | BEP ingestion path: private binary file (`tail`) or loopback Build Event Service (`bes`). |
 | `bazel_executable` | unset | Explicit Bazel or Bazelisk executable. |
 | `output_user_root` | unset | Isolated Bazel output user root managed by the server. |
 | `allowed_commands` | build, test, coverage, query commands, and selected informational commands | Commands eligible to run. |

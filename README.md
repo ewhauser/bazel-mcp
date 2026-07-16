@@ -370,8 +370,14 @@ guidance.
 ## Configuration
 
 The built-in defaults cover personal local use. For workspace restrictions,
-retention limits, timeouts, command policy, result encoding, or custom
-redaction, start with [`examples/config.toml`](examples/config.toml).
+retention limits, timeouts, command policy, result encoding, BEP transport, or
+custom redaction, start with [`examples/config.toml`](examples/config.toml).
+
+BEP capture defaults to the private binary-file (`tail`) path so existing
+remote BES and BuildBuddy configurations keep working. Set
+`bep_transport = "bes"` to use bazel-mcp's loopback gRPC Build Event Service.
+See [BEP transport performance](docs/bep-transport-performance.md) for the
+design tradeoffs, measured results, and reproduction commands.
 
 Pass a configuration explicitly with `--config`, set `BAZEL_MCP_CONFIG`, or
 place it at `$XDG_CONFIG_HOME/bazel-mcp/config.toml` (normally

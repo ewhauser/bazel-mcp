@@ -130,6 +130,7 @@ def main():
     parser.add_argument("--bes-backend", default=os.environ.get("BAZEL_MCP_BES_BACKEND"))
     parser.add_argument("--remote-header", action="append", default=[])
     parser.add_argument("--bes-header", action="append", default=[])
+    parser.add_argument("--bep-transport", choices=("tail", "bes"), default="tail")
     args = parser.parse_args()
     atexit.register(cleanup_bazel_servers, args)
     args.root.mkdir(parents=True, exist_ok=True)
@@ -144,7 +145,8 @@ def main():
         + "output_user_root = " + json.dumps(str(args.root / "bazel")) + "\n"
         + "environment_allowlist = [\"USE_BAZEL_VERSION\", \"BAZEL_MCP_WRAPPED_BAZEL\"]\n"
         + 'result_encoding = "text"\n'
-        + "redaction_patterns = [\"(?i)(authorization|x-buildbuddy-api-key)=[^\\\\s]+\"]\n",
+        + "redaction_patterns = [\"(?i)(authorization|x-buildbuddy-api-key)=[^\\\\s]+\"]\n"
+        + "bep_transport = " + json.dumps(args.bep_transport) + "\n",
         encoding="utf-8",
     )
     process = subprocess.Popen(
@@ -239,7 +241,7 @@ def main():
             "--spawn_strategy=remote", "--remote_timeout=60",
         ]
         remote_arguments.extend(f"--remote_header={value}" for value in args.remote_header)
-        if args.bes_backend:
+        if args.bes_backend and args.bep_transport == "tail":
             remote_arguments.extend([
                 f"--bes_backend={args.bes_backend}",
                 "--bes_upload_mode=wait_for_upload_complete",
@@ -251,10 +253,14 @@ def main():
         )
         if remote["state"] != "succeeded":
             raise RuntimeError(f"remote execution failed: {remote}")
-        case = "remote_execution_bes_coexistence" if args.bes_backend else "remote_execution"
+        case = (
+            "remote_execution_bes_coexistence"
+            if args.bes_backend and args.bep_transport == "tail"
+            else "remote_execution"
+        )
         print(f"{case}\tsucceeded\t0")
 
-    if args.bes_backend and not args.remote_executor:
+    if args.bes_backend and not args.remote_executor and args.bep_transport == "tail":
         bes_arguments = [
             "//:ok", f"--bes_backend={args.bes_backend}",
             "--bes_upload_mode=wait_for_upload_complete",

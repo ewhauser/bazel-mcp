@@ -17,6 +17,7 @@ categories = ["command-line-utilities", "development-tools"]
 [workspace.dependencies]
 # Internal crates
 bazel-mcp-bep = { path = "crates/bazel-mcp-bep" }
+bazel-mcp-bes = { path = "crates/bazel-mcp-bes" }
 bazel-mcp-policy = { path = "crates/bazel-mcp-policy" }
 bazel-mcp-reducer = { path = "crates/bazel-mcp-reducer" }
 bazel-mcp-runner = { path = "crates/bazel-mcp-runner" }
@@ -32,7 +33,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 # Async and protocol
 rmcp = { version = "=2.2.0", features = ["client", "server", "transport-child-process", "transport-io"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tonic = "0.14"
 
 # Serialization and domain data
 base64 = "0.22"

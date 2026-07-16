@@ -242,6 +242,14 @@ The proto `README.md` records the upstream Bazel tag, source paths, update
 procedure, and checksums. The Apache-2.0 license accompanying vendored Bazel
 files is retained.
 
+### `bazel-mcp-bes`
+
+Owns the loopback gRPC `google.devtools.build.v1.PublishBuildEvent` service.
+It uses Buffa owned views for request decoding, validates stream identity and
+sequence numbers, and writes Bazel `Any.value` payloads into bounded
+varint-delimited BEP evidence. It has no storage or MCP dependency and binds
+only to `127.0.0.1` on an ephemeral port.
+
 ### `bazel-mcp-policy`
 
 Owns configuration and validation that determines where and how Bazel may run.
@@ -397,6 +405,7 @@ Responsibilities:
 - Assemble validated Bazel argv without a shell.
 - Spawn the wrapper/Bazel client in a process group.
 - Capture stdout, stderr, and BEP without returning them to the caller.
+- Start and register the optional loopback BES transport before spawning Bazel.
 - Enforce timeout and graceful cancellation escalation.
 - Await async store operations directly; run CPU-heavy BEP/reducer work and
   blocking filesystem work via bounded `spawn_blocking` tasks.
@@ -560,6 +569,8 @@ bazel-mcp-server
 │   │   ├── bazel-mcp-bep
 │   │   └── bazel-mcp-types
 │   ├── bazel-mcp-bep
+│   ├── bazel-mcp-bes
+│   │   └── bazel-mcp-bep
 │   └── bazel-mcp-types
 └── bazel-mcp-types
 
@@ -571,6 +582,7 @@ Rules:
 
 - `bazel-mcp-types` has no internal dependencies.
 - `bazel-mcp-bep` does not depend on application crates.
+- `bazel-mcp-bes` depends only on `bazel-mcp-bep` among internal crates.
 - `bazel-mcp-policy`, `bazel-mcp-store`, and `bazel-mcp-reducer` are siblings and
   do not depend on each other.
 - `bazel-mcp-runner` is the only composition layer below the server.
@@ -602,7 +614,9 @@ bazel-mcp-runner
       ├────────────► bazel-mcp-policy
       │               validated workspace, argv, environment, redaction
       ├────────────► Bazel/Bazelisk/repo wrapper
-      │               stdout.log + stderr.log + events.bep
+      │               stdout.log + stderr.log + tail events.bep
+      ├────────────► bazel-mcp-bes (optional loopback gRPC)
+      │               BES stream -> events.bep
       ├─ spawn_blocking ─► bazel-mcp-bep + bazel-mcp-reducer
       └────── await ─────► bazel-mcp-store
                               atomic manifest + detail sidecars
@@ -757,8 +771,8 @@ workspace has its own committed `fuzz/Cargo.lock`.
 - Library crates define typed errors with `thiserror`. `anyhow` is used at
   executable and orchestration boundaries where context is more valuable than
   enum matching.
-- Pure leaf crates remain synchronous. Tokio belongs only in runner, server, and
-  store code; the store uses it for async private-file commits.
+- Pure leaf crates remain synchronous. Tokio belongs only in BES, runner,
+  server, and store code; the store uses it for async private-file commits.
 - Production code does not use `unwrap` or `expect` for recoverable input,
   process, storage, protobuf, or protocol failures.
 - Public APIs are narrow and re-exported intentionally from each `lib.rs`.
@@ -792,6 +806,7 @@ Configuration covers:
 - cache directory and retention
 - global concurrency and timeouts
 - response encoding and byte budgets
+- BEP transport (`tail` by default, or explicit loopback `bes`)
 - redaction rules
 - logging destination and level
 
