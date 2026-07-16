@@ -16,3 +16,10 @@ Use `make build`, `make test`, `make check`, `make test-bazel-matrix`,
 `make fuzz-smoke`, and the explicit token benchmark targets. Do not run the long
 Abseil benchmark as an ordinary unit test. Use Conventional Commits; Release
 Please owns versions and the changelog.
+
+Always use the Bazel MCP tools instead of invoking Bazel or Bazelisk directly.
+When work involves Bazel, create or update the repository-root `LEARNINGS.md`
+with concrete potential improvements and opportunities to use the Bazel MCP
+server more token-efficiently. Keep entries concise, actionable, and grounded
+in observations from the current work; do not record secrets or raw sensitive
+output.
