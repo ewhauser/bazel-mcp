@@ -73,6 +73,7 @@ impl InvocationCursor {
     pub fn new(
         workspace: Option<&str>,
         state: Option<&str>,
+        command: Option<&str>,
         requested_at_ms: i64,
         id: String,
     ) -> Self {
@@ -81,6 +82,7 @@ impl InvocationCursor {
                 "invocations",
                 workspace.unwrap_or_default(),
                 state.unwrap_or_default(),
+                command.unwrap_or_default(),
             ]),
             requested_at_ms,
             id,
@@ -109,6 +111,7 @@ impl InvocationCursor {
         value: &str,
         workspace: Option<&str>,
         state: Option<&str>,
+        command: Option<&str>,
     ) -> Result<Self, StoreError> {
         let cursor = Self::decode(value)?;
         if cursor.context
@@ -116,6 +119,7 @@ impl InvocationCursor {
                 "invocations",
                 workspace.unwrap_or_default(),
                 state.unwrap_or_default(),
+                command.unwrap_or_default(),
             ])
         {
             return Err(StoreError::InvalidCursor);
@@ -311,12 +315,39 @@ mod tests {
     #[test]
     fn cursors_reject_versions_lengths_and_cross_context_use() {
         let id = Uuid::now_v7().to_string();
-        let cursor = InvocationCursor::new(Some("/workspace"), Some("failed"), 123, id);
+        let cursor =
+            InvocationCursor::new(Some("/workspace"), Some("failed"), Some("test"), 123, id);
         let encoded = cursor.encode().unwrap();
-        assert!(InvocationCursor::decode_for(&encoded, Some("/workspace"), Some("failed")).is_ok());
-        assert!(InvocationCursor::decode_for(&encoded, Some("/other"), Some("failed")).is_err());
         assert!(
-            InvocationCursor::decode_for(&encoded, Some("/workspace"), Some("succeeded")).is_err()
+            InvocationCursor::decode_for(
+                &encoded,
+                Some("/workspace"),
+                Some("failed"),
+                Some("test")
+            )
+            .is_ok()
+        );
+        assert!(
+            InvocationCursor::decode_for(&encoded, Some("/other"), Some("failed"), Some("test"))
+                .is_err()
+        );
+        assert!(
+            InvocationCursor::decode_for(
+                &encoded,
+                Some("/workspace"),
+                Some("succeeded"),
+                Some("test")
+            )
+            .is_err()
+        );
+        assert!(
+            InvocationCursor::decode_for(
+                &encoded,
+                Some("/workspace"),
+                Some("failed"),
+                Some("build")
+            )
+            .is_err()
         );
 
         let mut bytes = URL_SAFE_NO_PAD.decode(&encoded).unwrap();

@@ -160,6 +160,7 @@ pub struct InspectRequest {
     pub invocation_id: Option<InvocationId>,
     pub workspace: Option<PathBuf>,
     pub state: Option<InvocationState>,
+    pub command: Option<BazelCommand>,
     pub view: InspectView,
     pub cursor: Option<String>,
     pub filter: Option<String>,
@@ -784,6 +785,7 @@ impl InvocationService {
                 .list_invocations(
                     request.workspace.as_deref(),
                     request.state,
+                    request.command.as_ref(),
                     PageRequest {
                         cursor: request.cursor,
                         limit: request.limit.clamp(1, 100),
@@ -2427,6 +2429,7 @@ mod tests {
             invocation_id: Some(id),
             workspace: None,
             state: None,
+            command: None,
             view: InspectView::Log,
             cursor: None,
             filter: None,

@@ -66,6 +66,8 @@ pub struct InspectParams {
     pub workspace: Option<String>,
     /// Optional invocation state used to filter retained invocation listings.
     pub state: Option<String>,
+    /// Optional Bazel command used to filter retained invocation listings.
+    pub command: Option<String>,
     /// summary, diagnostics, tests, coverage, artifacts, query_results, log, test_log, or invocations.
     pub view: String,
     /// Optional literal substring or label glob filter.
@@ -262,6 +264,16 @@ impl BazelMcpServer {
         if state.is_some() && view != InspectView::Invocations {
             return Err("state is supported only for the invocations view".into());
         }
+        let command = params
+            .command
+            .as_deref()
+            .map(|value| match BazelCommand::from_str(value) {
+                Ok(command) => command,
+                Err(never) => match never {},
+            });
+        if command.is_some() && view != InspectView::Invocations {
+            return Err("command is supported only for the invocations view".into());
+        }
         let visible_budget = inspect_visible_budget(params.max_bytes);
         let mut representation_budget = self.single_representation_budget(visible_budget);
         loop {
@@ -271,6 +283,7 @@ impl BazelMcpServer {
                     invocation_id: id,
                     workspace: workspace.clone(),
                     state,
+                    command: command.clone(),
                     view,
                     cursor: params.cursor.clone(),
                     filter: params.filter.clone(),
@@ -1286,6 +1299,7 @@ mod tests {
                 invocation_id: None,
                 workspace: Some(workspace.to_string_lossy().into_owned()),
                 state: Some("failed".to_owned()),
+                command: None,
                 view: "invocations".to_owned(),
                 filter: None,
                 limit: Some(20),
@@ -1302,6 +1316,27 @@ mod tests {
         assert_eq!(value["view"], "invocations");
         assert_eq!(value["items"].as_array().unwrap().len(), 1);
         assert_eq!(value["items"][0]["request"]["id"], id.to_string());
+
+        let result = server
+            .bazel_inspect(Parameters(InspectParams {
+                invocation_id: None,
+                workspace: Some(workspace.to_string_lossy().into_owned()),
+                state: None,
+                command: Some("build".to_owned()),
+                view: "invocations".to_owned(),
+                filter: None,
+                limit: Some(20),
+                max_bytes: Some(2_048),
+                cursor: None,
+            }))
+            .await
+            .unwrap();
+        let Some(ContentBlock::Text(content)) = result.content.first() else {
+            panic!("command-filtered ledger result did not contain one text block");
+        };
+        let value: serde_json::Value = serde_json::from_str(&content.text).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), 1);
+        assert_eq!(value["items"][0]["request"]["command"], "build");
     }
 
     #[test]

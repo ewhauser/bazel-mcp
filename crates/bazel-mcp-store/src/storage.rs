@@ -14,10 +14,10 @@ use std::{
 use std::sync::atomic::AtomicBool;
 
 use bazel_mcp_types::{
-    Artifact, CoverageFile, DeferredFailure, DeferredResultRecord, DeferredResultView,
-    DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId, InvocationMetrics,
-    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow,
-    TargetResult, Termination, TestResult,
+    Artifact, BazelCommand, CoverageFile, DeferredFailure, DeferredResultRecord,
+    DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId,
+    InvocationMetrics, InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest,
+    QueryRow, TargetResult, Termination, TestResult,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -792,15 +792,24 @@ impl Store {
         &self,
         workspace: Option<&Path>,
         state: Option<InvocationState>,
+        command: Option<&BazelCommand>,
         page: PageRequest,
     ) -> Result<Page<InvocationRecord>, StoreError> {
         let limit = page.limit.clamp(1, 200) as usize;
         let workspace_text = workspace.map(|path| path.to_string_lossy().into_owned());
         let state_text = state.map(InvocationState::as_str);
+        let command_text = command.map(BazelCommand::as_str);
         let cursor = page
             .cursor
             .as_deref()
-            .map(|value| InvocationCursor::decode_for(value, workspace_text.as_deref(), state_text))
+            .map(|value| {
+                InvocationCursor::decode_for(
+                    value,
+                    workspace_text.as_deref(),
+                    state_text,
+                    command_text,
+                )
+            })
             .transpose()?;
         let index = self.inner.index.read().await;
         let collect = |ordered: &BTreeSet<(i64, InvocationId)>| {
@@ -816,6 +825,9 @@ impl Store {
                 })
                 .filter_map(|(_, id)| index.entries.get(id))
                 .filter(|entry| state.is_none_or(|state| entry.record.state == state))
+                .filter(|entry| {
+                    command.is_none_or(|command| entry.record.request.command == *command)
+                })
                 .map(|entry| entry.record.clone())
                 .take(limit + 1)
                 .collect::<Vec<_>>()
@@ -837,6 +849,7 @@ impl Store {
                     InvocationCursor::new(
                         workspace_text.as_deref(),
                         state_text,
+                        command_text,
                         record.request.requested_at_ms,
                         record.request.id.to_string(),
                     )
@@ -2228,6 +2241,7 @@ mod tests {
         let store = Store::open(root.path()).await.unwrap();
         let mut first = record(&workspace_a);
         first.request.requested_at_ms = 100;
+        first.request.command = BazelCommand::Test;
         first.state = InvocationState::Failed;
         let first_id = first.request.id;
         store.create_invocation(&first).await.unwrap();
@@ -2247,6 +2261,7 @@ mod tests {
         let workspace_page = store
             .list_invocations(
                 Some(&workspace_a),
+                None,
                 None,
                 PageRequest {
                     cursor: None,
@@ -2268,12 +2283,24 @@ mod tests {
             .list_invocations(
                 Some(&workspace_a),
                 Some(InvocationState::Failed),
+                None,
                 PageRequest::default(),
             )
             .await
             .unwrap();
         assert_eq!(failed_page.items.len(), 1);
         assert_eq!(failed_page.items[0].request.id, first_id);
+        let test_page = store
+            .list_invocations(
+                Some(&workspace_a),
+                None,
+                Some(&BazelCommand::Test),
+                PageRequest::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_page.items.len(), 1);
+        assert_eq!(test_page.items[0].request.id, first_id);
         let deferred_page = store
             .list_deferred_results(DeferredRetrieval::InlineResult, 301, PageRequest::default())
             .await
@@ -2283,7 +2310,7 @@ mod tests {
 
         let reopened = Store::open(root.path()).await.unwrap();
         let rebuilt = reopened
-            .list_invocations(Some(&workspace_a), None, PageRequest::default())
+            .list_invocations(Some(&workspace_a), None, None, PageRequest::default())
             .await
             .unwrap();
         assert_eq!(rebuilt.items[0].request.id, third_id);
