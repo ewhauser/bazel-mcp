@@ -17,11 +17,16 @@ name: Release
 permissions:
   "contents": "read"
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
-# This task will run whenever you push a git tag that looks like a version
-# like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+# Release Please calls this workflow with the tag it created. Maintainers can
+# also backfill an existing tag manually, and independently pushed release tags
+# remain supported. Accepted version tags look like "1.0.0",
+# "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
 # Various formats will be parsed into a VERSION and an optional PACKAGE_NAME, where
 # PACKAGE_NAME must be the name of a Cargo package in your workspace, and VERSION
 # must be a Cargo-style SemVer Version (must have at least major.minor.patch).
@@ -42,6 +47,22 @@ concurrency:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        description: Token used to update the Homebrew tap
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish
+        required: true
+        type: string
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
@@ -62,17 +83,18 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
-      # This workflow only runs for release tags, so pass the tag through GitHub's
-      # environment instead of expanding event data directly into shell source.
+      # Pass the validated tag input through the environment instead of expanding
+      # event data directly into shell source.
       - id: plan
         run: |
-          dist host --steps=create "--tag=$GITHUB_REF_NAME" --output-format=json > plan-dist-manifest.json
+          dist host --steps=create "--tag=$RELEASE_TAG" --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -111,6 +133,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
       - name: Install dist
         # Install a native binary for this matrix runner. Reusing the plan
@@ -134,7 +157,7 @@ jobs:
           DIST_TARGET: ${{ join(matrix.targets, ',') }}
         run: |
           # Actually do builds and make zips and whatnot
-          dist build "--tag=$GITHUB_REF_NAME" --print=linkage --output-format=json "--artifacts=local" "--target=$DIST_TARGET" > dist-manifest.json
+          dist build "--tag=$RELEASE_TAG" --print=linkage --output-format=json "--artifacts=local" "--target=$DIST_TARGET" > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -171,6 +194,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
       - name: Install dist
         shell: bash
@@ -185,7 +209,7 @@ jobs:
       - id: cargo-dist
         shell: bash
         run: |
-          dist build "--tag=$GITHUB_REF_NAME" --output-format=json "--artifacts=global" > dist-manifest.json
+          dist build "--tag=$RELEASE_TAG" --output-format=json "--artifacts=global" > dist-manifest.json
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
@@ -226,6 +250,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
       - name: Install dist
         shell: bash
@@ -240,8 +265,8 @@ jobs:
       - id: host
         shell: bash
         run: |
-          dist host "--tag=$GITHUB_REF_NAME" --steps=upload --steps=release --output-format=json > dist-manifest.json
-          echo "artifacts uploaded and released successfully"
+          dist host "--tag=$RELEASE_TAG" --steps=upload --steps=release --output-format=json > dist-manifest.json
+          echo "release manifest generated successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
@@ -250,7 +275,8 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
-      # Create a GitHub Release while uploading all files to it
+      # Upload all files to the GitHub Release created by Release Please. Keep a
+      # create fallback for tags pushed independently of Release Please.
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -261,17 +287,19 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
-      - name: Create GitHub Release
+      - name: Publish GitHub release artifacts
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
         run: |
-          # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
-
-          gh release create "$GITHUB_REF_NAME" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/* --clobber
+          else
+            # Write and read notes from a file to avoid quoting breaking things.
+            echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+            gh release create "$RELEASE_TAG" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          fi
 
   publish-homebrew-formula:
     needs:
@@ -337,4 +365,5 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
