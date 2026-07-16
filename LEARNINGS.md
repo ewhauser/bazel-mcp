@@ -35,3 +35,15 @@ or raw sensitive output.
   11.99% versus JSON across 20 verified solves; keep measuring the production
   encoding end to end because payload savings do not map directly to token
   savings.
+- Ordinary rules_go compiler messages use `file.go:line:column: message`
+  without an `error:` marker; parsing that form into a structured location made
+  the exact type error the initial `bazel.run` headline in Bazelisk.
+- Collapsing rules_go's multi-line `missing strict dependencies` block into the
+  offending source import and a deps hint made the initial response sufficient
+  to update the BUILD target without a log inspection.
+- A failed Go test can repeat the same assertion in stderr and `test.log`;
+  prefer the test-scoped diagnostic, deduplicate the compilation copy, and
+  return `inspect_hint=test_log` for optional supporting context.
+- Gazelle self-bootstrap failures wrap Go errors in repository-loading output;
+  ranking the parsed inner Go location kept the wrapper as supporting evidence
+  while making the actionable compiler error the headline.

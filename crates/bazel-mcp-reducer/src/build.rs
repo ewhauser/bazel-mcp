@@ -3,8 +3,8 @@ use bazel_mcp_bep::{
     view::{BuildEventIdView, FileView, NamedSetOfFilesView, build_event, build_event_id, file},
 };
 use bazel_mcp_types::{
-    Artifact, ArtifactKind, Diagnostic, DiagnosticCategory, InvocationSummary, Severity,
-    TargetCounts, TargetResult, TestCounts, TestResult, TestStatus,
+    Artifact, ArtifactKind, Diagnostic, DiagnosticCategory, DiagnosticLocation, InvocationSummary,
+    Severity, TargetCounts, TargetResult, TestCounts, TestResult, TestStatus,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -456,6 +456,7 @@ fn deduplicate_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
             Severity,
             DiagnosticCategory,
             String,
+            Option<(String, Option<u32>, Option<u32>)>,
             Option<String>,
             Option<String>,
         ),
@@ -468,6 +469,10 @@ fn deduplicate_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
             diagnostic.severity,
             diagnostic.category,
             diagnostic.message.clone(),
+            diagnostic
+                .location
+                .as_ref()
+                .map(|location| (location.path.clone(), location.line, location.column)),
             (!aggregate_actions)
                 .then(|| diagnostic.target.clone())
                 .flatten(),
@@ -533,7 +538,9 @@ fn diagnostic_priority(diagnostic: &Diagnostic) -> (Severity, u8, u8) {
         DiagnosticCategory::Action => 5,
     };
     let lower = diagnostic.message.to_ascii_lowercase();
-    let evidence_quality = if lower.starts_with("test failed:")
+    let evidence_quality = if diagnostic.location.is_some() {
+        0
+    } else if lower.starts_with("test failed:")
         || lower.starts_with("test timed out:")
         || lower.starts_with("test was incomplete:")
         || lower.starts_with("test result was unavailable:")
@@ -698,10 +705,48 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
     let candidates = deduplicate_lines(&normalized);
-    for (line, count) in candidates
-        .into_iter()
-        .filter(|(line, _)| is_actionable(line))
-    {
+    let has_strict_dependency_block = candidates.iter().any(|(line, _)| {
+        line.to_ascii_lowercase()
+            .contains("missing strict dependencies")
+    });
+    let strict_dependency_count = candidates
+        .iter()
+        .filter(|(line, _)| strict_dependency_diagnostic(line).is_some())
+        .count();
+
+    for (line, count) in candidates {
+        if has_strict_dependency_block
+            && let Some(mut diagnostic) = strict_dependency_diagnostic(&line)
+        {
+            diagnostic.repetition_count = count;
+            diagnostics.push(diagnostic);
+            continue;
+        }
+        if let Some(mut diagnostic) = parse_go_diagnostic(&line) {
+            diagnostic.repetition_count = count;
+            diagnostics.push(diagnostic);
+            continue;
+        }
+        if has_strict_dependency_block
+            && strict_dependency_count == 0
+            && line
+                .to_ascii_lowercase()
+                .contains("missing strict dependencies")
+        {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                category: DiagnosticCategory::Compilation,
+                message: line,
+                location: None,
+                target: None,
+                action: None,
+                repetition_count: count,
+            });
+            continue;
+        }
+        if !is_actionable(&line) {
+            continue;
+        }
         diagnostics.push(Diagnostic {
             severity: if line.to_ascii_lowercase().contains("warning:") {
                 Severity::Warning
@@ -716,6 +761,91 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
             repetition_count: count,
         });
     }
+}
+
+/// Parses the standard Go compiler location form without depending on a
+/// particular diagnostic message or language setting.
+#[must_use]
+pub fn parse_go_diagnostic(line: &str) -> Option<Diagnostic> {
+    let marker = line.rfind(".go:")?;
+    let path_end = marker + ".go".len();
+    let path = line[..path_end]
+        .trim()
+        .strip_prefix("ERROR: ")
+        .unwrap_or_else(|| line[..path_end].trim());
+    let (line_number, remainder) = split_u32_prefix(&line[path_end + 1..])?;
+    let (column, message) = split_u32_prefix(remainder)
+        .map_or((None, remainder), |(column, message)| {
+            (Some(column), message)
+        });
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(Diagnostic {
+        severity: if message.to_ascii_lowercase().contains("warning:") {
+            Severity::Warning
+        } else {
+            Severity::Error
+        },
+        category: DiagnosticCategory::Compilation,
+        message: message.to_owned(),
+        location: Some(DiagnosticLocation {
+            path: compact_go_path(path),
+            line: Some(line_number),
+            column,
+        }),
+        target: None,
+        action: None,
+        repetition_count: 1,
+    })
+}
+
+fn split_u32_prefix(value: &str) -> Option<(u32, &str)> {
+    let (number, remainder) = value.split_once(':')?;
+    let number = number.trim();
+    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| number.parse::<u32>().ok().map(|number| (number, remainder)))
+        .flatten()
+}
+
+fn strict_dependency_diagnostic(line: &str) -> Option<Diagnostic> {
+    const MARKER: &str = ": import of \"";
+    let marker = line.find(MARKER)?;
+    let path = line[..marker].trim();
+    if !path.ends_with(".go") {
+        return None;
+    }
+    let import = line[marker + MARKER.len()..].split('"').next()?.trim();
+    if import.is_empty() {
+        return None;
+    }
+    let path = compact_go_path(path);
+    Some(Diagnostic {
+        severity: Severity::Error,
+        category: DiagnosticCategory::Compilation,
+        message: format!(
+            "missing strict dependency: {path} imports \"{import}\"; add its target to deps"
+        ),
+        location: Some(DiagnosticLocation {
+            path,
+            line: None,
+            column: None,
+        }),
+        target: None,
+        action: None,
+        repetition_count: 1,
+    })
+}
+
+fn compact_go_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+        && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        return relative.to_owned();
+    }
+    path
 }
 
 fn is_actionable(line: &str) -> bool {
@@ -922,6 +1052,92 @@ mod tests {
                         || diagnostic.message.contains("visibility"))
             }));
         }
+    }
+
+    #[test]
+    fn recognizes_go_compiler_diagnostics_without_error_markers() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: b"ERROR: Build did NOT complete successfully\nconfig/config.go:12:40: cannot use 42 (untyped int constant) as string value in variable declaration\n",
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(
+            diagnostic.message,
+            "cannot use 42 (untyped int constant) as string value in variable declaration"
+        );
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "config/config.go".into(),
+                line: Some(12),
+                column: Some(40),
+            })
+        );
+        assert!(summary.headline.contains("cannot use 42"));
+    }
+
+    #[test]
+    fn reduces_rules_go_strict_dependency_blocks_to_the_offending_import() {
+        let stderr = br#"ERROR: GoCompilePkg config/config.a failed
+compilepkg: missing strict dependencies:
+/private/tmp/_bazel_user/hash/sandbox/darwin-sandbox/4/execroot/_main/config/config.go: import of "github.com/hashicorp/go-version"
+No dependencies were provided.
+Check that imports in Go sources match importpath attributes in deps.
+ERROR: Build did NOT complete successfully
+"#;
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(
+            diagnostic.message,
+            "missing strict dependency: config/config.go imports \"github.com/hashicorp/go-version\"; add its target to deps"
+        );
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "config/config.go".into(),
+                line: None,
+                column: None,
+            })
+        );
+        assert!(summary.headline.contains("missing strict dependency"));
+    }
+
+    #[test]
+    fn keeps_identical_go_messages_at_distinct_locations() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: b"first.go:3:2: undefined: missing\nsecond.go:7:4: undefined: missing\n",
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 2);
+        assert_eq!(
+            summary
+                .diagnostics
+                .iter()
+                .filter_map(|diagnostic| diagnostic.location.as_ref())
+                .map(|location| location.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first.go", "second.go"]
+        );
     }
 
     #[test]

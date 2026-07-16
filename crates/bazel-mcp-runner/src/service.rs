@@ -17,7 +17,7 @@ use bazel_mcp_policy::{
 };
 use bazel_mcp_reducer::{
     Budget, StreamReductionOutput, finalize_diagnostics, normalize_terminal_text,
-    parse_lcov_reader, parse_test_xml,
+    parse_go_diagnostic, parse_lcov_reader, parse_test_xml,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
@@ -1423,6 +1423,18 @@ impl InvocationService {
             self.enrich_tests(paths, &queued.request.workspace, &mut summary, &artifacts)
                 .await;
             finalize_diagnostics(&mut summary, Budget::result_default());
+            if !summary.success && summary.inspect_hint.is_none() {
+                let view = if summary
+                    .tests
+                    .iter()
+                    .any(|test| test.status != TestStatus::Passed && test.test_log_available)
+                {
+                    "test_log"
+                } else {
+                    "log"
+                };
+                summary.inspect_hint = Some(view.to_owned());
+            }
             if queued.request.command == BazelCommand::Coverage {
                 summary.coverage = self
                     .load_coverage(&queued.request.workspace, &artifacts)
@@ -1715,7 +1727,7 @@ impl InvocationService {
             let mut saw_artifact = false;
             let mut copied_for_test = false;
             let mut saw_remote = false;
-            let mut actionable_excerpt = None::<String>;
+            let mut actionable_excerpt = None::<Diagnostic>;
             for log in matching_logs {
                 saw_artifact = true;
                 if !log.locally_available {
@@ -1760,8 +1772,21 @@ impl InvocationService {
                             &visible_line.replace(workspace_text.as_ref(), "<workspace>"),
                             4 * 1024,
                         );
-                        if is_actionable_evidence(&text) {
-                            actionable_excerpt = Some(bounded_text(&text, 1_000));
+                        if let Some(mut diagnostic) = parse_go_diagnostic(&text) {
+                            diagnostic.category = DiagnosticCategory::Test;
+                            diagnostic.target = Some(test.label.clone());
+                            diagnostic.message = bounded_text(&diagnostic.message, 1_000);
+                            actionable_excerpt = Some(diagnostic);
+                        } else if is_actionable_evidence(&text) {
+                            actionable_excerpt = Some(Diagnostic {
+                                severity: Severity::Error,
+                                category: DiagnosticCategory::Test,
+                                message: bounded_text(&text, 1_000),
+                                location: None,
+                                target: Some(test.label.clone()),
+                                action: None,
+                                repetition_count: 1,
+                            });
                         }
                         let record = EvidenceRecord {
                             label: Some(test.label.clone()),
@@ -1789,16 +1814,8 @@ impl InvocationService {
             if copied_for_test {
                 test.test_log_available = true;
                 test.test_log_unavailable_reason = None;
-                if let Some(message) = actionable_excerpt {
-                    diagnostics.push(Diagnostic {
-                        severity: Severity::Error,
-                        category: DiagnosticCategory::Compilation,
-                        message,
-                        location: None,
-                        target: Some(test.label.clone()),
-                        action: None,
-                        repetition_count: 1,
-                    });
+                if let Some(diagnostic) = actionable_excerpt {
+                    diagnostics.push(diagnostic);
                 }
             } else {
                 test.test_log_available = false;
@@ -1832,6 +1849,13 @@ impl InvocationService {
             false
         };
         if committed {
+            for diagnostic in &diagnostics {
+                summary.diagnostics.retain(|existing| {
+                    !(existing.category == DiagnosticCategory::Compilation
+                        && existing.message == diagnostic.message
+                        && existing.location == diagnostic.location)
+                });
+            }
             summary.diagnostics.extend(diagnostics);
         } else {
             let _ = tokio::fs::remove_file(&raw_temporary).await;
@@ -2177,6 +2201,8 @@ fn is_actionable_evidence(line: &str) -> bool {
         || lower.contains("no such target")
         || lower.contains("no such package")
         || lower.contains("undefined reference")
+        || lower.contains("missing strict dependencies")
+        || (lower.contains(".go: import of \"") && lower.ends_with('"'))
         || lower.contains("root_cause")
 }
 

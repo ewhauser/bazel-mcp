@@ -102,6 +102,8 @@ struct RunResult<'a> {
     query_result_count: Option<u64>,
     query_sample: Option<&'a [QueryRow]>,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inspect_hint: Option<&'a str>,
     available_views: &'static [&'static str],
     more_available: bool,
 }
@@ -378,6 +380,7 @@ impl BazelMcpServer {
                 truncated: summary.truncated
                     || diagnostic_count < summary.diagnostics.len()
                     || query_sample_count < summary.query_sample.len(),
+                inspect_hint: summary.inspect_hint.as_deref(),
                 available_views: &[
                     "summary",
                     "metrics",
