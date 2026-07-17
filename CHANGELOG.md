@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0](https://github.com/ewhauser/bazel-mcp/compare/v0.4.0...v0.5.0) (2026-07-17)
+
+
+### Features
+
+* **reducer:** parse SWC diagnostics ([3ba358c](https://github.com/ewhauser/bazel-mcp/commit/3ba358cebc7c2e5377d7ec0e789474e3e6f6ad95))
+* **testing:** add reducer integration framework ([c24bea1](https://github.com/ewhauser/bazel-mcp/commit/c24bea166193dc084a30faa39ba53747b22d8249))
+
+
+### Bug Fixes
+
+* **ci:** stabilize reducer integration checks ([e7d3628](https://github.com/ewhauser/bazel-mcp/commit/e7d36280bc219b0ef846d473a339e499c5af7429))
+* **reducer:** normalize recorded workspace locations ([87bd8c1](https://github.com/ewhauser/bazel-mcp/commit/87bd8c1a2043f13b6095d4d098266ab0c8694a71))
+* **reducer:** select located SWC source line ([ae8a823](https://github.com/ewhauser/bazel-mcp/commit/ae8a8234cd628feb27e5684a921c5e018fcc5f01))
+* **runner:** coordinate shared output bases ([e57aaa9](https://github.com/ewhauser/bazel-mcp/commit/e57aaa9cac9c0255aa7e47125f58f9e2b9087b70))
+* **runner:** measure silent native lock waits ([0176013](https://github.com/ewhauser/bazel-mcp/commit/017601346a62231f368b561ae6971c08670fd127))
+* **store:** support shared multiprocess cache ([cc465ad](https://github.com/ewhauser/bazel-mcp/commit/cc465ad99b117f20473b804917f93795d43a4df0))
+
+
+### Performance Improvements
+
+* reduce filtered query allocations ([a31a45a](https://github.com/ewhauser/bazel-mcp/commit/a31a45a4537d18432dc9cceeed58fe3746ce244f))
+* reduce query and reducer allocations ([7e2a305](https://github.com/ewhauser/bazel-mcp/commit/7e2a305be0e2ce6fb1a43a890a6f9feae76596a5))
+
 ## [0.4.0](https://github.com/ewhauser/bazel-mcp/compare/v0.3.0...v0.4.0) (2026-07-17)
 
 
