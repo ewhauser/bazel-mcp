@@ -12,6 +12,7 @@ rust_library(
         "//crates/bazel-mcp-reducer:bazel_mcp_reducer",
         "//crates/bazel-mcp-store:bazel_mcp_store",
         "//crates/bazel-mcp-types:bazel_mcp_types",
+        "//crates/diagnostic-reducer:diagnostic_reducer",
     ] + all_crate_deps(
         cargo_only = True,
         normal = True,
