@@ -38,7 +38,7 @@ pub fn normalize_terminal_text(input: &[u8]) -> String {
         }
         if character == '\r' {
             output.push('\n');
-        } else if character != '\0' {
+        } else if character == '\n' || character == '\t' || !character.is_control() {
             output.push(character);
         }
     }
@@ -65,10 +65,7 @@ pub fn deduplicate_lines(input: &str) -> Vec<(String, u32)> {
     }
     order
         .into_iter()
-        .map(|line| {
-            let count = counts.get(line).copied().unwrap_or(1);
-            (line.to_owned(), count)
-        })
+        .map(|line| (line.to_owned(), counts.get(line).copied().unwrap_or(1)))
         .collect()
 }
 
@@ -77,9 +74,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_ansi_and_rewrites_carriage_returns() {
+    fn strips_terminal_controls_and_rewrites_carriage_returns() {
         assert_eq!(
-            normalize_terminal_text(b"\x1b[31mERROR\x1b[0m\rprogress"),
+            normalize_terminal_text(b"\x1b[31mERROR\x1b[0m\rpro\x08gress\x00"),
             "ERROR\nprogress"
         );
     }

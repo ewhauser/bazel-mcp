@@ -129,7 +129,8 @@ The initial repository is laid out as follows:
 │   ├── bazel-mcp-runner/
 │   ├── bazel-mcp-server/
 │   ├── bazel-mcp-store/
-│   └── bazel-mcp-types/
+│   ├── bazel-mcp-types/
+│   └── diagnostic-reducer/
 ├── fuzz/
 │   ├── Cargo.lock
 │   ├── Cargo.toml
@@ -348,11 +349,30 @@ directly by the Bazel child. Query pagination scans stdout using opaque byte
 offsets, applies bounded redaction before filtering, and never writes a duplicate
 normalized query payload.
 
+### `diagnostic-reducer`
+
+Source-agnostic, synchronous reduction of one or more terminal-text inputs into
+generic diagnostics. It is independently consumable through a pinned Git
+dependency and does not depend on any other workspace crate.
+
+Responsibilities:
+
+- Normalize terminal text and sanitize control sequences.
+- Run the fixed compiler, test, and tool parser registry in deterministic order.
+- Return generic severity, class, location, and optional provenance types.
+- Apply explicit redaction before exact deduplication and return.
+- Rank diagnostics and enforce item and serialized diagnostic byte budgets.
+- Extract bounded Rust, GoogleTest, and Go failure evidence from test logs.
+
+The crate performs no filesystem, process, storage, network, environment,
+clock, random, or async work. Runtime parser registration and provider-specific
+log acquisition are outside its contract.
+
 ### `bazel-mcp-reducer`
 
-Pure, deterministic conversion of BEP views and bounded evidence into domain
-results. It depends on `bazel-mcp-bep` and `bazel-mcp-types`, but not on the store,
-runner, Tokio, or MCP.
+Pure, deterministic conversion of BEP views and generic reduced diagnostics into
+Bazel domain results. It depends on `diagnostic-reducer`, `bazel-mcp-bep`, and
+`bazel-mcp-types`, but not on the store, runner, Tokio, or MCP.
 
 Responsibilities:
 
@@ -360,7 +380,7 @@ Responsibilities:
 - Reduce test attempts, shards, summaries, XML, and log excerpts.
 - Discover and parse local LCOV data.
 - Parse and page query output adapters.
-- Normalize terminal text, strip ANSI/progress output, redact, and deduplicate.
+- Map generic diagnostics into Bazel categories, targets, and actions.
 - Run explicitly configured Starlark reducers against a bounded, normalized,
   redacted projection after the built-in Rust reducers.
 - Apply diagnostic selection and response byte budgets.
@@ -597,6 +617,7 @@ bazel-mcp-server
 │   ├── bazel-mcp-store
 │   │   └── bazel-mcp-types
 │   ├── bazel-mcp-reducer
+│   │   ├── diagnostic-reducer
 │   │   ├── bazel-mcp-bep
 │   │   └── bazel-mcp-types
 │   ├── bazel-mcp-bep
@@ -607,11 +628,15 @@ bazel-mcp-server
 
 bazel-mcp-benchmark
 └── may depend on any library crate, but never the reverse
+
+diagnostic-reducer
+└── has no internal workspace dependencies
 ```
 
 Rules:
 
 - `bazel-mcp-types` has no internal dependencies.
+- `diagnostic-reducer` has no internal dependencies and no async or I/O surface.
 - `bazel-mcp-bep` does not depend on application crates.
 - `bazel-mcp-bes` depends only on `bazel-mcp-bep` among internal crates.
 - `bazel-mcp-policy`, `bazel-mcp-store`, and `bazel-mcp-reducer` are siblings and

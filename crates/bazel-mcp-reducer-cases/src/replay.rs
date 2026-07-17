@@ -3,13 +3,16 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result, ensure};
 use bazel_mcp_bep::{DEFAULT_MAX_FRAME_BYTES, decode_stream_partial};
 use bazel_mcp_reducer::{
-    BepAccumulator, Budget, JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser,
-    PythonDiagnosticParser, ReductionInput, TestFailureAccumulator, finalize_diagnostics,
-    normalize_terminal_text, parse_go_diagnostic, reduce_artifacts, reduce_invocation,
+    BepAccumulator, Budget, ReductionInput, TestFailureAccumulator, finalize_diagnostics,
+    map_text_diagnostic, normalize_terminal_text, reduce_artifacts, reduce_invocation,
 };
 use bazel_mcp_types::{
     Artifact, Diagnostic, DiagnosticCategory, DiagnosticLocation, InspectHint, InvocationSummary,
     Severity, TestCase, TestStatus,
+};
+use diagnostic_reducer::{
+    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
+    parse_go_diagnostic,
 };
 use serde::{Deserialize, Serialize};
 
@@ -257,31 +260,39 @@ fn enrich_from_test_log(path: &Path, target: &str, summary: &mut InvocationSumma
     for line in normalized.lines() {
         accumulator.observe_line(line);
         if let Some(diagnostic) = parse_go_diagnostic(line) {
-            push_test_diagnostic(summary, target, diagnostic);
+            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
         }
         if let Some(diagnostic) = javascript.observe_line(line) {
-            push_test_diagnostic(summary, target, diagnostic);
+            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
         }
         if let Some(diagnostic) = java.observe_line(line) {
-            push_test_diagnostic(summary, target, diagnostic);
+            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
         }
         if let Some(diagnostic) = python.observe_line(line) {
-            push_test_diagnostic(summary, target, diagnostic);
+            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
         }
     }
     if let Some(diagnostic) = javascript.finish() {
-        push_test_diagnostic(summary, target, diagnostic);
+        push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
     }
     if let Some(diagnostic) = java.finish() {
-        push_test_diagnostic(summary, target, diagnostic);
+        push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
     }
     for failure in accumulator.finish() {
         let is_go_failure = failure.message.starts_with("Go test ");
+        let location = failure
+            .location
+            .as_ref()
+            .map(|location| DiagnosticLocation {
+                path: location.path.clone(),
+                line: location.line,
+                column: location.column,
+            });
         if is_go_failure {
             summary.diagnostics.retain(|existing| {
                 !(existing.category == DiagnosticCategory::Test
                     && existing.target.as_deref() == Some(target)
-                    && existing.location.as_ref() == failure.location.as_ref()
+                    && existing.location.as_ref() == location.as_ref()
                     && failure.message.contains(&existing.message))
             });
         }
@@ -306,11 +317,7 @@ fn enrich_from_test_log(path: &Path, target: &str, summary: &mut InvocationSumma
                 severity: Severity::Error,
                 category: DiagnosticCategory::Test,
                 message: failure.message,
-                location: failure.location.map(|location| DiagnosticLocation {
-                    path: location.path,
-                    line: location.line,
-                    column: location.column,
-                }),
+                location,
                 target: Some(target.to_owned()),
                 action: None,
                 repetition_count: 1,

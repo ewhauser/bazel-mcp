@@ -18,6 +18,7 @@ bazel-mcp-policy = { path = "../crates/bazel-mcp-policy" }
 bazel-mcp-reducer = { path = "../crates/bazel-mcp-reducer" }
 bazel-mcp-store = { path = "../crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "../crates/bazel-mcp-types" }
+diagnostic-reducer = { path = "../crates/diagnostic-reducer" }
 buffa = "=0.8.1"
 
 [[bin]]

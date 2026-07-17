@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{bounded_text, split_u32_prefix, strip_workspace_marker};
 
@@ -24,15 +24,15 @@ pub(crate) fn parse_diagnostic(line: &str) -> Option<Diagnostic> {
     let (severity, message) = parse_severity_message(message)?;
     Some(Diagnostic {
         severity,
-        category: DiagnosticCategory::Compilation,
+        class: DiagnosticClass::Compiler,
+        code: None,
+        provenance: None,
         message: message.to_owned(),
-        location: Some(DiagnosticLocation {
+        location: Some(Location {
             path: compact_path(path),
             line: Some(line_number),
             column,
         }),
-        target: None,
-        action: None,
         repetition_count: 1,
     })
 }
@@ -182,13 +182,13 @@ pub(crate) fn parse_linker_diagnostic(line: &str) -> Option<Diagnostic> {
     None
 }
 
-fn parse_linker_location(prefix: &str) -> Option<DiagnosticLocation> {
+fn parse_linker_location(prefix: &str) -> Option<Location> {
     let path_end = path_end(prefix, ':')?;
     let (line_number, _) = split_u32_prefix(&prefix[path_end + 1..])?;
     let path = prefix[..path_end]
         .rsplit_once(": ")
         .map_or(&prefix[..path_end], |(_, path)| path);
-    Some(DiagnosticLocation {
+    Some(Location {
         path: compact_path(path),
         line: Some(line_number),
         column: None,
@@ -202,14 +202,14 @@ fn trim_linker_symbol(symbol: &str) -> &str {
         .trim_matches(|character| matches!(character, '`' | '\'' | '"'))
 }
 
-fn linker_diagnostic(message: String, location: Option<DiagnosticLocation>) -> Diagnostic {
+fn linker_diagnostic(message: String, location: Option<Location>) -> Diagnostic {
     Diagnostic {
         severity: Severity::Error,
-        category: DiagnosticCategory::Compilation,
+        class: DiagnosticClass::Compiler,
+        code: None,
+        provenance: None,
         message,
         location,
-        target: None,
-        action: None,
         repetition_count: 1,
     }
 }

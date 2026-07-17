@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{bounded_text, strip_workspace_marker};
 
@@ -95,11 +95,11 @@ pub(crate) fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
         }
         output.diagnostics.push(Diagnostic {
             severity,
-            category: DiagnosticCategory::Compilation,
+            class: DiagnosticClass::Compiler,
+            code: None,
+            provenance: None,
             message,
             location: Some(location),
-            target: None,
-            action: None,
             repetition_count: 1,
         });
     }
@@ -130,7 +130,7 @@ fn strip_swc_icon(line: &str, icon: char) -> Option<&str> {
         .then(|| remainder.trim_start())
 }
 
-fn parse_swc_source_frame_location(line: &str) -> Option<DiagnosticLocation> {
+fn parse_swc_source_frame_location(line: &str) -> Option<Location> {
     let line = line.trim();
     let opening = line.find('[')?;
     let marker = line[..opening].trim_end();
@@ -144,7 +144,7 @@ fn parse_swc_source_frame_location(line: &str) -> Option<DiagnosticLocation> {
     if path.trim().is_empty() {
         return None;
     }
-    Some(DiagnosticLocation {
+    Some(Location {
         path: compact_path(path.trim()),
         line: Some(line_number.parse::<u32>().ok()?),
         column: Some(column.parse::<u32>().ok()?),
@@ -284,7 +284,7 @@ pub(super) fn reduce_tests(
 /// Stateful extractor for Node.js exceptions and their application frames.
 #[derive(Debug, Default)]
 pub struct JavaScriptTestDiagnosticParser {
-    leading_location: Option<DiagnosticLocation>,
+    leading_location: Option<Location>,
     pending: Option<Diagnostic>,
     frames_seen: usize,
 }
@@ -307,11 +307,11 @@ impl JavaScriptTestDiagnosticParser {
             let previous = self.take_confirmed();
             self.pending = Some(Diagnostic {
                 severity: Severity::Error,
-                category: DiagnosticCategory::Test,
+                class: DiagnosticClass::Test,
+                code: None,
+                provenance: None,
                 message: message.to_owned(),
                 location: leading_location,
-                target: None,
-                action: None,
                 repetition_count: 1,
             });
             self.frames_seen = 0;
@@ -371,7 +371,7 @@ pub(super) fn exception_message(line: &str) -> Option<&str> {
     .then_some(line)
 }
 
-fn parse_stack_frame(line: &str) -> Option<Option<DiagnosticLocation>> {
+fn parse_stack_frame(line: &str) -> Option<Option<Location>> {
     let frame = line.trim().strip_prefix("at ")?;
     let source = if let Some((_, source)) = frame.rsplit_once('(') {
         source.strip_suffix(')')?
@@ -388,7 +388,7 @@ fn parse_stack_frame(line: &str) -> Option<Option<DiagnosticLocation>> {
     Some((!framework).then_some(location))
 }
 
-fn parse_location(value: &str) -> Option<DiagnosticLocation> {
+fn parse_location(value: &str) -> Option<Location> {
     let value = value.trim().trim_matches('"');
     let path_end = path_end(value)?;
     let coordinates = value[path_end..].strip_prefix(':')?;
@@ -400,7 +400,7 @@ fn parse_location(value: &str) -> Option<DiagnosticLocation> {
     } else {
         (coordinates.parse::<u32>().ok()?, None)
     };
-    Some(DiagnosticLocation {
+    Some(Location {
         path: compact_path(&value[..path_end]),
         line: Some(line_number),
         column,

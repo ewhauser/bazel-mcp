@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{split_u32_prefix, strip_workspace_marker};
 
@@ -27,15 +27,15 @@ pub fn parse_diagnostic(line: &str) -> Option<Diagnostic> {
         } else {
             Severity::Error
         },
-        category: DiagnosticCategory::Compilation,
+        class: DiagnosticClass::Compiler,
+        code: None,
+        provenance: None,
         message: message.to_owned(),
-        location: Some(DiagnosticLocation {
+        location: Some(Location {
             path: compact_path(path),
             line: Some(line_number),
             column,
         }),
-        target: None,
-        action: None,
         repetition_count: 1,
     })
 }
@@ -54,17 +54,17 @@ pub(super) fn strict_dependency_diagnostic(line: &str) -> Option<Diagnostic> {
     let path = compact_path(path);
     Some(Diagnostic {
         severity: Severity::Error,
-        category: DiagnosticCategory::Compilation,
+        class: DiagnosticClass::Compiler,
+        code: None,
+        provenance: None,
         message: format!(
             "missing strict dependency: {path} imports \"{import}\"; add its target to deps"
         ),
-        location: Some(DiagnosticLocation {
+        location: Some(Location {
             path,
             line: None,
             column: None,
         }),
-        target: None,
-        action: None,
         repetition_count: 1,
     })
 }

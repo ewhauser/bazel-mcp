@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use bazel_mcp_reducer::{TestFailureAccumulator, normalize_terminal_text};
-use bazel_mcp_types::DiagnosticLocation;
+use diagnostic_reducer::Location;
 use serde::Serialize;
 
 const CASES: [&str; 5] = ["ordinary", "subtests", "table", "panic", "repeated"];
@@ -10,7 +10,7 @@ const CASES: [&str; 5] = ["ordinary", "subtests", "table", "panic", "repeated"];
 struct GoldenFailure<'a> {
     name: &'a str,
     message: &'a str,
-    location: &'a Option<DiagnosticLocation>,
+    location: &'a Option<Location>,
 }
 
 #[test]

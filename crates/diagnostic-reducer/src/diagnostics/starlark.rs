@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{split_u32_prefix, strip_workspace_marker};
 
@@ -18,15 +18,15 @@ pub(super) fn reduce(input: &str, diagnostics: &mut Vec<Diagnostic>) {
 /// terminal `Error in ...` line, so only the latest frame must be retained.
 #[derive(Debug)]
 struct StarlarkDiagnosticParser {
-    location: Option<DiagnosticLocation>,
-    category: DiagnosticCategory,
+    location: Option<Location>,
+    code: &'static str,
 }
 
 impl Default for StarlarkDiagnosticParser {
     fn default() -> Self {
         Self {
             location: None,
-            category: DiagnosticCategory::Loading,
+            code: "starlark.loading",
         }
     }
 }
@@ -36,13 +36,17 @@ impl StarlarkDiagnosticParser {
         if is_traceback_header(line) {
             self.location = None;
             if line.trim_start().starts_with("ERROR:") {
-                self.category = DiagnosticCategory::Loading;
+                self.code = "starlark.loading";
             }
             return None;
         }
         if let Some(diagnostic) = parse_inline_diagnostic(line) {
             self.location = diagnostic.location.clone();
-            self.category = diagnostic.category;
+            self.code = if diagnostic.code.as_deref() == Some("starlark.analysis") {
+                "starlark.analysis"
+            } else {
+                "starlark.loading"
+            };
             return is_root_cause_message(&diagnostic.message).then_some(diagnostic);
         }
         if let Some(location) = parse_traceback_location(line) {
@@ -52,11 +56,11 @@ impl StarlarkDiagnosticParser {
         let message = error_message(line)?;
         Some(Diagnostic {
             severity: Severity::Error,
-            category: self.category,
+            class: DiagnosticClass::Tool,
+            code: Some(self.code.to_owned()),
+            provenance: None,
             message: message.to_owned(),
             location: self.location.take(),
-            target: None,
-            action: None,
             repetition_count: 1,
         })
     }
@@ -79,13 +83,13 @@ pub(crate) fn parse_inline_diagnostic(line: &str) -> Option<Diagnostic> {
         return None;
     }
     let lower = message.to_ascii_lowercase();
-    let category = if (lower.starts_with("in ") && lower.contains(" rule //"))
+    let code = if (lower.starts_with("in ") && lower.contains(" rule //"))
         || lower.contains("analysis of target")
         || lower.contains("aspect on target")
     {
-        DiagnosticCategory::Analysis
+        "starlark.analysis"
     } else {
-        DiagnosticCategory::Loading
+        "starlark.loading"
     };
     Some(Diagnostic {
         severity: if lower.contains("warning:") {
@@ -93,15 +97,15 @@ pub(crate) fn parse_inline_diagnostic(line: &str) -> Option<Diagnostic> {
         } else {
             Severity::Error
         },
-        category,
+        class: DiagnosticClass::Tool,
+        code: Some(code.to_owned()),
+        provenance: None,
         message: message.to_owned(),
-        location: Some(DiagnosticLocation {
+        location: Some(Location {
             path: compact_path(path),
             line: Some(line_number),
             column,
         }),
-        target: None,
-        action: None,
         repetition_count: 1,
     })
 }
@@ -124,7 +128,7 @@ fn path_end(line: &str) -> Option<usize> {
         .max()
 }
 
-fn parse_traceback_location(line: &str) -> Option<DiagnosticLocation> {
+fn parse_traceback_location(line: &str) -> Option<Location> {
     let marker = "File \"";
     let start = line.find(marker)? + marker.len();
     let remainder = &line[start..];
@@ -151,7 +155,7 @@ fn parse_traceback_location(line: &str) -> Option<DiagnosticLocation> {
                 .then(|| remainder[..digits].parse::<u32>().ok())
                 .flatten()
         });
-    Some(DiagnosticLocation {
+    Some(Location {
         path: compact_path(path),
         line: Some(line_number),
         column,

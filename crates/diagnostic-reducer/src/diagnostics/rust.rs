@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{bounded_text, strip_workspace_marker};
 
@@ -37,7 +37,7 @@ pub(super) fn reduce(input: &str, diagnostics: &mut Vec<Diagnostic>) {
 struct PendingDiagnostic {
     message: String,
     detail: Option<String>,
-    location: Option<DiagnosticLocation>,
+    location: Option<Location>,
 }
 
 impl PendingDiagnostic {
@@ -56,11 +56,11 @@ impl PendingDiagnostic {
         });
         Some(Diagnostic {
             severity: Severity::Error,
-            category: DiagnosticCategory::Compilation,
+            class: DiagnosticClass::Compiler,
+            code: None,
+            provenance: None,
             message: bounded_text(&message, MAX_MESSAGE_BYTES),
             location: Some(location),
-            target: None,
-            action: None,
             repetition_count: 1,
         })
     }
@@ -79,13 +79,13 @@ fn parse_error_header(line: &str) -> Option<String> {
     (!message.is_empty()).then(|| format!("{code}: {message}"))
 }
 
-fn parse_location(line: &str) -> Option<DiagnosticLocation> {
+fn parse_location(line: &str) -> Option<Location> {
     let coordinates = line.trim().strip_prefix("--> ")?;
     let (path_and_line, column) = coordinates.rsplit_once(':')?;
     let (path, line) = path_and_line.rsplit_once(':')?;
     let line = line.parse::<u32>().ok()?;
     let column = column.parse::<u32>().ok()?;
-    (!path.is_empty()).then(|| DiagnosticLocation {
+    (!path.is_empty()).then(|| Location {
         path: compact_path(path),
         line: Some(line),
         column: Some(column),
@@ -136,7 +136,7 @@ error: aborting due to 1 previous error
         );
         assert_eq!(
             diagnostics[0].location,
-            Some(DiagnosticLocation {
+            Some(Location {
                 path: "cases/type_mismatch.rs".to_owned(),
                 line: Some(2),
                 column: Some(28),

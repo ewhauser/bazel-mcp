@@ -12,6 +12,7 @@ publish = false
 anyhow.workspace = true
 bazel-mcp-bep.workspace = true
 bazel-mcp-types.workspace = true
+diagnostic-reducer.workspace = true
 quick-xml.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -19,5 +20,6 @@ starlark.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+diagnostic-reducer = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
 tempfile.workspace = true

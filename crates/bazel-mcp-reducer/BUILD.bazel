@@ -9,6 +9,7 @@ rust_library(
     deps = [
         "//crates/bazel-mcp-bep:bazel_mcp_bep",
         "//crates/bazel-mcp-types:bazel_mcp_types",
+        "//crates/diagnostic-reducer:diagnostic_reducer",
     ] + all_crate_deps(
         cargo_only = True,
         normal = True,
