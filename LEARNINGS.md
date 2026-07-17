@@ -127,6 +127,13 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   beside the actionable failure, consuming model-visible item budget; discard
   empty reducer messages before ranking and serialization. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- A successful 1,000-row `bazel.run query` still normalized, deduplicated,
+  redacted, and serialized the bounded capture as failure-evidence log data;
+  DHAT measured about 736 KB in 5,222 allocations per call across ten
+  end-to-end MCP requests even though agents consume `query_results`. Defer log
+  materialization until reduction selects the `log` view, and skip it for
+  ordinary successful queries. Thread:
+  `019f6db7-4010-7191-8796-1c83ff2a7f42`.
 - Recorded BEP strings used fixed-length uppercase workspace markers while
   service locations used lowercase markers, complicating live/replay parity and
   leaking padding into visible messages; normalize both marker forms before

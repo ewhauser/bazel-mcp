@@ -53,22 +53,21 @@ pub fn normalize_terminal_text(input: &[u8]) -> String {
 
 #[must_use]
 pub fn deduplicate_lines(input: &str) -> Vec<(String, u32)> {
-    let mut counts = BTreeMap::<String, u32>::new();
+    let mut counts = BTreeMap::<&str, u32>::new();
     let mut order = Vec::new();
     for line in input.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if !counts.contains_key(line) {
-            order.push(line.to_owned());
+        if let Some(count) = counts.get_mut(line) {
+            *count = count.saturating_add(1);
+        } else {
+            order.push(line);
+            counts.insert(line, 1);
         }
-        counts
-            .entry(line.to_owned())
-            .and_modify(|count| *count = count.saturating_add(1))
-            .or_insert(1);
     }
     order
         .into_iter()
         .map(|line| {
-            let count = counts.get(&line).copied().unwrap_or(1);
-            (line, count)
+            let count = counts.get(line).copied().unwrap_or(1);
+            (line.to_owned(), count)
         })
         .collect()
 }
@@ -88,8 +87,8 @@ mod tests {
     #[test]
     fn exact_deduplication_preserves_first_order() {
         assert_eq!(
-            deduplicate_lines("warning\nerror\nwarning"),
-            vec![("warning".into(), 2), ("error".into(), 1)]
+            deduplicate_lines(" warning \nerror\nwarning\n\n error "),
+            vec![("warning".into(), 2), ("error".into(), 2)]
         );
     }
 }
