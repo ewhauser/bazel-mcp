@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub(crate) const QUERY_LINE_LIMIT: usize = 64 * 1024;
+const QUERY_COUNT_BUFFER_BYTES: usize = 64 * 1024;
 
 pub(crate) fn page_records<T, F>(
     scope: &str,
@@ -215,23 +216,25 @@ where
 }
 
 fn count_query_rows(mut file: &File) -> Result<u64, StoreError> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom};
 
     file.seek(SeekFrom::Start(0))?;
-    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut reader = BufReader::with_capacity(QUERY_COUNT_BUFFER_BYTES, file);
     let mut rows = 0_u64;
     let mut saw_bytes = false;
     let mut last_byte = b'\n';
     loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
             break;
         }
         saw_bytes = true;
-        last_byte = buffer[read - 1];
+        last_byte = buffer[buffer.len() - 1];
         rows = rows.saturating_add(
-            u64::try_from(memchr::memchr_iter(b'\n', &buffer[..read]).count()).unwrap_or(u64::MAX),
+            u64::try_from(memchr::memchr_iter(b'\n', buffer).count()).unwrap_or(u64::MAX),
         );
+        let consumed = buffer.len();
+        reader.consume(consumed);
     }
     if saw_bytes && last_byte != b'\n' {
         rows = rows.saturating_add(1);
