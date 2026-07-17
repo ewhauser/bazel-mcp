@@ -1151,8 +1151,7 @@ mod tests {
                 .as_deref()
                 .map(|cursor| LogCursor::decode_for(cursor, id, InspectView::Log, None).unwrap())
                 .map_or(0, |cursor| cursor.next_record);
-            let page =
-                page_evidence_records(records.clone().into_iter(), start, &request, id).unwrap();
+            let page = page_evidence_records(records.clone(), start, &request, id).unwrap();
             observed.extend(page.items);
             request.cursor = page.next_cursor;
             if !page.truncated {
@@ -1165,6 +1164,108 @@ mod tests {
                 .map(|index| format!("ERROR: item {index}"))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn filtered_test_logs_include_bounded_same_target_context_across_pages() {
+        let id = InvocationId::new();
+        let label = Some("//pkg:process_test".to_owned());
+        let records = vec![
+            EvidenceRecord {
+                label: label.clone(),
+                text: "unrelated setup".to_owned(),
+            },
+            EvidenceRecord {
+                label: label.clone(),
+                text: "---- failing_case stdout ----".to_owned(),
+            },
+            EvidenceRecord {
+                label: label.clone(),
+                text: "thread 'failing_case' panicked at tests/process.rs:42:5".to_owned(),
+            },
+            EvidenceRecord {
+                label,
+                text: "called `Result::unwrap()` on an `Err` value: not found".to_owned(),
+            },
+            EvidenceRecord {
+                label: Some("//pkg:other_test".to_owned()),
+                text: "other target output".to_owned(),
+            },
+        ];
+        let mut request = InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            state: None,
+            command: None,
+            view: InspectView::TestLog,
+            cursor: None,
+            filter: Some("failing_case".to_owned()),
+            item_limit: 2,
+            scan_limit: 2,
+        };
+        let mut observed = Vec::new();
+        loop {
+            let start = request
+                .cursor
+                .as_deref()
+                .map(|cursor| {
+                    LogCursor::decode_for(
+                        cursor,
+                        id,
+                        InspectView::TestLog,
+                        request.filter.as_deref(),
+                    )
+                    .unwrap()
+                })
+                .map_or(0, |cursor| cursor.next_record);
+            let page = page_evidence_records(records.clone(), start, &request, id).unwrap();
+            observed.extend(page.items);
+            request.cursor = page.next_cursor;
+            if !page.truncated {
+                break;
+            }
+        }
+        assert_eq!(
+            observed,
+            vec![
+                "unrelated setup",
+                "---- failing_case stdout ----",
+                "thread 'failing_case' panicked at tests/process.rs:42:5",
+                "called `Result::unwrap()` on an `Err` value: not found",
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_log_filters_do_not_expand_to_adjacent_context() {
+        let id = InvocationId::new();
+        let records = vec![
+            EvidenceRecord {
+                label: None,
+                text: "before".to_owned(),
+            },
+            EvidenceRecord {
+                label: None,
+                text: "ERROR: direct match".to_owned(),
+            },
+            EvidenceRecord {
+                label: None,
+                text: "after".to_owned(),
+            },
+        ];
+        let request = InspectRequest {
+            invocation_id: Some(id),
+            workspace: None,
+            state: None,
+            command: None,
+            view: InspectView::Log,
+            cursor: None,
+            filter: Some("direct match".to_owned()),
+            item_limit: 20,
+            scan_limit: 100,
+        };
+        let page = page_evidence_records(records, 0, &request, id).unwrap();
+        assert_eq!(page.items, vec!["ERROR: direct match"]);
     }
 
     #[test]

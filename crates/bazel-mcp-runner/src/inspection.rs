@@ -23,6 +23,8 @@ use crate::{
     service::{InvocationService, RunnerError, bounded_text},
 };
 
+const TEST_LOG_FILTER_CONTEXT_LINES: usize = 1;
+
 #[derive(Clone, Debug)]
 pub struct InspectRequest {
     pub invocation_id: Option<InvocationId>,
@@ -402,7 +404,7 @@ impl InvocationService {
                     &stdout,
                     &stderr,
                 );
-                return page_evidence_records(records.into_iter(), start, request, invocation_id);
+                return page_evidence_records(records, start, request, invocation_id);
             }
             Err(error) => return Err(error.into()),
         };
@@ -411,7 +413,7 @@ impl InvocationService {
         while let Some(line) = lines.next_line().await? {
             records.push(serde_json::from_str::<EvidenceRecord>(&line)?);
         }
-        page_evidence_records(records.into_iter(), start, request, invocation_id)
+        page_evidence_records(records, start, request, invocation_id)
     }
 
     async fn read_test_log_unavailable_page(
@@ -522,7 +524,7 @@ impl InvocationService {
 }
 
 pub(crate) fn page_evidence_records(
-    records: impl Iterator<Item = EvidenceRecord>,
+    records: Vec<EvidenceRecord>,
     start: u64,
     request: &InspectRequest,
     invocation_id: InvocationId,
@@ -537,8 +539,8 @@ pub(crate) fn page_evidence_records(
     let mut next_record = start;
     let mut scanned = 0_usize;
     let mut truncated = false;
-    for (index, record) in records.enumerate() {
-        let index = u64::try_from(index).unwrap_or(u64::MAX);
+    for (record_index, record) in records.iter().enumerate() {
+        let index = u64::try_from(record_index).unwrap_or(u64::MAX);
         if index < start {
             continue;
         }
@@ -546,12 +548,12 @@ pub(crate) fn page_evidence_records(
             truncated = true;
             break;
         }
-        let matches = filter.as_ref().is_none_or(|filter| {
-            record.text.to_ascii_lowercase().contains(filter)
-                || record
-                    .label
-                    .as_deref()
-                    .is_some_and(|label| label.to_ascii_lowercase().contains(filter))
+        let matches = filter.as_deref().is_none_or(|filter| {
+            if request.view == InspectView::TestLog {
+                test_log_record_matches_context(&records, record_index, filter)
+            } else {
+                evidence_record_matches(record, filter)
+            }
         });
         if matches && items.len() == maximum_items {
             next_record = index;
@@ -568,7 +570,7 @@ pub(crate) fn page_evidence_records(
                 filter: request.filter.clone(),
             }
             .encode()?;
-            items.push(record.text);
+            items.push(record.text.clone());
             item_cursors.push(cursor);
         }
     }
@@ -587,6 +589,25 @@ pub(crate) fn page_evidence_records(
         truncated,
         next_cursor,
     })
+}
+
+fn test_log_record_matches_context(records: &[EvidenceRecord], index: usize, filter: &str) -> bool {
+    let start = index.saturating_sub(TEST_LOG_FILTER_CONTEXT_LINES);
+    let end = index
+        .saturating_add(TEST_LOG_FILTER_CONTEXT_LINES)
+        .saturating_add(1)
+        .min(records.len());
+    records[start..end].iter().any(|candidate| {
+        candidate.label == records[index].label && evidence_record_matches(candidate, filter)
+    })
+}
+
+fn evidence_record_matches(record: &EvidenceRecord, filter: &str) -> bool {
+    record.text.to_ascii_lowercase().contains(filter)
+        || record
+            .label
+            .as_deref()
+            .is_some_and(|label| label.to_ascii_lowercase().contains(filter))
 }
 
 pub(crate) fn should_persist_failure_evidence(command: &BazelCommand, failed: bool) -> bool {
