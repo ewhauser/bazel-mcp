@@ -13,6 +13,8 @@ pub(crate) struct ProcessGroupGuard {
 
 impl ProcessGroupGuard {
     pub(crate) fn for_child(child: &Child) -> Self {
+        #[cfg(not(unix))]
+        let _ = child;
         Self {
             #[cfg(unix)]
             process_group: child.id().and_then(|id| i32::try_from(id).ok()),
