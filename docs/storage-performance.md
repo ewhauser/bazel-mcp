@@ -89,11 +89,15 @@ counting are more valuable than a second normalized format.
 
 ## Concurrency, durability, and collection
 
-The cache root has one exclusive process `LOCK`. Within a process,
-`RwLock<Index>` protects only compact in-memory state and per-invocation mutexes
-serialize mutations to the same invocation. No index lock spans an awaited
-read, write, rename, permission update, directory creation, or recursive
-deletion.
+Multiple server processes may share a cache root. Process-wide per-invocation
+locks serialize manifest and sidecar commits, `LOCK` serializes generation
+advancement and index refresh, `MAINTENANCE` elects recovery and global GC, and
+per-invocation owner leases distinguish live work from orphaned records. An
+atomically replaced generation counter tells each process when its compact
+local index must be rebuilt. Within a process, `RwLock<Index>` protects only
+compact in-memory state and
+per-invocation mutexes serialize mutations to the same invocation. No lock is
+held across Bazel execution or recursive deletion.
 
 Lifecycle state is durable. Inspect/model-visible/progress counters are updated
 in memory immediately and coalesced after 250 ms or into the next durable
@@ -106,8 +110,10 @@ metadata update. Corrupt committed JSON fails closed.
 GC accounts terminal bytes in the manifest. It protects live invocations and
 unexpired deferred results, preserves the 80% low-water mark, and uses rename to
 `trash/` as its deletion commit. The index entry is removed immediately after a
-successful rename. Recursive unlink runs outside the index lock; a failed
-unlink leaves trash absent from the live index and startup retries cleanup.
+successful rename. Generation notifications are published in bounded batches
+during a sweep and once more before GC returns. Recursive unlink runs outside
+the index lock; a failed unlink leaves trash absent from the live index and
+startup retries cleanup.
 
 ## Controlled filesystem comparison
 

@@ -738,6 +738,10 @@ There is no embedded or hosted database.
 ```text
 <cache-root>/
   LOCK
+  MAINTENANCE
+  GENERATION
+  owners/<invocation-id>.lock
+  mutations/<invocation-id>.lock
   trash/
   invocations/<uuidv7-day>/<bounded-shard>/<invocation-id>/
       manifest.json
@@ -765,10 +769,23 @@ user cache directory and MUST NOT be placed inside the Bazel workspace.
 - `details.json` contains detailed target, test, and per-file coverage
   collections. `artifacts.json` contains artifacts. Startup reads neither
   sidecar while rebuilding the compact index.
-- One exclusive cache-root lock prevents multiple writer processes.
-- A read/write lock protects only the compact index. Per-invocation mutation
-  locks serialize writers for one invocation; no index lock is held across
-  awaited filesystem I/O.
+- Multiple server processes MAY share one cache root. Per-invocation mutation
+  locks serialize manifest and sidecar commits for one invocation. `LOCK`
+  serializes only generation advancement and index refresh; neither lock is
+  held for the lifetime of a server or Bazel invocation.
+- Each nonterminal invocation has an exclusive owner lease. Startup and
+  periodic recovery transition a nonterminal record to `interrupted` only when
+  that lease can be acquired, so one server never recovers another server's
+  live invocation.
+- The fixed-size atomic `GENERATION` counter advances after every committed
+  manifest mutation and after bounded batches of global-GC deletions, allowing
+  low-cost cross-process change checks throughout a retention sweep.
+  Each process keeps a bounded local index and rebuilds it when another process
+  advances the generation. `MAINTENANCE` elects one process at a time for
+  recovery and global retention.
+- A read/write lock protects only the compact index. Process-wide and local
+  per-invocation mutation locks serialize writers for one invocation; no index
+  lock is held across awaited filesystem I/O.
 - Startup removes committed trash, discards uncommitted temporary files,
   rebuilds bounded indexes, and terminalizes orphaned nonterminal records.
 - Stdout and stderr are written directly by Bazel. BEP is written directly in
@@ -784,8 +801,8 @@ user cache directory and MUST NOT be placed inside the Bazel workspace.
 - Canonical arguments, artifacts, final metrics, termination, state, and summary
   are coalesced into one terminal manifest commit. Noncritical telemetry is
   buffered and may lose its most recent interval on a process crash.
-- On startup, nonterminal invocations without a tracked live child transition to
-  `interrupted`.
+- On startup or periodic maintenance, nonterminal invocations without a held
+  owner lease transition to `interrupted`.
 - Complete captured files remain inspectable after server restart.
 - A partially written BEP is parsed up to the last complete message.
 - File replacement uses a private temporary file followed by atomic rename.
@@ -1168,7 +1185,7 @@ blocking BEP and filesystem work uses bounded blocking tasks.
 | Concurrent commands wait on the same output-base lock | Hidden latency and apparent stalls | Acquire a per-user cross-process advisory lock for every known output-base key, preserve Bazel's native wait-and-takeover path for uncoordinated clients, and report bounded wait progress. |
 | Logs contain secrets | Sensitive data reaches model or disk | Private storage, retention, configured redaction before summaries and inspection. |
 | Retained logs consume large amounts of disk | Builds fail or machine degrades | Quotas, oldest-first eviction, and preflight storage checks. |
-| Filesystem records are interrupted during commit or deletion | Missing metadata or leaked evidence | Use atomic rename commit points, two-phase trash deletion, exclusive locking, and crash/restart tests. |
+| Filesystem records are interrupted during commit or deletion | Missing metadata or leaked evidence | Use atomic rename commit points, two-phase trash deletion, short metadata locks, owner leases, and crash/restart tests. |
 | Token estimates are mistaken for provider billing | Savings claims are misleading | Label `tiktoken-rs` results as deterministic estimates, record the encoding, and corroborate with live platform metrics when available. |
 | The upstream benchmark corpus drifts or disappears | Results cease to be reproducible | Pin Abseil by full commit, verify the checkout, cache it, and keep scenario overlays in this repository. |
 | Quiet flags hide the only useful error | Agent cannot diagnose failure | Capture complete stdout/stderr and retain BEP before applying reduction. |

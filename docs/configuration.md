@@ -189,7 +189,7 @@ the native result and add a bounded note. See the
 | Setting | Default | Description |
 | --- | --- | --- |
 | `allowed_roots` | `[]` | Absolute roots containing workspaces the server may access. An empty list allows any workspace. |
-| `cache_root` | Platform user cache under `bazel-mcp` | Directory for metadata, logs, and BEP evidence. |
+| `cache_root` | Platform user cache under `bazel-mcp` | Shared directory for metadata, logs, and BEP evidence. Multiple server processes may use the same root concurrently. |
 | `bep_transport` | `tail` | BEP ingestion path: portable private binary file (`tail`), opt-in POSIX named pipe with file fallback (`fifo`), or loopback Build Event Service (`bes`). |
 | `bazel_executable` | unset | Explicit Bazel or Bazelisk executable. |
 | `output_user_root` | unset | Isolated Bazel output user root managed by the server. |

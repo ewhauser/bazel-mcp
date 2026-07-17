@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     sync::{
-        Arc, Weak,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -26,15 +26,14 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     InvocationPaths,
     cursor::{DeferredCursor, FileCursor, InvocationCursor, OrdinalCursor},
-    files::{
-        remove_if_exists, set_private_directory, set_private_file, write_bytes_atomic,
-        write_json_atomic,
-    },
+    files::{remove_if_exists, set_private_directory, write_bytes_atomic, write_json_atomic},
 };
 
 const RECORD_SCHEMA_VERSION: u32 = 1;
 const QUERY_LINE_LIMIT: usize = 64 * 1024;
 const GC_LOW_WATERMARK_PERCENT: u64 = 80;
+const GC_GENERATION_BATCH_SIZE: usize = 64;
+const GENERATION_POLL_INTERVAL_US: u64 = 1_000;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -44,8 +43,6 @@ pub enum StoreError {
     DeferredNotFound(InvocationId),
     #[error("invalid pagination cursor")]
     InvalidCursor,
-    #[error("cache is already locked by another process: {0}")]
-    Locked(PathBuf),
     #[error("unsupported invocation record schema {found} in {path}")]
     UnsupportedRecordSchema { found: u32, path: PathBuf },
     #[error("corrupt invocation record {path}: {message}")]
@@ -69,6 +66,9 @@ pub struct Store {
 struct StoreInner {
     index: RwLock<Index>,
     mutation_locks: Mutex<BTreeMap<InvocationId, Weak<Mutex<()>>>>,
+    owner_leases: Mutex<BTreeMap<InvocationId, ProcessLock>>,
+    observed_generation: AtomicU64,
+    next_generation_check_us: AtomicU64,
     manifest_commits: AtomicU64,
     manifest_bytes_written: AtomicU64,
     payload_recounts: AtomicU64,
@@ -80,7 +80,6 @@ struct StoreInner {
     #[cfg(test)]
     fail_next_gc_unlink: AtomicBool,
     startup_stats: StoreStartupStats,
-    _lock_file: File,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -101,6 +100,13 @@ pub struct StoreStartupStats {
     pub manifest_read_us: u64,
     pub manifest_decode_us: u64,
     pub index_build_us: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReclaimOutcome {
+    changed: bool,
+    deleted: bool,
+    reclaimed: bool,
 }
 
 /// One coalesced terminal metadata commit for a completed Bazel invocation.
@@ -195,34 +201,32 @@ impl Store {
         set_private_directory(&cache_root).await?;
         tokio::fs::create_dir_all(cache_root.join("invocations")).await?;
         tokio::fs::create_dir_all(cache_root.join("trash")).await?;
+        tokio::fs::create_dir_all(cache_root.join("owners")).await?;
+        tokio::fs::create_dir_all(cache_root.join("mutations")).await?;
         set_private_directory(&cache_root.join("invocations")).await?;
         set_private_directory(&cache_root.join("trash")).await?;
+        set_private_directory(&cache_root.join("owners")).await?;
+        set_private_directory(&cache_root.join("mutations")).await?;
 
-        let lock_path = cache_root.join("LOCK");
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        set_private_file(&lock_path).await?;
-        match lock_file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(StoreError::Locked(lock_path));
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-        }
-
+        let _maintenance = ProcessLock::acquire(cache_root.join("MAINTENANCE")).await?;
+        let _metadata = ProcessLock::acquire(cache_root.join("LOCK")).await?;
         recover_trash(&cache_root).await?;
-        let (mut index, startup_stats) = load_index(&cache_root).await?;
-        recover_interrupted(&cache_root, &mut index).await?;
+        let (mut index, startup_stats) = load_index(&cache_root, true).await?;
+        let recovered = recover_interrupted(&cache_root, &mut index).await?;
+        let generation = if recovered == 0 {
+            read_generation(&cache_root)?
+        } else {
+            bump_generation(&cache_root)?
+        };
 
         Ok(Self {
             cache_root,
             inner: Arc::new(StoreInner {
                 index: RwLock::new(index),
                 mutation_locks: Mutex::new(BTreeMap::new()),
+                owner_leases: Mutex::new(BTreeMap::new()),
+                observed_generation: AtomicU64::new(generation),
+                next_generation_check_us: AtomicU64::new(0),
                 manifest_commits: AtomicU64::new(0),
                 manifest_bytes_written: AtomicU64::new(0),
                 payload_recounts: AtomicU64::new(0),
@@ -234,7 +238,6 @@ impl Store {
                 #[cfg(test)]
                 fail_next_gc_unlink: AtomicBool::new(false),
                 startup_stats,
-                _lock_file: lock_file,
             }),
         })
     }
@@ -257,6 +260,102 @@ impl Store {
         let lock = Arc::new(Mutex::new(()));
         locks.insert(id, Arc::downgrade(&lock));
         lock
+    }
+
+    async fn acquire_owner(&self, id: InvocationId) -> Result<ProcessLock, StoreError> {
+        match ProcessLock::try_acquire(owner_lock_path(&self.cache_root, id)).await? {
+            Some(owner) => Ok(owner),
+            None => Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("invocation {id} is already owned by another process"),
+            ))),
+        }
+    }
+
+    async fn release_owner(&self, id: InvocationId) {
+        self.inner.owner_leases.lock().await.remove(&id);
+    }
+
+    async fn recover_orphaned_invocations(&self) -> Result<usize, StoreError> {
+        let ids = {
+            let index = self.inner.index.read().await;
+            nonterminal_ids(&index)
+        };
+        let recovered = recover_interrupted_ids(&self.cache_root, ids).await?;
+        if !recovered.is_empty() {
+            let recovered_count = recovered.len();
+            {
+                let mut index = self.inner.index.write().await;
+                for (id, entry) in recovered {
+                    replace_index_entry(&mut index, id, entry);
+                }
+            }
+            self.commit_generation().await?;
+            return Ok(recovered_count);
+        }
+        Ok(0)
+    }
+
+    async fn commit_generation(&self) -> Result<u64, StoreError> {
+        let _metadata = ProcessLock::acquire(self.cache_root.join("LOCK")).await?;
+        let previous = read_generation(&self.cache_root)?;
+        let generation = write_generation(&self.cache_root, previous.saturating_add(1))?;
+        if self.inner.observed_generation.load(Ordering::Acquire) == previous {
+            self.inner
+                .observed_generation
+                .store(generation, Ordering::Release);
+        }
+        Ok(generation)
+    }
+
+    async fn refresh_index_if_stale(&self) -> Result<(), StoreError> {
+        if !self.claim_generation_check() {
+            return Ok(());
+        }
+        self.refresh_index_if_changed().await
+    }
+
+    async fn refresh_index_if_changed(&self) -> Result<(), StoreError> {
+        let observed = self.inner.observed_generation.load(Ordering::Acquire);
+        if read_generation(&self.cache_root)? == observed {
+            return Ok(());
+        }
+        self.refresh_index(false).await
+    }
+
+    fn claim_generation_check(&self) -> bool {
+        let now = monotonic_us();
+        let next = self.inner.next_generation_check_us.load(Ordering::Acquire);
+        if now < next {
+            return false;
+        }
+        self.inner
+            .next_generation_check_us
+            .compare_exchange(
+                next,
+                now.saturating_add(GENERATION_POLL_INTERVAL_US),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    async fn refresh_index(&self, force: bool) -> Result<(), StoreError> {
+        let _metadata = ProcessLock::acquire(self.cache_root.join("LOCK")).await?;
+        let generation = read_generation(&self.cache_root)?;
+        if !force && generation == self.inner.observed_generation.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let (mut refreshed, _) = load_index(&self.cache_root, false).await?;
+        {
+            let previous = self.inner.index.read().await;
+            merge_pending_telemetry(&previous, &mut refreshed);
+        }
+        *self.inner.index.write().await = refreshed;
+        self.inner
+            .observed_generation
+            .store(generation, Ordering::Release);
+        Ok(())
     }
 
     #[must_use]
@@ -307,6 +406,7 @@ impl Store {
         record: &InvocationRecord,
         deferred: Option<&DeferredResultRecord>,
     ) -> Result<InvocationPaths, StoreError> {
+        self.refresh_index_if_stale().await?;
         let paths = self.paths_for(record);
         let id = record.request.id;
         let mutation_lock = self.mutation_lock(id).await;
@@ -317,6 +417,13 @@ impl Store {
                 "invocation already exists",
             )));
         }
+        let owner = if record.state.is_terminal() {
+            None
+        } else {
+            Some(self.acquire_owner(id).await?)
+        };
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         paths.create().await?;
         let result = async {
             let mut durable = DurableRecord {
@@ -326,6 +433,7 @@ impl Store {
                 payload_bytes: 0,
             };
             let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+            self.commit_generation().await?;
             Ok::<_, StoreError>((durable, retained_bytes))
         }
         .await;
@@ -333,11 +441,16 @@ impl Store {
             Ok(durable) => durable,
             Err(error) => {
                 let _ = tokio::fs::remove_dir_all(&paths.directory).await;
+                drop(owner);
                 return Err(error);
             }
         };
         let mut index = self.inner.index.write().await;
         insert_index_entry(&mut index, id, durable.index_entry(retained_bytes));
+        drop(index);
+        if let Some(owner) = owner {
+            self.inner.owner_leases.lock().await.insert(id, owner);
+        }
         Ok(paths)
     }
 
@@ -347,6 +460,7 @@ impl Store {
         retrieval: DeferredRetrieval,
         now_ms: i64,
     ) -> Result<DeferredResultView, StoreError> {
+        self.ensure_invocation(id).await?;
         let (deferred, record) = {
             let index = self.inner.index.read().await;
             let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
@@ -384,6 +498,7 @@ impl Store {
         now_ms: i64,
         page: PageRequest,
     ) -> Result<Page<DeferredResultView>, StoreError> {
+        self.refresh_index_if_stale().await?;
         let limit = page.limit.clamp(1, 200) as usize;
         let cursor = page
             .cursor
@@ -510,6 +625,7 @@ impl Store {
     }
 
     pub async fn delete_expired_deferred_results(&self, now_ms: i64) -> Result<usize, StoreError> {
+        self.refresh_index_if_stale().await?;
         let ids: Vec<_> = {
             let index = self.inner.index.read().await;
             index
@@ -526,17 +642,26 @@ impl Store {
                 })
                 .collect()
         };
+        let mut deleted = 0;
         for id in &ids {
+            let mut removed = false;
             self.mutate(*id, false, |durable| {
-                durable.deferred = None;
+                if durable.deferred.as_ref().is_some_and(|deferred| {
+                    deferred.is_expired(now_ms, durable.invocation.state.is_terminal())
+                }) {
+                    durable.deferred = None;
+                    removed = true;
+                }
                 Ok(())
             })
             .await?;
+            deleted += usize::from(removed);
         }
-        Ok(ids.len())
+        Ok(deleted)
     }
 
     pub async fn get_invocation(&self, id: InvocationId) -> Result<InvocationRecord, StoreError> {
+        self.ensure_invocation(id).await?;
         self.inner
             .index
             .read()
@@ -557,12 +682,19 @@ impl Store {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         let paths = self.paths_for_id(id);
         let (mut durable, _) = match read_durable(&paths.manifest).await {
             Ok(durable) => durable,
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut index = self.inner.index.write().await;
-                return transition_lost_evidence(&mut index, id, next, termination, summary);
+                let result = transition_lost_evidence(&mut index, id, next, termination, summary);
+                drop(index);
+                if next.is_terminal() {
+                    self.release_owner(id).await;
+                }
+                return result;
             }
             Err(error) => return Err(error),
         };
@@ -591,16 +723,28 @@ impl Store {
             .persist_durable(&paths, &mut durable, next.is_terminal())
             .await
         {
-            Ok(retained_bytes) => retained_bytes,
+            Ok(retained_bytes) => {
+                self.commit_generation().await?;
+                retained_bytes
+            }
             Err(error) if error_is_not_found(&error) => {
                 let mut index = self.inner.index.write().await;
-                return transition_lost_evidence(&mut index, id, next, termination, summary);
+                let result = transition_lost_evidence(&mut index, id, next, termination, summary);
+                drop(index);
+                if next.is_terminal() {
+                    self.release_owner(id).await;
+                }
+                return result;
             }
             Err(error) => return Err(error),
         };
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         mark_telemetry_flushed(&mut index, id, telemetry_generation);
+        drop(index);
+        if next.is_terminal() {
+            self.release_owner(id).await;
+        }
         Ok(result)
     }
 
@@ -626,6 +770,8 @@ impl Store {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         let paths = self.paths_for_id(id);
         let (mut durable, _) = read_durable(&paths.manifest).await?;
         durable.invocation.transition(state)?;
@@ -654,9 +800,12 @@ impl Store {
         write_details(&paths, &result).await?;
         durable.invocation = compact_record(&result);
         let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+        self.commit_generation().await?;
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         mark_telemetry_flushed(&mut index, id, telemetry_generation);
+        drop(index);
+        self.release_owner(id).await;
         Ok(result)
     }
 
@@ -666,6 +815,7 @@ impl Store {
         bytes: u64,
         inspection: bool,
     ) -> Result<(), StoreError> {
+        self.refresh_index_if_stale().await?;
         let schedule = {
             let mut index = self.inner.index.write().await;
             let entry = index.entries.get_mut(&id).ok_or(StoreError::NotFound(id))?;
@@ -693,6 +843,7 @@ impl Store {
         id: InvocationId,
         count: u64,
     ) -> Result<(), StoreError> {
+        self.refresh_index_if_stale().await?;
         let schedule = {
             let mut index = self.inner.index.write().await;
             let entry = index.entries.get_mut(&id).ok_or(StoreError::NotFound(id))?;
@@ -755,6 +906,7 @@ impl Store {
     }
 
     async fn flush_telemetry_once(&self, id: InvocationId) -> Result<bool, StoreError> {
+        self.refresh_index_if_stale().await?;
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         let (metrics, generation) = {
@@ -767,12 +919,13 @@ impl Store {
             }
             (entry.record.metrics.clone(), entry.telemetry_generation)
         };
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         let paths = self.paths_for_id(id);
         let (mut durable, _) = read_durable(&paths.manifest).await?;
-        durable.invocation.metrics.model_visible_bytes = metrics.model_visible_bytes;
-        durable.invocation.metrics.progress_notifications = metrics.progress_notifications;
-        durable.invocation.metrics.inspect_calls = metrics.inspect_calls;
+        merge_telemetry(&metrics, &mut durable.invocation.metrics);
         let retained_bytes = self.persist_durable(&paths, &mut durable, false).await?;
+        self.commit_generation().await?;
         let mut index = self.inner.index.write().await;
         let (previous, clean) = {
             let Some(entry) = index.entries.get_mut(&id) else {
@@ -810,6 +963,7 @@ impl Store {
         command: Option<&BazelCommand>,
         page: PageRequest,
     ) -> Result<Page<InvocationRecord>, StoreError> {
+        self.refresh_index_if_stale().await?;
         let limit = page.limit.clamp(1, 200) as usize;
         let workspace_text = workspace.map(|path| path.to_string_lossy().into_owned());
         let state_text = state.map(InvocationState::as_str);
@@ -886,6 +1040,15 @@ impl Store {
         maximum_age: Duration,
         maximum_bytes: u64,
     ) -> Result<usize, StoreError> {
+        let Some(_maintenance) =
+            ProcessLock::try_acquire(self.cache_root.join("MAINTENANCE")).await?
+        else {
+            return Ok(0);
+        };
+        // A forced scan also repairs the narrow crash window between an
+        // atomic manifest commit and its generation notification.
+        self.refresh_index(true).await?;
+        self.recover_orphaned_invocations().await?;
         let now_ms = bazel_mcp_types::unix_timestamp_ms();
         self.delete_expired_deferred_results(now_ms).await?;
         let cutoff =
@@ -923,16 +1086,7 @@ impl Store {
             index
                 .terminal_by_finished
                 .iter()
-                .filter_map(|(finished, id)| {
-                    let entry = index.entries.get(id)?;
-                    Some((
-                        *id,
-                        *finished,
-                        entry.deferred.as_ref().is_some_and(|deferred| {
-                            !deferred.is_expired(now_ms, entry.record.state.is_terminal())
-                        }),
-                    ))
-                })
+                .map(|(finished, id)| (*id, *finished))
                 .collect()
         };
 
@@ -941,58 +1095,134 @@ impl Store {
             .checked_div(100)
             .unwrap_or(0);
         let mut reclaimed = 0;
+        let mut pending_notifications = 0;
+        let mut pending_lock_cleanup = Vec::new();
         let mut processed = BTreeSet::new();
-        for (id, finished, protected) in &candidates {
+        for (id, finished) in &candidates {
             if retention_age_elapsed(*finished, cutoff) {
-                if self.reclaim_terminal(*id, *protected).await? {
-                    reclaimed += 1;
-                }
+                self.reclaim_retention_candidate(
+                    *id,
+                    &mut reclaimed,
+                    &mut pending_notifications,
+                    &mut pending_lock_cleanup,
+                )
+                .await?;
                 processed.insert(*id);
             }
         }
         if self.inner.index.read().await.retained_bytes > maximum_bytes {
-            for (id, _, protected) in candidates {
+            for (id, _) in candidates {
                 if self.inner.index.read().await.retained_bytes <= low_watermark {
                     break;
                 }
-                if processed.insert(id) && self.reclaim_terminal(id, protected).await? {
-                    reclaimed += 1;
+                if processed.insert(id) {
+                    self.reclaim_retention_candidate(
+                        id,
+                        &mut reclaimed,
+                        &mut pending_notifications,
+                        &mut pending_lock_cleanup,
+                    )
+                    .await?;
                 }
             }
+        }
+        if pending_notifications > 0 {
+            self.publish_retention_batch(&mut pending_notifications, &mut pending_lock_cleanup)
+                .await?;
         }
         Ok(reclaimed)
     }
 
-    async fn reclaim_terminal(
+    async fn reclaim_retention_candidate(
         &self,
         id: InvocationId,
-        deferred_protected: bool,
-    ) -> Result<bool, StoreError> {
+        reclaimed: &mut usize,
+        pending_notifications: &mut usize,
+        pending_lock_cleanup: &mut Vec<InvocationId>,
+    ) -> Result<(), StoreError> {
+        let outcome = match self.reclaim_terminal(id).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if *pending_notifications > 0 {
+                    self.publish_retention_batch(pending_notifications, pending_lock_cleanup)
+                        .await?;
+                }
+                return Err(error);
+            }
+        };
+        *reclaimed += usize::from(outcome.reclaimed);
+        if outcome.deleted {
+            pending_lock_cleanup.push(id);
+        }
+        if outcome.changed {
+            *pending_notifications += 1;
+            if *pending_notifications >= GC_GENERATION_BATCH_SIZE {
+                self.publish_retention_batch(pending_notifications, pending_lock_cleanup)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn publish_retention_batch(
+        &self,
+        pending_notifications: &mut usize,
+        pending_lock_cleanup: &mut Vec<InvocationId>,
+    ) -> Result<(), StoreError> {
+        let generation = self.commit_generation().await;
+        let ids = std::mem::take(pending_lock_cleanup);
+        let cache_root = self.cache_root.clone();
+        tokio::task::spawn_blocking(move || {
+            for id in ids {
+                let _ = std::fs::remove_file(owner_lock_path(&cache_root, id));
+                let _ = std::fs::remove_file(mutation_lock_path(&cache_root, id));
+            }
+        })
+        .await?;
+        *pending_notifications = 0;
+        generation?;
+        Ok(())
+    }
+
+    async fn reclaim_terminal(&self, id: InvocationId) -> Result<ReclaimOutcome, StoreError> {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
-        let (before, currently_protected) = {
-            let index = self.inner.index.read().await;
-            let Some(entry) = index.entries.get(&id) else {
-                return Ok(false);
-            };
-            if !entry.record.state.is_terminal() {
-                return Ok(false);
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
+        let paths = self.paths_for_id(id);
+        let (mut durable, manifest_bytes) = match read_durable(&paths.manifest).await {
+            Ok(durable) => durable,
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ReclaimOutcome::default());
             }
-            (entry.retained_bytes, entry.deferred.is_some())
+            Err(error) => return Err(error),
         };
-        if deferred_protected && currently_protected {
-            let paths = self.paths_for_id(id);
-            let (mut durable, _) = read_durable(&paths.manifest).await?;
+        if !durable.invocation.state.is_terminal() {
+            return Ok(ReclaimOutcome::default());
+        }
+        let before = durable.payload_bytes.saturating_add(manifest_bytes);
+        let currently_protected = durable.deferred.as_ref().is_some_and(|deferred| {
+            !deferred.is_expired(
+                bazel_mcp_types::unix_timestamp_ms(),
+                durable.invocation.state.is_terminal(),
+            )
+        });
+        if currently_protected {
             stage_raw_evidence(&self.cache_root, id, &paths).await?;
             let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
             {
                 let mut index = self.inner.index.write().await;
                 replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
             }
+            drop(_process_mutation);
             // The rename and manifest update committed pruning. Unlinking the
             // staged evidence is deliberately outside the shared index lock.
             let _ = finish_staged_evidence(&self.cache_root, id).await;
-            return Ok(retained_bytes < before);
+            return Ok(ReclaimOutcome {
+                changed: true,
+                deleted: false,
+                reclaimed: retained_bytes < before,
+            });
         }
         let rename_started = Instant::now();
         if let Some(trash) = rename_to_trash(&self.cache_root, id).await? {
@@ -1008,6 +1238,7 @@ impl Store {
                     .gc_index_write_us
                     .fetch_add(elapsed_us(index_started.elapsed()), Ordering::Relaxed);
             }
+            drop(_process_mutation);
             // Rename is the deletion commit. If unlinking fails, the index
             // stays removed and startup finishes this trash entry.
             let unlink_started = Instant::now();
@@ -1032,9 +1263,13 @@ impl Store {
             self.inner
                 .gc_unlink_us
                 .fetch_add(elapsed_us(unlink_started.elapsed()), Ordering::Relaxed);
-            return Ok(true);
+            return Ok(ReclaimOutcome {
+                changed: true,
+                deleted: true,
+                reclaimed: true,
+            });
         }
-        Ok(false)
+        Ok(ReclaimOutcome::default())
     }
 
     /// Replace the artifact sidecar outside the normal coalesced terminal path.
@@ -1048,6 +1283,8 @@ impl Store {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         let paths = self.paths_for_id(id);
         if artifacts.is_empty() {
             remove_if_exists(&paths.artifacts).await?;
@@ -1056,6 +1293,7 @@ impl Store {
         }
         let (mut durable, _) = read_durable(&paths.manifest).await?;
         let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
+        self.commit_generation().await?;
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         Ok(())
@@ -1147,6 +1385,7 @@ impl Store {
     {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
         let known_total = {
             let index = self.inner.index.read().await;
             let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
@@ -1205,6 +1444,8 @@ impl Store {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
+        let _process_mutation =
+            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         let paths = self.paths_for_id(id);
         let (mut durable, _) = read_durable(&paths.manifest).await?;
         let telemetry_generation = {
@@ -1215,6 +1456,7 @@ impl Store {
         let retained_bytes = self
             .persist_durable(&paths, &mut durable, recount_payload)
             .await?;
+        self.commit_generation().await?;
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         mark_telemetry_flushed(&mut index, id, telemetry_generation);
@@ -1222,6 +1464,13 @@ impl Store {
     }
 
     async fn ensure_invocation(&self, id: InvocationId) -> Result<(), StoreError> {
+        self.refresh_index_if_stale().await?;
+        if self.inner.index.read().await.entries.contains_key(&id) {
+            return Ok(());
+        }
+        // A miss is uncommon and must not wait for the coalescing interval:
+        // another process may have just committed this invocation.
+        self.refresh_index_if_changed().await?;
         let index = self.inner.index.read().await;
         ensure_exists(&index, id)
     }
@@ -1464,12 +1713,18 @@ async fn recover_trash(cache_root: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-async fn load_index(cache_root: &Path) -> Result<(Index, StoreStartupStats), StoreError> {
+async fn load_index(
+    cache_root: &Path,
+    cleanup_temporary: bool,
+) -> Result<(Index, StoreStartupStats), StoreError> {
     let cache_root = cache_root.to_owned();
-    tokio::task::spawn_blocking(move || load_index_blocking(&cache_root)).await?
+    tokio::task::spawn_blocking(move || load_index_blocking(&cache_root, cleanup_temporary)).await?
 }
 
-fn load_index_blocking(cache_root: &Path) -> Result<(Index, StoreStartupStats), StoreError> {
+fn load_index_blocking(
+    cache_root: &Path,
+    cleanup_temporary: bool,
+) -> Result<(Index, StoreStartupStats), StoreError> {
     let total_started = Instant::now();
     let mut index = Index::default();
     let mut stats = StoreStartupStats::default();
@@ -1501,16 +1756,6 @@ fn load_index_blocking(cache_root: &Path) -> Result<(Index, StoreStartupStats), 
                         message: "invocation is outside its UUIDv7 bucket or shard".into(),
                     });
                 }
-                for temporary in [
-                    expected.manifest.with_extension("tmp"),
-                    expected.details.with_extension("tmp"),
-                    expected.artifacts.with_extension("tmp"),
-                    expected.evidence.with_extension("tmp"),
-                    expected.test_logs_raw.with_extension("tmp"),
-                    expected.test_log_evidence.with_extension("tmp"),
-                ] {
-                    let _ = std::fs::remove_file(temporary);
-                }
                 let read_started = Instant::now();
                 let bytes = std::fs::read(&expected.manifest);
                 stats.manifest_read_us = stats
@@ -1518,35 +1763,41 @@ fn load_index_blocking(cache_root: &Path) -> Result<(Index, StoreStartupStats), 
                     .saturating_add(elapsed_micros(read_started.elapsed()));
                 match bytes {
                     Ok(bytes) => {
-                        let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                        let decode_started = Instant::now();
-                        let mut durable = decode_durable(&expected.manifest, &bytes)?;
-                        stats.manifest_decode_us = stats
-                            .manifest_decode_us
-                            .saturating_add(elapsed_micros(decode_started.elapsed()));
-                        if durable.invocation.request.id != id {
-                            return Err(StoreError::CorruptRecord {
-                                path: expected.manifest,
-                                message: "record ID does not match directory".into(),
-                            });
+                        index_manifest_bytes(&expected, id, &bytes, &mut index, &mut stats)?;
+                        if cleanup_temporary {
+                            let temporary = temporary_files(&expected.directory)?;
+                            if !temporary.is_empty()
+                                && let Some(_cleanup) = ProcessLock::try_acquire_blocking(
+                                    &mutation_lock_path(cache_root, id),
+                                )?
+                            {
+                                for path in temporary {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                            }
                         }
-                        // Terminal records commit byte accounting after every
-                        // evidence-producing operation. Only a nonterminal
-                        // record can have grown since its last commit.
-                        if !durable.invocation.state.is_terminal() {
-                            durable.payload_bytes = evidence_payload_size_blocking(&expected)?;
-                        }
-                        let retained_bytes = durable.payload_bytes.saturating_add(manifest_bytes);
-                        let index_started = Instant::now();
-                        insert_index_entry(&mut index, id, durable.index_entry(retained_bytes));
-                        stats.index_build_us = stats
-                            .index_build_us
-                            .saturating_add(elapsed_micros(index_started.elapsed()));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         // Creation is committed by manifest.json. A directory without
                         // it is an uncommitted crash remnant.
-                        std::fs::remove_dir_all(directory.path())?;
+                        if let Some(_cleanup) =
+                            ProcessLock::try_acquire_blocking(&mutation_lock_path(cache_root, id))?
+                        {
+                            match std::fs::read(&expected.manifest) {
+                                Ok(bytes) => index_manifest_bytes(
+                                    &expected, id, &bytes, &mut index, &mut stats,
+                                )?,
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                    match std::fs::remove_dir_all(directory.path()) {
+                                        Ok(()) => {}
+                                        Err(error)
+                                            if error.kind() == std::io::ErrorKind::NotFound => {}
+                                        Err(error) => return Err(error.into()),
+                                    }
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        }
                     }
                     Err(error) => return Err(error.into()),
                 }
@@ -1563,8 +1814,69 @@ fn load_index_blocking(cache_root: &Path) -> Result<(Index, StoreStartupStats), 
     Ok((index, stats))
 }
 
+fn index_manifest_bytes(
+    paths: &InvocationPaths,
+    id: InvocationId,
+    bytes: &[u8],
+    index: &mut Index,
+    stats: &mut StoreStartupStats,
+) -> Result<(), StoreError> {
+    let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let decode_started = Instant::now();
+    let mut durable = decode_durable(&paths.manifest, bytes)?;
+    stats.manifest_decode_us = stats
+        .manifest_decode_us
+        .saturating_add(elapsed_micros(decode_started.elapsed()));
+    if durable.invocation.request.id != id {
+        return Err(StoreError::CorruptRecord {
+            path: paths.manifest.clone(),
+            message: "record ID does not match directory".into(),
+        });
+    }
+    // Terminal records commit byte accounting after every evidence-producing
+    // operation. Only a nonterminal record can have grown since its last commit.
+    if !durable.invocation.state.is_terminal() {
+        durable.payload_bytes = evidence_payload_size_blocking(paths)?;
+    }
+    let retained_bytes = durable.payload_bytes.saturating_add(manifest_bytes);
+    let index_started = Instant::now();
+    insert_index_entry(index, id, durable.index_entry(retained_bytes));
+    stats.index_build_us = stats
+        .index_build_us
+        .saturating_add(elapsed_micros(index_started.elapsed()));
+    Ok(())
+}
+
+fn temporary_files(directory: &Path) -> Result<Vec<PathBuf>, StoreError> {
+    const NAMES: [&str; 6] = [
+        "manifest.tmp",
+        "details.tmp",
+        "artifacts.tmp",
+        "failure-evidence.tmp",
+        "failed-test-logs.tmp",
+        "failed-test-evidence.tmp",
+    ];
+    let mut temporary = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| NAMES.contains(&name))
+        {
+            temporary.push(entry.path());
+        }
+    }
+    Ok(temporary)
+}
+
 fn elapsed_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn monotonic_us() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    elapsed_micros(START.get_or_init(Instant::now).elapsed())
 }
 
 fn evidence_payload_size_blocking(paths: &InvocationPaths) -> Result<u64, StoreError> {
@@ -1591,15 +1903,47 @@ fn evidence_payload_size_blocking(paths: &InvocationPaths) -> Result<u64, StoreE
     Ok(size)
 }
 
-async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<(), StoreError> {
-    let ids: Vec<_> = index
+async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<usize, StoreError> {
+    let recovered = recover_interrupted_ids(cache_root, nonterminal_ids(index)).await?;
+    let recovered_count = recovered.len();
+    for (id, entry) in recovered {
+        replace_index_entry(index, id, entry);
+    }
+    Ok(recovered_count)
+}
+
+fn nonterminal_ids(index: &Index) -> Vec<InvocationId> {
+    index
         .entries
         .iter()
         .filter_map(|(id, entry)| (!entry.record.state.is_terminal()).then_some(*id))
-        .collect();
+        .collect()
+}
+
+async fn recover_interrupted_ids(
+    cache_root: &Path,
+    ids: Vec<InvocationId>,
+) -> Result<Vec<(InvocationId, IndexEntry)>, StoreError> {
+    let mut recovered = Vec::new();
     for id in ids {
+        let Some(owner) = ProcessLock::try_acquire(owner_lock_path(cache_root, id)).await? else {
+            continue;
+        };
+        let mutation = ProcessLock::acquire(mutation_lock_path(cache_root, id)).await?;
         let paths = InvocationPaths::new(cache_root, id);
-        let (mut durable, _) = read_durable(&paths.manifest).await?;
+        let (mut durable, _) = match read_durable(&paths.manifest).await {
+            Ok(durable) => durable,
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if durable.invocation.state.is_terminal() {
+            let manifest_bytes = tokio::fs::metadata(&paths.manifest).await?.len();
+            let retained_bytes = durable.payload_bytes.saturating_add(manifest_bytes);
+            recovered.push((id, durable.index_entry(retained_bytes)));
+            continue;
+        }
         durable.invocation.state = InvocationState::Interrupted;
         durable.invocation.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms());
         durable.invocation.termination = Some(Termination::Interrupted);
@@ -1624,9 +1968,11 @@ async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<(),
         write_details(&paths, &full_record).await?;
         durable.invocation = compact_record(&full_record);
         let outcome = persist_durable(&paths, &mut durable, true).await?;
-        replace_index_entry(index, id, durable.index_entry(outcome.retained_bytes));
+        recovered.push((id, durable.index_entry(outcome.retained_bytes)));
+        drop(mutation);
+        drop(owner);
     }
-    Ok(())
+    Ok(recovered)
 }
 
 fn retention_age_elapsed(finished_at_ms: i64, cutoff_ms: i64) -> bool {
@@ -2141,6 +2487,127 @@ fn parse_id(value: &str) -> Option<InvocationId> {
     serde_json::from_str::<InvocationId>(&format!("\"{value}\"")).ok()
 }
 
+struct ProcessLock {
+    _file: File,
+}
+
+impl ProcessLock {
+    async fn acquire(path: PathBuf) -> Result<Self, StoreError> {
+        let lock = tokio::task::spawn_blocking(move || {
+            let file = open_lock_file(&path)?;
+            file.lock()?;
+            Ok::<_, std::io::Error>(Self { _file: file })
+        })
+        .await??;
+        Ok(lock)
+    }
+
+    async fn try_acquire(path: PathBuf) -> Result<Option<Self>, StoreError> {
+        let lock = tokio::task::spawn_blocking(move || {
+            let file = open_lock_file(&path)?;
+            match file.try_lock() {
+                Ok(()) => Ok(Some(Self { _file: file })),
+                Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+                Err(std::fs::TryLockError::Error(error)) => Err(error),
+            }
+        })
+        .await??;
+        Ok(lock)
+    }
+
+    fn try_acquire_blocking(path: &Path) -> Result<Option<Self>, StoreError> {
+        let file = open_lock_file(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+}
+
+fn open_lock_file(path: &Path) -> Result<File, std::io::Error> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+#[cfg(unix)]
+fn set_private_file_blocking(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_file_blocking(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn owner_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
+    cache_root.join("owners").join(format!("{id}.lock"))
+}
+
+fn mutation_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
+    cache_root.join("mutations").join(format!("{id}.lock"))
+}
+
+fn read_generation(cache_root: &Path) -> Result<u64, StoreError> {
+    let path = cache_root.join("GENERATION");
+    match std::fs::read_to_string(&path) {
+        Ok(value) => value.trim().parse::<u64>().map_err(|error| {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid cache generation in {}: {error}", path.display()),
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn bump_generation(cache_root: &Path) -> Result<u64, StoreError> {
+    let generation = read_generation(cache_root)?.saturating_add(1);
+    write_generation(cache_root, generation)
+}
+
+fn write_generation(cache_root: &Path, generation: u64) -> Result<u64, StoreError> {
+    let path = cache_root.join("GENERATION");
+    let previous = read_generation(cache_root)?;
+    if generation != previous.saturating_add(1) {
+        return Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "cache generation must advance from {previous} to {}, got {generation}",
+                previous.saturating_add(1)
+            ),
+        )));
+    }
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, generation.to_string())?;
+    set_private_file_blocking(&temporary)?;
+    std::fs::rename(temporary, path)?;
+    Ok(generation)
+}
+
+fn merge_pending_telemetry(previous: &Index, refreshed: &mut Index) {
+    for (id, previous_entry) in &previous.entries {
+        let Some(refreshed_entry) = refreshed.entries.get_mut(id) else {
+            continue;
+        };
+        merge_telemetry(
+            &previous_entry.record.metrics,
+            &mut refreshed_entry.record.metrics,
+        );
+        refreshed_entry.telemetry_generation = previous_entry.telemetry_generation;
+        refreshed_entry.telemetry_flush_scheduled = previous_entry.telemetry_flush_scheduled;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2239,13 +2706,200 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exclusive_lock_rejects_a_second_writer() {
+    async fn shared_cache_accepts_concurrent_store_processes() {
         let root = TempDir::new().unwrap();
-        let _first = Store::open(root.path()).await.unwrap();
+        let first = Store::open(root.path()).await.unwrap();
+        let second = Store::open(root.path()).await.unwrap();
+        let first_record = record(&root.path().join("worktree-a"));
+        let first_id = first_record.request.id;
+        first.create_invocation(&first_record).await.unwrap();
+        let second_record = record(&root.path().join("worktree-b"));
+        let second_id = second_record.request.id;
+        second.create_invocation(&second_record).await.unwrap();
+
+        assert_eq!(
+            first.get_invocation(second_id).await.unwrap().request.id,
+            second_id
+        );
+        assert_eq!(
+            second.get_invocation(first_id).await.unwrap().request.id,
+            first_id
+        );
+        let page = first
+            .list_invocations(
+                None,
+                None,
+                None,
+                PageRequest {
+                    cursor: None,
+                    limit: 10,
+                    max_bytes: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_skips_invocations_owned_by_another_process() {
+        let root = TempDir::new().unwrap();
+        let first = Store::open(root.path()).await.unwrap();
+        let record = record(&root.path().join("worktree-a"));
+        let id = record.request.id;
+        first.create_invocation(&record).await.unwrap();
+
+        let observer = Store::open(root.path()).await.unwrap();
+        assert_eq!(
+            observer.get_invocation(id).await.unwrap().state,
+            InvocationState::Queued
+        );
+
+        drop(first);
+        let recovery = Store::open(root.path()).await.unwrap();
+        assert_eq!(
+            recovery.get_invocation(id).await.unwrap().state,
+            InvocationState::Interrupted
+        );
+        assert_eq!(
+            observer.get_invocation(id).await.unwrap().state,
+            InvocationState::Interrupted
+        );
+    }
+
+    #[tokio::test]
+    async fn global_gc_reclaims_records_created_by_another_process() {
+        let root = TempDir::new().unwrap();
+        let first = Store::open(root.path()).await.unwrap();
+        let second = Store::open(root.path()).await.unwrap();
+        let record = record(&root.path().join("worktree-a"));
+        let id = record.request.id;
+        first.create_invocation(&record).await.unwrap();
+        succeed(&first, id).await;
+
+        assert_eq!(
+            second
+                .enforce_retention(Duration::ZERO, u64::MAX)
+                .await
+                .unwrap(),
+            1
+        );
         assert!(matches!(
-            Store::open(root.path()).await,
-            Err(StoreError::Locked(_))
+            first.get_invocation(id).await,
+            Err(StoreError::NotFound(missing)) if missing == id
         ));
+        assert!(!owner_lock_path(root.path(), id).exists());
+        assert!(!mutation_lock_path(root.path(), id).exists());
+    }
+
+    #[tokio::test]
+    async fn maintenance_repairs_a_manifest_committed_before_generation_notification() {
+        let root = TempDir::new().unwrap();
+        let writer = Store::open(root.path()).await.unwrap();
+        let observer = Store::open(root.path()).await.unwrap();
+        let record = record(&root.path().join("worktree-a"));
+        let id = record.request.id;
+        let paths = writer.create_invocation(&record).await.unwrap();
+        observer.get_invocation(id).await.unwrap();
+        let generation = read_generation(root.path()).unwrap();
+
+        // Simulate a process dying after its atomic manifest rename but before
+        // it can append the generation notification.
+        let (mut durable, _) = read_durable(&paths.manifest).await.unwrap();
+        durable.invocation.state = InvocationState::Succeeded;
+        durable.invocation.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms() - 1);
+        durable.invocation.termination = Some(Termination::Exit { code: 0 });
+        durable.invocation.summary = Some(InvocationSummary::default());
+        persist_durable(&paths, &mut durable, true).await.unwrap();
+        assert_eq!(read_generation(root.path()).unwrap(), generation);
+        drop(writer);
+
+        assert_eq!(
+            observer
+                .enforce_retention(Duration::ZERO, u64::MAX)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            observer.get_invocation(id).await,
+            Err(StoreError::NotFound(missing)) if missing == id
+        ));
+    }
+
+    #[test]
+    fn multiprocess_shared_cache_helper() {
+        let Ok(cache_root) = std::env::var("BAZEL_MCP_STORE_HELPER_ROOT") else {
+            return;
+        };
+        let name = std::env::var("BAZEL_MCP_STORE_HELPER_NAME").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cache_root = PathBuf::from(cache_root);
+                let store = Store::open(&cache_root).await.unwrap();
+                let invocation = record(&cache_root.join(format!("worktree-{name}")));
+                store.create_invocation(&invocation).await.unwrap();
+                std::fs::write(cache_root.join(format!("ready-{name}")), b"ready").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !(cache_root.join("ready-a").is_file()
+                    && cache_root.join("ready-b").is_file())
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for peer process"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let page = store
+                    .list_invocations(
+                        None,
+                        None,
+                        None,
+                        PageRequest {
+                            cursor: None,
+                            limit: 10,
+                            max_bytes: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(page.items.len(), 2);
+            });
+    }
+
+    #[tokio::test]
+    async fn two_os_processes_share_one_cache_root() {
+        let root = TempDir::new().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let child = |name: &str| {
+            let mut command = tokio::process::Command::new(&executable);
+            command
+                .arg("--exact")
+                .arg("storage::tests::multiprocess_shared_cache_helper")
+                .arg("--nocapture")
+                .env("BAZEL_MCP_STORE_HELPER_ROOT", root.path())
+                .env("BAZEL_MCP_STORE_HELPER_NAME", name)
+                .kill_on_drop(true);
+            command
+        };
+        let mut first = child("a");
+        let mut second = child("b");
+        let (first_output, second_output) = tokio::join!(first.output(), second.output());
+        let first_output = first_output.unwrap();
+        let second_output = second_output.unwrap();
+        assert!(
+            first_output.status.success(),
+            "first process failed:\n{}",
+            String::from_utf8_lossy(&first_output.stderr)
+        );
+        assert!(
+            second_output.status.success(),
+            "second process failed:\n{}",
+            String::from_utf8_lossy(&second_output.stderr)
+        );
     }
 
     #[tokio::test]
@@ -2645,6 +3299,28 @@ mod tests {
                 & 0o777,
             0o600
         );
+        for directory in [
+            root.path().join("owners"),
+            root.path().join("mutations"),
+            root.path().join("trash"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        for file in [
+            root.path().join("LOCK"),
+            root.path().join("MAINTENANCE"),
+            root.path().join("GENERATION"),
+            owner_lock_path(root.path(), record.request.id),
+            mutation_lock_path(root.path(), record.request.id),
+        ] {
+            assert_eq!(
+                std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[tokio::test]

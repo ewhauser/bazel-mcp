@@ -318,16 +318,20 @@ crates/bazel-mcp-store/
     └── recovery.rs
 ```
 
-`Store` owns an exclusive cache-root process lock, a `RwLock`-protected compact
-index, and per-invocation mutation locks. Index locks are never held across
-awaited filesystem I/O, so independent invocations and inspections can proceed
-concurrently. The index is rebuilt from versioned `manifest.json` files. UUIDv7
-maps deterministically to a day bucket and bounded shard. Manifest and sidecar
-commits use write-private-temp plus atomic rename; deletion uses rename to a
-cache-root trash directory, immediate index removal, and unlink outside the
-index lock. Store methods accept and return `bazel-mcp-types` and do not mention
-MCP or BEP protobufs. There is intentionally no database, migration layer, or
-legacy-layout reader.
+`Store` supports multiple server processes sharing one cache root. A process
+lock per invocation serializes its manifest and sidecar commits; the root lock
+only serializes generation advancement and index refresh. An owner lease
+identifies the process responsible for each nonterminal invocation. One
+maintenance lock elects recovery and global-retention work. Each process has a
+`RwLock`-protected compact index and refreshes it when the shared generation
+advances. Index locks are never held across Bazel execution, so independent
+invocations and inspections can proceed concurrently. The index is rebuilt from
+versioned `manifest.json` files. UUIDv7 maps deterministically to a day bucket
+and bounded shard. Manifest and sidecar commits use write-private-temp plus
+atomic rename; deletion uses rename to a cache-root trash directory, immediate
+index removal, and unlink outside the index lock. Store methods accept and
+return `bazel-mcp-types` and do not mention MCP or BEP protobufs. There is
+intentionally no database, migration layer, or legacy-layout reader.
 
 The manifest is the sole durable representation of the redacted request and
 compact summary header. Large target, test, and per-file coverage collections

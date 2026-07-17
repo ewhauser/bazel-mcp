@@ -32,12 +32,12 @@ async fn run(cli: Cli) -> std::process::ExitCode {
         Ok(config) => match bazel_mcp_server::serve(config).await {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
-                tracing::error!(%error, "bazel-mcp failed");
+                tracing::error!(error = %format_args!("{error:#}"), "bazel-mcp failed");
                 std::process::ExitCode::FAILURE
             }
         },
         Err(error) => {
-            tracing::error!(%error, "invalid configuration");
+            tracing::error!(error = %format_args!("{error:#}"), "invalid configuration");
             std::process::ExitCode::FAILURE
         }
     }
