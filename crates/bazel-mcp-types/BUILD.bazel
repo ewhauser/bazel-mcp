@@ -17,4 +17,7 @@ rust_test(
     name = "unit_test",
     crate = ":bazel_mcp_types",
     size = "small",
+    deps = all_crate_deps(
+        normal_dev = True,
+    ),
 )
