@@ -737,9 +737,9 @@ There is no embedded or hosted database.
 
 ```text
 <cache-root>/
-  LOCK
   MAINTENANCE
-  GENERATION
+  changes/<publisher-id>.lock
+  changes/<publisher-id>.<epoch>
   owners/<invocation-id>.lock
   mutations/<invocation-id>.lock
   trash/
@@ -770,19 +770,19 @@ user cache directory and MUST NOT be placed inside the Bazel workspace.
   collections. `artifacts.json` contains artifacts. Startup reads neither
   sidecar while rebuilding the compact index.
 - Multiple server processes MAY share one cache root. Per-invocation mutation
-  locks serialize manifest and sidecar commits for one invocation. `LOCK`
-  serializes only generation advancement and index refresh; neither lock is
-  held for the lifetime of a server or Bazel invocation.
+  locks serialize manifest and sidecar commits for one invocation. Independent
+  writers do not share a root metadata lock.
 - Each nonterminal invocation has an exclusive owner lease. Startup and
   periodic recovery transition a nonterminal record to `interrupted` only when
   that lease can be acquired, so one server never recovers another server's
   live invocation.
-- The fixed-size atomic `GENERATION` counter advances after every committed
-  manifest mutation and after bounded batches of global-GC deletions, allowing
-  low-cost cross-process change checks throughout a retention sweep.
-  Each process keeps a bounded local index and rebuilds it when another process
-  advances the generation. `MAINTENANCE` elects one process at a time for
-  recovery and global retention.
+- Each server owns one exclusively leased epoch marker under `changes/` and
+  atomically renames that empty marker after every committed manifest mutation
+  and after bounded batches of global-GC deletions. Each process keeps a bounded
+  local index and rebuilds it when the marker set changes. Stale publishers are
+  removed under `MAINTENANCE` only after a replacement publisher has created
+  its marker, so cleanup cannot erase an unseen notification. `MAINTENANCE`
+  also elects one process at a time for recovery and global retention.
 - A read/write lock protects only the compact index. Process-wide and local
   per-invocation mutation locks serialize writers for one invocation; no index
   lock is held across awaited filesystem I/O.

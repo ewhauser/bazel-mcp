@@ -90,12 +90,13 @@ counting are more valuable than a second normalized format.
 ## Concurrency, durability, and collection
 
 Multiple server processes may share a cache root. Process-wide per-invocation
-locks serialize manifest and sidecar commits, `LOCK` serializes generation
-advancement and index refresh, `MAINTENANCE` elects recovery and global GC, and
-per-invocation owner leases distinguish live work from orphaned records. An
-atomically replaced generation counter tells each process when its compact
-local index must be rebuilt. Within a process, `RwLock<Index>` protects only
-compact in-memory state and
+locks serialize manifest and sidecar commits, `MAINTENANCE` elects recovery and
+global GC, and per-invocation owner leases distinguish live work from orphaned
+records. Each server owns one leased epoch marker under `changes/`; publishing
+a committed mutation atomically renames only that server's empty marker.
+Readers rebuild their compact local index when the marker set changes, without
+serializing independent writers through a root metadata lock. Within a process,
+`RwLock<Index>` protects only compact in-memory state and
 per-invocation mutexes serialize mutations to the same invocation. No lock is
 held across Bazel execution or recursive deletion.
 

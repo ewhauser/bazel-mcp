@@ -554,7 +554,9 @@ async fn benchmark_concurrency(
         tasks.push(tokio::spawn(async move {
             let _permit = permits.acquire_owned().await?;
             let operation_started = Instant::now();
-            create_terminal_invocation(&store, ordinal, 0).await?;
+            create_terminal_invocation(&store, ordinal, 0)
+                .await
+                .with_context(|| format!("create concurrent invocation {ordinal}"))?;
             Ok::<Duration, anyhow::Error>(operation_started.elapsed())
         }));
     }
@@ -562,22 +564,30 @@ async fn benchmark_concurrency(
     let mut inspection_latencies = Vec::new();
     while tasks.iter().any(|task| !task.is_finished()) && lookup_latencies.len() < 100_000 {
         let lookup_started = Instant::now();
-        store.get_invocation_header(inspect_id).await?;
+        store
+            .get_invocation_header(inspect_id)
+            .await
+            .with_context(|| format!("look up inspection seed {inspect_id}"))?;
         lookup_latencies.push(lookup_started.elapsed());
         let inspection_started = Instant::now();
         store
             .page_diagnostics(inspect_id, None, PageRequest::default())
-            .await?;
+            .await
+            .with_context(|| format!("inspect diagnostics for seed {inspect_id}"))?;
         inspection_latencies.push(inspection_started.elapsed());
     }
     if lookup_latencies.is_empty() {
         let lookup_started = Instant::now();
-        store.get_invocation_header(inspect_id).await?;
+        store
+            .get_invocation_header(inspect_id)
+            .await
+            .with_context(|| format!("look up inspection seed {inspect_id}"))?;
         lookup_latencies.push(lookup_started.elapsed());
         let inspection_started = Instant::now();
         store
             .page_diagnostics(inspect_id, None, PageRequest::default())
-            .await?;
+            .await
+            .with_context(|| format!("inspect diagnostics for seed {inspect_id}"))?;
         inspection_latencies.push(inspection_started.elapsed());
     }
     let mut latencies = Vec::with_capacity(operations);
@@ -616,13 +626,16 @@ async fn create_terminal_invocation(
     let id = request.id;
     let paths = store
         .create_invocation(&InvocationRecord::queued(request))
-        .await?;
+        .await
+        .with_context(|| format!("create invocation {id}"))?;
     store
         .transition(id, InvocationState::Starting, None, None)
-        .await?;
+        .await
+        .with_context(|| format!("start invocation {id}"))?;
     store
         .transition(id, InvocationState::Running, None, None)
-        .await?;
+        .await
+        .with_context(|| format!("run invocation {id}"))?;
     if evidence_bytes > 0 {
         std::fs::write(paths.stdout, vec![b'x'; evidence_bytes])?;
     }
@@ -645,7 +658,8 @@ async fn create_terminal_invocation(
                 artifacts: Vec::new(),
             },
         )
-        .await?;
+        .await
+        .with_context(|| format!("finish invocation {id}"))?;
     Ok(id)
 }
 
