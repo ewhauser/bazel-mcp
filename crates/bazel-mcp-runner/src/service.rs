@@ -176,6 +176,7 @@ struct PreparedSubmission {
     queued: InvocationRecord,
     paths: InvocationPaths,
     lock_key: PathBuf,
+    explicit_output_base: Option<PathBuf>,
     output_base_wait: Arc<OutputBaseWaitStatus>,
     executable: PathBuf,
     cancellation: CancellationToken,
@@ -552,7 +553,9 @@ impl InvocationService {
             .try_acquire_owned()
             .map_err(|_| RunnerError::QueueFull(self.config.maximum_pending_invocations))?;
         let workspace = validate_workspace(&request.workspace, &self.config.policy.allowed_roots)?;
-        let lock_key = effective_output_base(&workspace, &request.startup_arguments)?
+        let explicit_output_base = effective_output_base(&workspace, &request.startup_arguments)?;
+        let lock_key = explicit_output_base
+            .clone()
             .unwrap_or_else(|| workspace.clone());
         let executable = resolve_bazel_executable(&workspace, &self.config.policy)?;
         self.validate_bazel_version(&executable, &workspace).await?;
@@ -593,6 +596,7 @@ impl InvocationService {
             queued,
             paths,
             lock_key,
+            explicit_output_base,
             output_base_wait,
             executable,
             cancellation,
@@ -609,6 +613,7 @@ impl InvocationService {
             queued,
             paths,
             lock_key,
+            explicit_output_base,
             output_base_wait,
             executable,
             cancellation,
@@ -705,6 +710,7 @@ impl InvocationService {
                     &paths,
                     &executable,
                     cancellation.clone(),
+                    explicit_output_base.as_deref(),
                     output_base_wait,
                 )
                 .await;
@@ -1226,6 +1232,7 @@ impl InvocationService {
         paths: &InvocationPaths,
         executable: &Path,
         cancellation: CancellationToken,
+        explicit_output_base: Option<&Path>,
         output_base_wait: Arc<OutputBaseWaitStatus>,
     ) -> Result<InvocationRecord, RunnerError> {
         if cancellation.is_cancelled() {
@@ -1262,6 +1269,14 @@ impl InvocationService {
                     .map_err(Into::into);
             }
         };
+        let native_output_base_wait = NativeOutputBaseWaitObserver::start(
+            paths.stdout.clone(),
+            paths.stderr.clone(),
+            paths.bep.clone(),
+            explicit_output_base.map(Path::to_owned),
+            output_base_wait.clone(),
+        )
+        .await;
         #[cfg(unix)]
         let mut prepared_fifo = if queued.request.command.class() == CommandClass::BuildLike
             && self.config.bep_transport == BepTransport::Fifo
@@ -1504,12 +1519,6 @@ impl InvocationService {
                     ))
                 })
         });
-        let native_output_base_wait = NativeOutputBaseWaitObserver::start(
-            paths.stdout.clone(),
-            paths.stderr.clone(),
-            paths.bep.clone(),
-            output_base_wait.clone(),
-        );
         let started = Instant::now();
         let timeout = queued
             .request

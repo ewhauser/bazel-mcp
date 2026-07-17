@@ -1902,6 +1902,60 @@ exit 0\n",
 }
 
 #[tokio::test]
+async fn explicit_output_base_owner_is_reported_without_bazel_stderr_markers() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let output_base = root.path().join("shared-output-base");
+    let bazel_started = root.path().join("bazel-started");
+    let release = root.path().join("release");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    tokio::fs::create_dir(&output_base).await.unwrap();
+    let script = format!(
+        "#!/bin/sh\n\
+if [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n\
+touch '{}'\n\
+while [ ! -f '{}' ]; do sleep 0.01; done\n\
+exit 0\n",
+        bazel_started.display(),
+        release.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+    let mut holder_command = tokio::process::Command::new("sleep");
+    holder_command.arg("30").kill_on_drop(true);
+    let mut holder = holder_command.spawn().unwrap();
+    let holder_pid = holder.id().unwrap();
+    tokio::fs::write(
+        output_base.join("lock"),
+        format!("pid={holder_pid}\nowner=client\ncwd=/private/workspace\n"),
+    )
+    .await
+    .unwrap();
+    let mut request =
+        InvocationRequest::new(workspace, BazelCommand::Build, vec!["//:target".to_owned()]);
+    request.startup_arguments = vec![format!("--output_base={}", output_base.display())];
+    let id = request.id;
+    let run = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(request).await.unwrap() }
+    });
+    wait_for_path(&bazel_started).await;
+    let progress = wait_for_output_base_wait(&service, id).await;
+
+    let expected_owner = format!("bazel_client:pid={holder_pid}");
+    assert_eq!(
+        progress.output_base_lock_owner.as_deref(),
+        Some(expected_owner.as_str())
+    );
+    holder.kill().await.unwrap();
+    let _ = holder.wait().await;
+    tokio::fs::write(&release, b"release").await.unwrap();
+    let record = run.await.unwrap();
+
+    assert_eq!(record.state, InvocationState::Succeeded);
+    assert!(record.metrics.output_base_lock_wait_ms > 0);
+}
+
+#[tokio::test]
 async fn server_owned_flags_precede_the_target_argument_delimiter() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

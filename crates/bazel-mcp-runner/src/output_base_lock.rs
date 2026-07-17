@@ -222,17 +222,33 @@ pub(crate) struct NativeOutputBaseWaitObserver {
 }
 
 impl NativeOutputBaseWaitObserver {
-    pub(crate) fn start(
+    pub(crate) async fn start(
         stdout: PathBuf,
         stderr: PathBuf,
         bep: PathBuf,
+        output_base: Option<PathBuf>,
         wait_status: Arc<OutputBaseWaitStatus>,
     ) -> Self {
+        let initial_bazel_lock_pid = match output_base.as_deref() {
+            Some(output_base) => active_bazel_lock_owner(output_base).await,
+            None => None,
+        };
+        if let Some(pid) = initial_bazel_lock_pid {
+            wait_status.begin(Some(format!("bazel_client:pid={pid}")));
+        }
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let task_status = wait_status.clone();
         let task = tokio::spawn(async move {
-            observe_native_wait(stdout, stderr, bep, task_status, task_cancellation).await;
+            observe_native_wait(
+                stdout,
+                stderr,
+                bep,
+                initial_bazel_lock_pid,
+                task_status,
+                task_cancellation,
+            )
+            .await;
         });
         Self {
             cancellation,
@@ -264,17 +280,24 @@ async fn observe_native_wait(
     stdout: PathBuf,
     stderr: PathBuf,
     bep: PathBuf,
+    initial_bazel_lock_pid: Option<u32>,
     wait_status: Arc<OutputBaseWaitStatus>,
     cancellation: CancellationToken,
 ) {
     let detection_started = Instant::now();
-    let mut waiting = false;
+    let mut waiting = initial_bazel_lock_pid.is_some();
     let mut waiting_marker_end = None;
     let mut baseline_stdout = 0;
     let mut baseline_bep = 0;
     let mut baseline_stderr_len = 0;
 
     loop {
+        if let Some(initial_pid) = initial_bazel_lock_pid
+            && !process_exists(initial_pid)
+        {
+            wait_status.end();
+            return;
+        }
         let stderr_tail = read_bounded_tail(&stderr, NATIVE_WAIT_TAIL_BYTES)
             .await
             .unwrap_or_default();
@@ -327,6 +350,55 @@ async fn observe_native_wait(
             () = tokio::time::sleep(NATIVE_WAIT_POLL_INTERVAL) => {}
         }
     }
+}
+
+async fn active_bazel_lock_owner(output_base: &Path) -> Option<u32> {
+    let pid = read_bazel_lock_owner(output_base).await?;
+    process_exists(pid).then_some(pid)
+}
+
+async fn read_bazel_lock_owner(output_base: &Path) -> Option<u32> {
+    let bytes = read_bounded_prefix(&output_base.join("lock"), OWNER_BYTES_LIMIT)
+        .await
+        .ok()?;
+    parse_bazel_lock_pid(&bytes)
+}
+
+fn parse_bazel_lock_pid(bytes: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("pid="))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 performs process-existence and permission checks only.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: u32) -> bool {
+    // Avoid treating stale Bazel lock metadata as a live wait on platforms
+    // where the runner cannot safely check process liveness.
+    false
+}
+
+async fn read_bounded_prefix(path: &Path, maximum_bytes: u64) -> io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path).await?;
+    let mut data = Vec::with_capacity(usize::try_from(maximum_bytes).unwrap_or(4 * 1024));
+    file.take(maximum_bytes).read_to_end(&mut data).await?;
+    Ok(data)
 }
 
 async fn read_bounded_tail(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
@@ -400,6 +472,63 @@ mod tests {
         assert_eq!(snapshot.owner.as_deref(), Some("second"));
         status.end();
         assert!(!status.snapshot().active);
+    }
+
+    #[test]
+    fn parses_only_the_bounded_bazel_lock_pid_field() {
+        assert_eq!(
+            parse_bazel_lock_pid(b"pid=12345\nowner=client\ncwd=/private/workspace\n"),
+            Some(12_345)
+        );
+        assert_eq!(parse_bazel_lock_pid(b"owner=client\n"), None);
+        assert_eq!(parse_bazel_lock_pid(b"pid=not-a-pid\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_observer_tracks_a_live_explicit_output_base_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let stdout = root.path().join("stdout.log");
+        let stderr = root.path().join("stderr.log");
+        let bep = root.path().join("events.bep");
+        for path in [&stdout, &stderr, &bep] {
+            tokio::fs::write(path, b"").await.unwrap();
+        }
+        let mut holder = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let holder_pid = holder.id().unwrap();
+        tokio::fs::write(
+            root.path().join("lock"),
+            format!("pid={holder_pid}\nowner=client\ncwd=/redacted\n"),
+        )
+        .await
+        .unwrap();
+        let status = Arc::new(OutputBaseWaitStatus::default());
+        let observer = NativeOutputBaseWaitObserver::start(
+            stdout,
+            stderr,
+            bep,
+            Some(root.path().to_owned()),
+            status.clone(),
+        )
+        .await;
+
+        let snapshot = status.snapshot();
+        assert!(snapshot.active);
+        let expected_owner = format!("bazel_client:pid={holder_pid}");
+        assert_eq!(snapshot.owner.as_deref(), Some(expected_owner.as_str()));
+        holder.kill().await.unwrap();
+        let _ = holder.wait().await;
+        for _ in 0..100 {
+            if !status.snapshot().active {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!status.snapshot().active);
+        observer.finish().await;
     }
 
     #[tokio::test]
