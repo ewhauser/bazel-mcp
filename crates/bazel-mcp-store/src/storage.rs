@@ -1,52 +1,48 @@
 use std::{
-    collections::BTreeMap,
-    fs::{File, OpenOptions},
     path::{Path, PathBuf},
-    sync::{
-        Arc, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 
 #[cfg(test)]
 use bazel_mcp_types::{DeferredRetrieval, TargetResult};
 
 use bazel_mcp_types::{
-    Artifact, CoverageFile, DeferredResultRecord, Diagnostic, InspectHint, InvocationId,
-    InvocationMetrics, InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest,
-    QueryRow, Termination, TestResult,
+    Artifact, CoverageFile, DeferredResultRecord, Diagnostic, InvocationId, InvocationMetrics,
+    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow, Termination,
+    TestResult,
 };
 use serde::de::DeserializeOwned;
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::{
     InvocationPaths,
+    coordination::{ChangeCoordinator, LeaseManager, ProcessLock, mutation_lock_path},
     cursor::FileCursor,
     files::{
-        create_private_directory, create_private_directory_all, remove_if_exists,
-        write_bytes_atomic, write_json_atomic,
+        create_private_directory, create_private_directory_all, remove_if_exists, write_json_atomic,
     },
     index::{
         Index, IndexEntry, ensure_exists, insert as insert_index_entry, mark_telemetry_flushed,
-        merge_index_telemetry, merge_pending_telemetry, merge_telemetry,
-        replace as replace_index_entry,
+        merge_index_telemetry, replace as replace_index_entry,
     },
-    manifest::{
-        CURRENT_SCHEMA_VERSION, DurableRecord, decode as decode_durable, read as read_durable,
-    },
+    index_coordinator::IndexCoordinator,
+    manifest::{CURRENT_SCHEMA_VERSION, DurableRecord, read as read_durable},
+    manifest_repository::ManifestRepository,
+    metrics::StoreMetrics,
     query_paging::{QueryFilePage, count_query_file, page_query_file, page_records},
     record::{HydratedInvocation, InvocationDetails, InvocationHeader},
+    recovery::{RecoveryManager, nonterminal_ids},
 };
 
 #[cfg(test)]
-use crate::{query_paging::QUERY_LINE_LIMIT, record::InvocationSummaryHeader};
-
-const CHANGE_POLL_INTERVAL_US: u64 = 1_000;
+use crate::{
+    coordination::{owner_lock_path, read_changes},
+    manifest_repository::persist as persist_manifest,
+    query_paging::QUERY_LINE_LIMIT,
+    record::InvocationSummaryHeader,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -77,21 +73,11 @@ pub struct Store {
 }
 
 pub(crate) struct StoreInner {
-    pub(crate) index: RwLock<Index>,
-    mutation_locks: Mutex<BTreeMap<InvocationId, Weak<Mutex<()>>>>,
-    owner_leases: Mutex<BTreeMap<InvocationId, ProcessLock>>,
-    change_state: Mutex<ChangeState>,
-    next_change_check_us: AtomicU64,
-    manifest_commits: AtomicU64,
-    manifest_bytes_written: AtomicU64,
-    payload_recounts: AtomicU64,
-    pub(crate) gc_renames: AtomicU64,
-    pub(crate) gc_unlinks: AtomicU64,
-    pub(crate) gc_rename_us: AtomicU64,
-    pub(crate) gc_index_write_us: AtomicU64,
-    pub(crate) gc_unlink_us: AtomicU64,
-    #[cfg(test)]
-    pub(crate) fail_next_gc_unlink: AtomicBool,
+    pub(crate) index: IndexCoordinator,
+    pub(crate) manifests: ManifestRepository,
+    pub(crate) leases: LeaseManager,
+    pub(crate) changes: ChangeCoordinator,
+    pub(crate) metrics: StoreMetrics,
     startup_stats: StoreStartupStats,
 }
 
@@ -143,37 +129,22 @@ impl Store {
         create_private_directory_all(&cache_root.join("changes")).await?;
 
         let _maintenance = ProcessLock::acquire(cache_root.join("MAINTENANCE")).await?;
-        let mut change_publisher = ChangePublisher::create(&cache_root).await?;
-        cleanup_stale_change_publishers(&cache_root)?;
-        recover_trash(&cache_root).await?;
-        let (mut index, startup_stats) = load_index(&cache_root, true).await?;
-        let recovered = recover_interrupted(&cache_root, &mut index).await?;
+        let changes = ChangeCoordinator::open(&cache_root).await?;
+        RecoveryManager::clean_trash(&cache_root).await?;
+        let (mut index, startup_stats) = RecoveryManager::load_index(&cache_root, true).await?;
+        let recovered = RecoveryManager::recover_interrupted(&cache_root, &mut index).await?;
         if recovered != 0 {
-            change_publisher.publish()?;
+            changes.publish().await?;
         }
-        let observed_changes = read_changes(&cache_root)?;
 
         Ok(Self {
-            cache_root,
+            cache_root: cache_root.clone(),
             inner: Arc::new(StoreInner {
-                index: RwLock::new(index),
-                mutation_locks: Mutex::new(BTreeMap::new()),
-                owner_leases: Mutex::new(BTreeMap::new()),
-                change_state: Mutex::new(ChangeState {
-                    publisher: change_publisher,
-                    observed: observed_changes,
-                }),
-                next_change_check_us: AtomicU64::new(0),
-                manifest_commits: AtomicU64::new(0),
-                manifest_bytes_written: AtomicU64::new(0),
-                payload_recounts: AtomicU64::new(0),
-                gc_renames: AtomicU64::new(0),
-                gc_unlinks: AtomicU64::new(0),
-                gc_rename_us: AtomicU64::new(0),
-                gc_index_write_us: AtomicU64::new(0),
-                gc_unlink_us: AtomicU64::new(0),
-                #[cfg(test)]
-                fail_next_gc_unlink: AtomicBool::new(false),
+                index: IndexCoordinator::new(index),
+                manifests: ManifestRepository::new(cache_root.clone()),
+                leases: LeaseManager::new(),
+                changes,
+                metrics: StoreMetrics::new(),
                 startup_stats,
             }),
         })
@@ -181,36 +152,23 @@ impl Store {
 
     #[must_use]
     pub fn paths_for(&self, record: &InvocationRecord) -> InvocationPaths {
-        InvocationPaths::new(&self.cache_root, record.request.id)
+        self.inner.manifests.paths_for_id(record.request.id)
     }
 
     pub(crate) fn paths_for_id(&self, id: InvocationId) -> InvocationPaths {
-        InvocationPaths::new(&self.cache_root, id)
+        self.inner.manifests.paths_for_id(id)
     }
 
     pub(crate) async fn mutation_lock(&self, id: InvocationId) -> Arc<Mutex<()>> {
-        let mut locks = self.inner.mutation_locks.lock().await;
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
-            return lock;
-        }
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(id, Arc::downgrade(&lock));
-        lock
+        self.inner.leases.mutation_lock(id).await
     }
 
     async fn acquire_owner(&self, id: InvocationId) -> Result<ProcessLock, StoreError> {
-        match ProcessLock::try_acquire(owner_lock_path(&self.cache_root, id)).await? {
-            Some(owner) => Ok(owner),
-            None => Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("invocation {id} is already owned by another process"),
-            ))),
-        }
+        self.inner.leases.acquire_owner(&self.cache_root, id).await
     }
 
     async fn release_owner(&self, id: InvocationId) {
-        self.inner.owner_leases.lock().await.remove(&id);
+        self.inner.leases.release_owner(id).await;
     }
 
     pub(crate) async fn recover_orphaned_invocations(&self) -> Result<usize, StoreError> {
@@ -218,7 +176,7 @@ impl Store {
             let index = self.inner.index.read().await;
             nonterminal_ids(&index)
         };
-        let recovered = recover_interrupted_ids(&self.cache_root, ids).await?;
+        let recovered = RecoveryManager::recover_ids(&self.cache_root, ids).await?;
         if !recovered.is_empty() {
             let recovered_count = recovered.len();
             {
@@ -234,10 +192,7 @@ impl Store {
     }
 
     pub(crate) async fn publish_change(&self) -> Result<(), StoreError> {
-        let mut state = self.inner.change_state.lock().await;
-        let (publisher, change) = state.publisher.publish()?;
-        state.observed.insert(publisher, change);
-        Ok(())
+        self.inner.changes.publish().await
     }
 
     pub(crate) async fn refresh_index_if_stale(&self) -> Result<(), StoreError> {
@@ -252,50 +207,27 @@ impl Store {
     }
 
     fn claim_change_check(&self) -> bool {
-        let now = monotonic_us();
-        let next = self.inner.next_change_check_us.load(Ordering::Acquire);
-        if now < next {
-            return false;
-        }
-        self.inner
-            .next_change_check_us
-            .compare_exchange(
-                next,
-                now.saturating_add(CHANGE_POLL_INTERVAL_US),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        self.inner.changes.claim_check(monotonic_us())
     }
 
     pub(crate) async fn refresh_index(&self, force: bool) -> Result<(), StoreError> {
-        let mut state = self.inner.change_state.lock().await;
-        let changes = read_changes(&self.cache_root)?;
-        if !force && changes == state.observed {
+        let Some(refresh) = self
+            .inner
+            .changes
+            .begin_refresh(&self.cache_root, force)
+            .await?
+        else {
             return Ok(());
-        }
-        let (mut refreshed, _) = load_index(&self.cache_root, false).await?;
-        {
-            let previous = self.inner.index.read().await;
-            merge_pending_telemetry(&previous, &mut refreshed);
-        }
-        *self.inner.index.write().await = refreshed;
-        state.observed = changes;
+        };
+        let (refreshed, _) = RecoveryManager::load_index(&self.cache_root, false).await?;
+        self.inner.index.replace_from_disk(refreshed).await;
+        refresh.commit();
         Ok(())
     }
 
     #[must_use]
     pub fn io_stats(&self) -> StoreIoStats {
-        StoreIoStats {
-            manifest_commits: self.inner.manifest_commits.load(Ordering::Relaxed),
-            manifest_bytes_written: self.inner.manifest_bytes_written.load(Ordering::Relaxed),
-            payload_recounts: self.inner.payload_recounts.load(Ordering::Relaxed),
-            gc_renames: self.inner.gc_renames.load(Ordering::Relaxed),
-            gc_unlinks: self.inner.gc_unlinks.load(Ordering::Relaxed),
-            gc_rename_us: self.inner.gc_rename_us.load(Ordering::Relaxed),
-            gc_index_write_us: self.inner.gc_index_write_us.load(Ordering::Relaxed),
-            gc_unlink_us: self.inner.gc_unlink_us.load(Ordering::Relaxed),
-        }
+        self.inner.metrics.snapshot()
     }
 
     #[must_use]
@@ -309,14 +241,15 @@ impl Store {
         durable: &mut DurableRecord,
         recount_payload: bool,
     ) -> Result<u64, StoreError> {
-        self.inner.manifest_commits.fetch_add(1, Ordering::Relaxed);
-        if recount_payload {
-            self.inner.payload_recounts.fetch_add(1, Ordering::Relaxed);
-        }
-        let outcome = persist_durable(paths, durable, recount_payload).await?;
+        self.inner.metrics.record_manifest_commit(recount_payload);
+        let outcome = self
+            .inner
+            .manifests
+            .persist(paths, durable, recount_payload)
+            .await?;
         self.inner
-            .manifest_bytes_written
-            .fetch_add(outcome.manifest_bytes, Ordering::Relaxed);
+            .metrics
+            .record_manifest_bytes(outcome.manifest_bytes);
         Ok(outcome.retained_bytes)
     }
 
@@ -375,7 +308,7 @@ impl Store {
         insert_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         drop(index);
         if let Some(owner) = owner {
-            self.inner.owner_leases.lock().await.insert(id, owner);
+            self.inner.leases.retain_owner(id, owner).await;
         }
         Ok(paths)
     }
@@ -513,141 +446,6 @@ impl Store {
         drop(index);
         self.release_owner(id).await;
         Ok(result)
-    }
-
-    pub async fn record_model_visible_result(
-        &self,
-        id: InvocationId,
-        bytes: u64,
-        inspection: bool,
-    ) -> Result<(), StoreError> {
-        self.refresh_index_if_stale().await?;
-        let schedule = {
-            let mut index = self.inner.index.write().await;
-            let entry = index.entries.get_mut(&id).ok_or(StoreError::NotFound(id))?;
-            let metrics = &mut entry.record.metrics;
-            metrics.model_visible_bytes = metrics.model_visible_bytes.saturating_add(bytes);
-            if inspection {
-                metrics.inspect_calls = metrics.inspect_calls.saturating_add(1);
-            }
-            entry.telemetry_generation = entry.telemetry_generation.saturating_add(1);
-            if entry.telemetry_flush_scheduled {
-                false
-            } else {
-                entry.telemetry_flush_scheduled = true;
-                true
-            }
-        };
-        if schedule {
-            self.schedule_telemetry_flush(id);
-        }
-        Ok(())
-    }
-
-    pub async fn record_progress_notifications(
-        &self,
-        id: InvocationId,
-        count: u64,
-    ) -> Result<(), StoreError> {
-        self.refresh_index_if_stale().await?;
-        let schedule = {
-            let mut index = self.inner.index.write().await;
-            let entry = index.entries.get_mut(&id).ok_or(StoreError::NotFound(id))?;
-            let metrics = &mut entry.record.metrics;
-            metrics.progress_notifications = metrics.progress_notifications.saturating_add(count);
-            entry.telemetry_generation = entry.telemetry_generation.saturating_add(1);
-            if entry.telemetry_flush_scheduled {
-                false
-            } else {
-                entry.telemetry_flush_scheduled = true;
-                true
-            }
-        };
-        if schedule {
-            self.schedule_telemetry_flush(id);
-        }
-        Ok(())
-    }
-
-    pub async fn flush_pending_telemetry(&self) -> Result<usize, StoreError> {
-        let ids = {
-            let index = self.inner.index.read().await;
-            index
-                .entries
-                .iter()
-                .filter_map(|(id, entry)| entry.telemetry_flush_scheduled.then_some(*id))
-                .collect::<Vec<_>>()
-        };
-        for id in &ids {
-            while !self.flush_telemetry_once(*id).await? {}
-        }
-        Ok(ids.len())
-    }
-
-    fn schedule_telemetry_flush(&self, id: InvocationId) {
-        let inner = Arc::downgrade(&self.inner);
-        let cache_root = self.cache_root.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                let Some(inner) = inner.upgrade() else {
-                    return;
-                };
-                let store = Store {
-                    cache_root: cache_root.clone(),
-                    inner,
-                };
-                match store.flush_telemetry_once(id).await {
-                    Ok(true) => return,
-                    Ok(false) => {}
-                    Err(_) => {
-                        if let Some(entry) = store.inner.index.write().await.entries.get_mut(&id) {
-                            entry.telemetry_flush_scheduled = false;
-                        }
-                        return;
-                    }
-                }
-            }
-        });
-    }
-
-    async fn flush_telemetry_once(&self, id: InvocationId) -> Result<bool, StoreError> {
-        self.refresh_index_if_stale().await?;
-        let mutation_lock = self.mutation_lock(id).await;
-        let _guard = mutation_lock.lock().await;
-        let (metrics, generation) = {
-            let index = self.inner.index.read().await;
-            let Some(entry) = index.entries.get(&id) else {
-                return Ok(true);
-            };
-            if !entry.telemetry_flush_scheduled {
-                return Ok(true);
-            }
-            (entry.record.metrics.clone(), entry.telemetry_generation)
-        };
-        let _process_mutation =
-            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
-        let paths = self.paths_for_id(id);
-        let (mut durable, _) = read_durable(&paths.manifest).await?;
-        merge_telemetry(&metrics, &mut durable.invocation.metrics);
-        let retained_bytes = self.persist_durable(&paths, &mut durable, false).await?;
-        self.publish_change().await?;
-        let mut index = self.inner.index.write().await;
-        let (previous, clean) = {
-            let Some(entry) = index.entries.get_mut(&id) else {
-                return Ok(true);
-            };
-            let previous = entry.retained_bytes;
-            entry.retained_bytes = retained_bytes;
-            let clean = entry.telemetry_generation == generation;
-            if clean {
-                entry.telemetry_flush_scheduled = false;
-            }
-            (previous, clean)
-        };
-        index.retained_bytes = index.retained_bytes.saturating_sub(previous);
-        index.retained_bytes = index.retained_bytes.saturating_add(retained_bytes);
-        Ok(clean)
     }
 
     pub async fn update_cancellation_reason(
@@ -926,348 +724,9 @@ pub(crate) fn elapsed_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-async fn persist_durable(
-    paths: &InvocationPaths,
-    durable: &mut DurableRecord,
-    recount_payload: bool,
-) -> Result<PersistOutcome, StoreError> {
-    if recount_payload {
-        durable.payload_bytes = evidence_payload_size(paths).await?;
-    }
-    let bytes = serde_json::to_vec(durable)?;
-    let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    write_bytes_atomic(&paths.manifest, bytes).await?;
-    Ok(PersistOutcome {
-        retained_bytes: durable.payload_bytes.saturating_add(manifest_bytes),
-        manifest_bytes,
-    })
-}
-
-struct PersistOutcome {
-    retained_bytes: u64,
-    manifest_bytes: u64,
-}
-
-async fn evidence_payload_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
-    let mut size = 0_u64;
-    for path in [
-        &paths.details,
-        &paths.stdout,
-        &paths.stderr,
-        &paths.evidence,
-        &paths.bep,
-        &paths.artifacts,
-        &paths.test_logs_raw,
-        &paths.test_log_evidence,
-    ] {
-        match tokio::fs::symlink_metadata(path).await {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                size = size.saturating_add(metadata.len());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(size)
-}
-
-pub(crate) async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
-    let mut size = 0_u64;
-    for path in [
-        &paths.manifest,
-        &paths.details,
-        &paths.stdout,
-        &paths.stderr,
-        &paths.evidence,
-        &paths.bep,
-        &paths.artifacts,
-        &paths.test_logs_raw,
-        &paths.test_log_evidence,
-    ] {
-        match tokio::fs::symlink_metadata(path).await {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                size = size.saturating_add(metadata.len());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(size)
-}
-
-async fn recover_trash(cache_root: &Path) -> Result<(), StoreError> {
-    let trash = cache_root.join("trash");
-    let mut entries = tokio::fs::read_dir(&trash).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
-        if metadata.is_dir() {
-            tokio::fs::remove_dir_all(entry.path()).await?;
-        } else {
-            tokio::fs::remove_file(entry.path()).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn load_index(
-    cache_root: &Path,
-    cleanup_temporary: bool,
-) -> Result<(Index, StoreStartupStats), StoreError> {
-    let cache_root = cache_root.to_owned();
-    tokio::task::spawn_blocking(move || load_index_blocking(&cache_root, cleanup_temporary)).await?
-}
-
-fn load_index_blocking(
-    cache_root: &Path,
-    cleanup_temporary: bool,
-) -> Result<(Index, StoreStartupStats), StoreError> {
-    let total_started = Instant::now();
-    let mut index = Index::default();
-    let mut stats = StoreStartupStats::default();
-    let invocations = cache_root.join("invocations");
-    for day in std::fs::read_dir(&invocations)? {
-        let day = day?;
-        if !day.file_type()?.is_dir() {
-            continue;
-        }
-        for shard in std::fs::read_dir(day.path())? {
-            let shard = shard?;
-            if !shard.file_type()?.is_dir() {
-                continue;
-            }
-            for directory in std::fs::read_dir(shard.path())? {
-                let directory = directory?;
-                if !directory.file_type()?.is_dir() {
-                    continue;
-                }
-                let name = directory.file_name().to_string_lossy().into_owned();
-                let id = parse_id(&name).ok_or_else(|| StoreError::CorruptRecord {
-                    path: directory.path(),
-                    message: "directory name is not an invocation UUID".into(),
-                })?;
-                let expected = InvocationPaths::new(cache_root, id);
-                if expected.directory != directory.path() {
-                    return Err(StoreError::CorruptRecord {
-                        path: directory.path(),
-                        message: "invocation is outside its UUIDv7 bucket or shard".into(),
-                    });
-                }
-                let read_started = Instant::now();
-                let bytes = std::fs::read(&expected.manifest);
-                stats.manifest_read_us = stats
-                    .manifest_read_us
-                    .saturating_add(elapsed_micros(read_started.elapsed()));
-                match bytes {
-                    Ok(bytes) => {
-                        index_manifest_bytes(&expected, id, &bytes, &mut index, &mut stats)?;
-                        if cleanup_temporary {
-                            let temporary = temporary_files(&expected.directory)?;
-                            if !temporary.is_empty()
-                                && let Some(_cleanup) = ProcessLock::try_acquire_blocking(
-                                    &mutation_lock_path(cache_root, id),
-                                )?
-                            {
-                                for path in temporary {
-                                    let _ = std::fs::remove_file(path);
-                                }
-                            }
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        // Creation is committed by manifest.json. A directory without
-                        // it is an uncommitted crash remnant.
-                        if let Some(_cleanup) =
-                            ProcessLock::try_acquire_blocking(&mutation_lock_path(cache_root, id))?
-                        {
-                            match std::fs::read(&expected.manifest) {
-                                Ok(bytes) => index_manifest_bytes(
-                                    &expected, id, &bytes, &mut index, &mut stats,
-                                )?,
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                    match std::fs::remove_dir_all(directory.path()) {
-                                        Ok(()) => {}
-                                        Err(error)
-                                            if error.kind() == std::io::ErrorKind::NotFound => {}
-                                        Err(error) => return Err(error.into()),
-                                    }
-                                }
-                                Err(error) => return Err(error.into()),
-                            }
-                        }
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-    }
-    let total_us = elapsed_micros(total_started.elapsed());
-    stats.directory_traversal_us = total_us.saturating_sub(
-        stats
-            .manifest_read_us
-            .saturating_add(stats.manifest_decode_us)
-            .saturating_add(stats.index_build_us),
-    );
-    Ok((index, stats))
-}
-
-fn index_manifest_bytes(
-    paths: &InvocationPaths,
-    id: InvocationId,
-    bytes: &[u8],
-    index: &mut Index,
-    stats: &mut StoreStartupStats,
-) -> Result<(), StoreError> {
-    let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let decode_started = Instant::now();
-    let mut durable = decode_durable(&paths.manifest, bytes)?;
-    stats.manifest_decode_us = stats
-        .manifest_decode_us
-        .saturating_add(elapsed_micros(decode_started.elapsed()));
-    if durable.invocation.request.id != id {
-        return Err(StoreError::CorruptRecord {
-            path: paths.manifest.clone(),
-            message: "record ID does not match directory".into(),
-        });
-    }
-    // Terminal records commit byte accounting after every evidence-producing
-    // operation. Only a nonterminal record can have grown since its last commit.
-    if !durable.invocation.state.is_terminal() {
-        durable.payload_bytes = evidence_payload_size_blocking(paths)?;
-    }
-    let retained_bytes = durable.payload_bytes.saturating_add(manifest_bytes);
-    let index_started = Instant::now();
-    insert_index_entry(index, id, durable.index_entry(retained_bytes));
-    stats.index_build_us = stats
-        .index_build_us
-        .saturating_add(elapsed_micros(index_started.elapsed()));
-    Ok(())
-}
-
-fn temporary_files(directory: &Path) -> Result<Vec<PathBuf>, StoreError> {
-    const NAMES: [&str; 6] = [
-        "manifest.tmp",
-        "details.tmp",
-        "artifacts.tmp",
-        "failure-evidence.tmp",
-        "failed-test-logs.tmp",
-        "failed-test-evidence.tmp",
-    ];
-    let mut temporary = Vec::new();
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| NAMES.contains(&name))
-        {
-            temporary.push(entry.path());
-        }
-    }
-    Ok(temporary)
-}
-
-fn elapsed_micros(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
 fn monotonic_us() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
-    elapsed_micros(START.get_or_init(Instant::now).elapsed())
-}
-
-fn evidence_payload_size_blocking(paths: &InvocationPaths) -> Result<u64, StoreError> {
-    let mut size = 0_u64;
-    for path in [
-        &paths.details,
-        &paths.stdout,
-        &paths.stderr,
-        &paths.evidence,
-        &paths.bep,
-        &paths.artifacts,
-        &paths.test_logs_raw,
-        &paths.test_log_evidence,
-    ] {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_file() => {
-                size = size.saturating_add(metadata.len());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(size)
-}
-
-async fn recover_interrupted(cache_root: &Path, index: &mut Index) -> Result<usize, StoreError> {
-    let recovered = recover_interrupted_ids(cache_root, nonterminal_ids(index)).await?;
-    let recovered_count = recovered.len();
-    for (id, entry) in recovered {
-        replace_index_entry(index, id, entry);
-    }
-    Ok(recovered_count)
-}
-
-fn nonterminal_ids(index: &Index) -> Vec<InvocationId> {
-    index
-        .entries
-        .iter()
-        .filter_map(|(id, entry)| (!entry.record.state.is_terminal()).then_some(*id))
-        .collect()
-}
-
-async fn recover_interrupted_ids(
-    cache_root: &Path,
-    ids: Vec<InvocationId>,
-) -> Result<Vec<(InvocationId, IndexEntry)>, StoreError> {
-    let mut recovered = Vec::new();
-    for id in ids {
-        let Some(owner) = ProcessLock::try_acquire(owner_lock_path(cache_root, id)).await? else {
-            continue;
-        };
-        let mutation = ProcessLock::acquire(mutation_lock_path(cache_root, id)).await?;
-        let paths = InvocationPaths::new(cache_root, id);
-        let (mut durable, _) = match read_durable(&paths.manifest).await {
-            Ok(durable) => durable,
-            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if durable.invocation.state.is_terminal() {
-            let manifest_bytes = tokio::fs::metadata(&paths.manifest).await?.len();
-            let retained_bytes = durable.payload_bytes.saturating_add(manifest_bytes);
-            recovered.push((id, durable.index_entry(retained_bytes)));
-            continue;
-        }
-        let mut full_record = durable.invocation.clone().into_record();
-        full_record.state = InvocationState::Interrupted;
-        full_record.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms());
-        full_record.termination = Some(Termination::Interrupted);
-        full_record.summary = Some(InvocationSummary {
-            success: false,
-            headline: "Invocation was interrupted when the previous server stopped".into(),
-            truncated: true,
-            inspect_hint: Some(InspectHint::Log),
-            ..InvocationSummary::default()
-        });
-        if let Some(deferred) = durable.deferred.as_mut() {
-            deferred.extend_terminal_expiry(
-                full_record
-                    .finished_at_ms
-                    .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms),
-            );
-        }
-        write_details(&paths, &full_record).await?;
-        durable.invocation = InvocationHeader::from_record(&full_record);
-        let outcome = persist_durable(&paths, &mut durable, true).await?;
-        recovered.push((id, durable.index_entry(outcome.retained_bytes)));
-        drop(mutation);
-        drop(owner);
-    }
-    Ok(recovered)
+    elapsed_us(START.get_or_init(Instant::now).elapsed())
 }
 
 pub(crate) fn retention_age_elapsed(finished_at_ms: i64, cutoff_ms: i64) -> bool {
@@ -1391,172 +850,6 @@ fn transition_lost_evidence(
 
 fn error_is_not_found(error: &StoreError) -> bool {
     matches!(error, StoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
-}
-
-fn parse_id(value: &str) -> Option<InvocationId> {
-    serde_json::from_str::<InvocationId>(&format!("\"{value}\"")).ok()
-}
-
-pub(crate) struct ProcessLock {
-    _file: File,
-}
-
-impl ProcessLock {
-    pub(crate) async fn acquire(path: PathBuf) -> Result<Self, StoreError> {
-        let lock = tokio::task::spawn_blocking(move || {
-            let file = open_lock_file(&path)?;
-            file.lock()?;
-            Ok::<_, std::io::Error>(Self { _file: file })
-        })
-        .await??;
-        Ok(lock)
-    }
-
-    pub(crate) async fn try_acquire(path: PathBuf) -> Result<Option<Self>, StoreError> {
-        let lock = tokio::task::spawn_blocking(move || {
-            let file = open_lock_file(&path)?;
-            match file.try_lock() {
-                Ok(()) => Ok(Some(Self { _file: file })),
-                Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-                Err(std::fs::TryLockError::Error(error)) => Err(error),
-            }
-        })
-        .await??;
-        Ok(lock)
-    }
-
-    fn try_acquire_blocking(path: &Path) -> Result<Option<Self>, StoreError> {
-        let file = open_lock_file(path)?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-        }
-    }
-}
-
-fn open_lock_file(path: &Path) -> Result<File, std::io::Error> {
-    let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-pub(crate) fn owner_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
-    cache_root.join("owners").join(format!("{id}.lock"))
-}
-
-pub(crate) fn mutation_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
-    cache_root.join("mutations").join(format!("{id}.lock"))
-}
-
-struct ChangeState {
-    publisher: ChangePublisher,
-    observed: BTreeMap<uuid::Uuid, uuid::Uuid>,
-}
-
-struct ChangePublisher {
-    id: uuid::Uuid,
-    marker: PathBuf,
-    _lease: ProcessLock,
-}
-
-impl ChangePublisher {
-    async fn create(cache_root: &Path) -> Result<Self, StoreError> {
-        let id = uuid::Uuid::now_v7();
-        let change = uuid::Uuid::now_v7();
-        let directory = cache_root.join("changes");
-        let lease = ProcessLock::acquire(directory.join(format!("{id}.lock"))).await?;
-        let marker = directory.join(format!("{id}.{change}"));
-        create_private_marker(&marker)?;
-        Ok(Self {
-            id,
-            marker,
-            _lease: lease,
-        })
-    }
-
-    fn publish(&mut self) -> Result<(uuid::Uuid, uuid::Uuid), StoreError> {
-        let change = uuid::Uuid::now_v7();
-        let next = self.marker.with_file_name(format!("{}.{change}", self.id));
-        std::fs::rename(&self.marker, &next)?;
-        self.marker = next;
-        Ok((self.id, change))
-    }
-}
-
-fn create_private_marker(path: &Path) -> Result<(), StoreError> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    drop(options.open(path)?);
-    Ok(())
-}
-
-fn parse_change_marker(name: &std::ffi::OsStr) -> Option<(uuid::Uuid, uuid::Uuid)> {
-    let (publisher, change) = name.to_str()?.split_once('.')?;
-    Some((publisher.parse().ok()?, change.parse().ok()?))
-}
-
-fn read_changes(cache_root: &Path) -> Result<BTreeMap<uuid::Uuid, uuid::Uuid>, StoreError> {
-    let mut changes = BTreeMap::new();
-    for entry in std::fs::read_dir(cache_root.join("changes"))? {
-        let entry = entry?;
-        if let Some((publisher, change)) = parse_change_marker(&entry.file_name()) {
-            changes.insert(publisher, change);
-        }
-    }
-    Ok(changes)
-}
-
-fn cleanup_stale_change_publishers(cache_root: &Path) -> Result<(), StoreError> {
-    let directory = cache_root.join("changes");
-    let mut stale = Vec::new();
-    for entry in std::fs::read_dir(&directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("lock") {
-            continue;
-        }
-        let Some(publisher) = path
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .and_then(|value| value.parse::<uuid::Uuid>().ok())
-        else {
-            continue;
-        };
-        if let Some(lease) = ProcessLock::try_acquire_blocking(&path)? {
-            drop(lease);
-            stale.push((publisher, path));
-        }
-    }
-    if stale.is_empty() {
-        return Ok(());
-    }
-    let stale_ids = stale
-        .iter()
-        .map(|(publisher, _)| *publisher)
-        .collect::<std::collections::BTreeSet<_>>();
-    for entry in std::fs::read_dir(&directory)? {
-        let entry = entry?;
-        if let Some((publisher, _)) = parse_change_marker(&entry.file_name())
-            && stale_ids.contains(&publisher)
-        {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-    for (_, lock) in stale {
-        let _ = std::fs::remove_file(lock);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1691,15 +984,7 @@ mod tests {
         let record = record(&root.path().join("worktree-a"));
         let id = record.request.id;
         writer.create_invocation(&record).await.unwrap();
-        let (marker, lease) = {
-            let state = writer.inner.change_state.lock().await;
-            (
-                state.publisher.marker.clone(),
-                root.path()
-                    .join("changes")
-                    .join(format!("{}.lock", state.publisher.id)),
-            )
-        };
+        let (marker, lease) = writer.inner.changes.publisher_paths(root.path()).await;
         drop(writer);
 
         assert!(marker.exists());
@@ -1817,7 +1102,7 @@ mod tests {
         durable.invocation.termination = Some(Termination::Exit { code: 0 });
         durable.invocation.summary =
             Some(InvocationSummaryHeader::from(&InvocationSummary::default()));
-        persist_durable(&paths, &mut durable, true).await.unwrap();
+        persist_manifest(&paths, &mut durable, true).await.unwrap();
         assert_eq!(read_changes(root.path()).unwrap(), changes);
         drop(writer);
 
@@ -2347,13 +1632,11 @@ mod tests {
                 directory.display()
             );
         }
-        let change_state = store.inner.change_state.lock().await;
+        let (change_marker, change_lease) = store.inner.changes.publisher_paths(&cache_root).await;
         for file in [
             cache_root.join("MAINTENANCE"),
-            cache_root
-                .join("changes")
-                .join(format!("{}.lock", change_state.publisher.id)),
-            change_state.publisher.marker.clone(),
+            change_lease,
+            change_marker,
             owner_lock_path(&cache_root, record.request.id),
             mutation_lock_path(&cache_root, record.request.id),
             paths.manifest.clone(),
@@ -2924,10 +2207,7 @@ mod tests {
         let id = record.request.id;
         store.create_invocation(&record).await.unwrap();
         succeed(&store, id).await;
-        store
-            .inner
-            .fail_next_gc_unlink
-            .store(true, Ordering::Relaxed);
+        store.inner.metrics.inject_gc_unlink_failure();
 
         assert_eq!(
             store

@@ -1,15 +1,21 @@
 //! Database-free, crash-recoverable invocation evidence storage.
 
+mod coordination;
 mod cursor;
 mod deferred_repository;
 mod files;
 mod index;
+mod index_coordinator;
 mod invocation_repository;
 mod manifest;
+mod manifest_repository;
+mod metrics;
 mod query_paging;
 mod record;
+mod recovery;
 mod retention;
 mod storage;
+mod telemetry;
 
 pub use files::InvocationPaths;
 pub use record::{

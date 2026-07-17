@@ -2,18 +2,18 @@
 
 use std::{
     collections::BTreeSet,
-    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
 use bazel_mcp_types::InvocationId;
 
 use crate::{
+    coordination::{ProcessLock, mutation_lock_path, owner_lock_path},
     index::{remove as remove_index_entry, replace as replace_index_entry},
     manifest::read as read_durable,
+    manifest_repository::evidence_size,
     storage::{
-        ProcessLock, ReclaimOutcome, Store, StoreError, elapsed_us, evidence_size,
-        finish_staged_evidence, mutation_lock_path, owner_lock_path, rename_to_trash,
+        ReclaimOutcome, Store, StoreError, elapsed_us, finish_staged_evidence, rename_to_trash,
         retention_age_elapsed, stage_raw_evidence,
     },
 };
@@ -214,27 +214,22 @@ impl Store {
         let rename_started = Instant::now();
         if let Some(trash) = rename_to_trash(&self.cache_root, id).await? {
             self.inner
-                .gc_rename_us
-                .fetch_add(elapsed_us(rename_started.elapsed()), Ordering::Relaxed);
-            self.inner.gc_renames.fetch_add(1, Ordering::Relaxed);
+                .metrics
+                .record_gc_rename(elapsed_us(rename_started.elapsed()));
             {
                 let index_started = Instant::now();
                 let mut index = self.inner.index.write().await;
                 remove_index_entry(&mut index, id);
                 self.inner
-                    .gc_index_write_us
-                    .fetch_add(elapsed_us(index_started.elapsed()), Ordering::Relaxed);
+                    .metrics
+                    .record_gc_index_write(elapsed_us(index_started.elapsed()));
             }
             drop(_process_mutation);
             // Rename is the deletion commit. If unlinking fails, the index
             // stays removed and startup finishes this trash entry.
             let unlink_started = Instant::now();
             #[cfg(test)]
-            let unlink_result = if self
-                .inner
-                .fail_next_gc_unlink
-                .swap(false, Ordering::Relaxed)
-            {
+            let unlink_result = if self.inner.metrics.take_gc_unlink_failure() {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "injected GC unlink failure",
@@ -244,12 +239,9 @@ impl Store {
             };
             #[cfg(not(test))]
             let unlink_result = tokio::fs::remove_dir_all(trash).await;
-            if unlink_result.is_ok() {
-                self.inner.gc_unlinks.fetch_add(1, Ordering::Relaxed);
-            }
             self.inner
-                .gc_unlink_us
-                .fetch_add(elapsed_us(unlink_started.elapsed()), Ordering::Relaxed);
+                .metrics
+                .record_gc_unlink(elapsed_us(unlink_started.elapsed()), unlink_result.is_ok());
             return Ok(ReclaimOutcome {
                 changed: true,
                 deleted: true,

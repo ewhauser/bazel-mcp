@@ -2,7 +2,7 @@
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitStatus,
     sync::Arc,
     time::{Duration, Instant},
@@ -11,18 +11,22 @@ use std::{
 #[cfg(unix)]
 use std::io;
 
+use bazel_mcp_bep::StreamOutcome;
 use bazel_mcp_policy::filtered_environment;
 use bazel_mcp_reducer::{
-    Budget, REDUCER_API_VERSION, ReducerContext, StreamReductionOutput, finalize_diagnostics,
-    normalize_terminal_text,
+    BepAccumulator, Budget, REDUCER_API_VERSION, ReducerContext, StreamReductionOutput,
+    finalize_diagnostics, normalize_terminal_text,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, StoreError};
 use bazel_mcp_types::{
     BazelCommand, CommandClass, Diagnostic, DiagnosticCategory, InspectHint, InvocationId,
-    InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState, PageRequest, Severity,
-    Termination, TestStatus,
+    InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState, InvocationSummary,
+    PageRequest, QueryRow, Severity, Termination, TestStatus,
 };
-use tokio::{process::Command, task};
+use tokio::{
+    process::{Child, Command},
+    task,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -39,6 +43,211 @@ use crate::{
 #[cfg(unix)]
 use crate::service::RunnerConfig;
 
+/// Immutable inputs selected before Bazel is spawned.
+///
+/// Owning these values prevents later phases from reaching back into queued
+/// state or reconstructing transport and timeout decisions.
+struct ExecutionPlan {
+    request: InvocationRequest,
+    paths: InvocationPaths,
+    executable: PathBuf,
+    cancellation: CancellationToken,
+    explicit_output_base: Option<PathBuf>,
+    output_base_wait: Arc<OutputBaseWaitStatus>,
+    extension_limits: Option<(usize, usize)>,
+    queue_ms: u64,
+    timeout: Duration,
+}
+
+/// A spawned process together with every guard required to shut it down and
+/// finish its live evidence stream.
+struct RunningInvocation {
+    plan: ExecutionPlan,
+    child: Child,
+    process_group: ProcessGroupGuard,
+    native_output_base_wait: NativeOutputBaseWaitObserver,
+    live_bep: Option<capture::LiveBepCapture>,
+    started: Instant,
+}
+
+/// Process termination is known, but durable evidence has not yet been
+/// drained and reduced.
+struct ExitedInvocation {
+    plan: ExecutionPlan,
+    status: Option<ExitStatus>,
+    termination: Termination,
+    state: InvocationState,
+    live_bep: Option<capture::LiveBepCapture>,
+    bazel_wall_ms: u64,
+    output_base_lock_wait_ms: u64,
+}
+
+/// Raw local evidence and its decoded BEP accumulator. Redaction and public
+/// byte budgets deliberately happen only in the next phase.
+struct CapturedEvidence {
+    exited: ExitedInvocation,
+    bep: BepAccumulator,
+    bep_outcome: StreamOutcome,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    query_row_count: u64,
+    query_sample: Vec<QueryRow>,
+    reduction_started: Instant,
+}
+
+/// A fully redacted and enriched result ready for its single durable commit.
+struct ReducedOutcome {
+    id: InvocationId,
+    completion: InvocationCompletion,
+}
+
+/// The only phase allowed to move an invocation into a terminal state.
+struct TerminalCommit {
+    id: InvocationId,
+    completion: InvocationCompletion,
+    recover_without_evidence: bool,
+}
+
+enum StartExecution {
+    Running(Box<RunningInvocation>),
+    Terminal(Box<TerminalCommit>),
+}
+
+#[derive(Clone)]
+struct TerminalContext {
+    id: InvocationId,
+    workspace: PathBuf,
+    state: InvocationState,
+    termination: Termination,
+    elapsed_ms: u64,
+}
+
+impl ExecutionPlan {
+    fn new(
+        service: &InvocationService,
+        queued: &InvocationRecord,
+        paths: &InvocationPaths,
+        executable: &Path,
+        cancellation: CancellationToken,
+        explicit_output_base: Option<&Path>,
+        output_base_wait: Arc<OutputBaseWaitStatus>,
+    ) -> Self {
+        let queue_ms = u64::try_from(
+            bazel_mcp_types::unix_timestamp_ms().saturating_sub(queued.request.requested_at_ms),
+        )
+        .unwrap_or_default();
+        let timeout = queued
+            .request
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(service.config.default_timeout)
+            .max(Duration::from_secs(1))
+            .min(service.config.maximum_timeout);
+        let extension_limits = (!service.reducers.is_empty()).then_some((
+            service.config.starlark_reducers.limits.max_events,
+            service.config.starlark_reducers.limits.max_input_bytes,
+        ));
+        Self {
+            request: queued.request.clone(),
+            paths: paths.clone(),
+            executable: executable.to_owned(),
+            cancellation,
+            explicit_output_base: explicit_output_base.map(Path::to_owned),
+            output_base_wait,
+            extension_limits,
+            queue_ms,
+            timeout,
+        }
+    }
+
+    fn failure_context(&self) -> TerminalContext {
+        TerminalContext {
+            id: self.request.id,
+            workspace: self.request.workspace.clone(),
+            state: InvocationState::Failed,
+            termination: Termination::Interrupted,
+            elapsed_ms: 0,
+        }
+    }
+}
+
+impl RunningInvocation {
+    fn failure_context(&self) -> TerminalContext {
+        TerminalContext {
+            id: self.plan.request.id,
+            workspace: self.plan.request.workspace.clone(),
+            state: InvocationState::Failed,
+            termination: Termination::Interrupted,
+            elapsed_ms: duration_millis(self.started.elapsed()),
+        }
+    }
+}
+
+impl ExitedInvocation {
+    fn terminal_context(&self) -> TerminalContext {
+        TerminalContext {
+            id: self.plan.request.id,
+            workspace: self.plan.request.workspace.clone(),
+            state: self.state,
+            termination: self.termination.clone(),
+            elapsed_ms: self.bazel_wall_ms,
+        }
+    }
+}
+
+impl ReducedOutcome {
+    fn into_terminal(self) -> TerminalCommit {
+        TerminalCommit {
+            id: self.id,
+            completion: self.completion,
+            recover_without_evidence: false,
+        }
+    }
+}
+
+impl TerminalCommit {
+    fn failure(
+        id: InvocationId,
+        termination: Termination,
+        summary: InvocationSummary,
+        queue_ms: u64,
+    ) -> Self {
+        Self {
+            id,
+            completion: InvocationCompletion {
+                state: InvocationState::Failed,
+                termination,
+                summary,
+                metrics: InvocationMetrics {
+                    queue_ms,
+                    ..Default::default()
+                },
+                canonical_arguments: None,
+                artifacts: Vec::new(),
+            },
+            recover_without_evidence: false,
+        }
+    }
+
+    fn cancelled(id: InvocationId, queue_ms: u64) -> Self {
+        Self {
+            id,
+            completion: InvocationCompletion {
+                state: InvocationState::Cancelled,
+                termination: Termination::Cancelled,
+                summary: cancelled_summary(),
+                metrics: InvocationMetrics {
+                    queue_ms,
+                    ..Default::default()
+                },
+                canonical_arguments: None,
+                artifacts: Vec::new(),
+            },
+            recover_without_evidence: false,
+        }
+    }
+}
+
 impl InvocationService {
     pub(crate) async fn execute(
         &self,
@@ -49,13 +258,60 @@ impl InvocationService {
         explicit_output_base: Option<&Path>,
         output_base_wait: Arc<OutputBaseWaitStatus>,
     ) -> Result<InvocationRecord, RunnerError> {
-        if cancellation.is_cancelled() {
-            return self.finish_cancelled(queued.request.id).await;
+        let plan = ExecutionPlan::new(
+            self,
+            queued,
+            paths,
+            executable,
+            cancellation,
+            explicit_output_base,
+            output_base_wait,
+        );
+        let starting_context = plan.failure_context();
+        let started = match self.start_execution(plan).await {
+            Ok(started) => started,
+            Err(error) => return self.recover_terminal_failure(starting_context, error).await,
+        };
+        let running = match started {
+            StartExecution::Running(running) => *running,
+            StartExecution::Terminal(commit) => {
+                return match self.commit_terminal(*commit).await {
+                    Ok(record) => Ok(record),
+                    Err(error) => self.recover_terminal_failure(starting_context, error).await,
+                };
+            }
+        };
+        let running_context = running.failure_context();
+        let exited = match self.wait_for_exit(running).await {
+            Ok(exited) => exited,
+            Err(error) => return self.recover_terminal_failure(running_context, error).await,
+        };
+        let terminal_context = exited.terminal_context();
+        let result = async {
+            let captured = self.capture_evidence(exited).await?;
+            let reduced = self.reduce_evidence(captured).await?;
+            self.commit_terminal(reduced.into_terminal()).await
         }
-        let queue_ms = u64::try_from(
-            bazel_mcp_types::unix_timestamp_ms().saturating_sub(queued.request.requested_at_ms),
-        )
-        .unwrap_or_default();
+        .await;
+        match result {
+            Ok(record) => Ok(record),
+            Err(error) => self.recover_terminal_failure(terminal_context, error).await,
+        }
+    }
+
+    async fn start_execution(&self, plan: ExecutionPlan) -> Result<StartExecution, RunnerError> {
+        let queued = &plan;
+        let paths = &plan.paths;
+        let executable = plan.executable.as_path();
+        let cancellation = plan.cancellation.clone();
+        let explicit_output_base = plan.explicit_output_base.as_deref();
+        let output_base_wait = plan.output_base_wait.clone();
+        let queue_ms = plan.queue_ms;
+        if cancellation.is_cancelled() {
+            return Ok(StartExecution::Terminal(Box::new(
+                TerminalCommit::cancelled(queued.request.id, queue_ms),
+            )));
+        }
         let (stdout, stderr) = match capture::open_stdio(paths).await {
             Ok(streams) => streams,
             Err(error) => {
@@ -63,23 +319,18 @@ impl InvocationService {
                     &format!("could not create Bazel evidence files: {error}"),
                     1_000,
                 );
-                let summary = bazel_mcp_types::InvocationSummary {
+                let summary = InvocationSummary {
                     success: false,
                     headline: format!("Could not prepare Bazel invocation: {message}"),
                     truncated: true,
                     ..Default::default()
                 };
-                return self
-                    .transition_invocation(
-                        queued.request.id,
-                        InvocationState::Failed,
-                        Some(Termination::SpawnFailure {
-                            message: message.clone(),
-                        }),
-                        Some(summary),
-                    )
-                    .await
-                    .map_err(Into::into);
+                return Ok(StartExecution::Terminal(Box::new(TerminalCommit::failure(
+                    queued.request.id,
+                    Termination::SpawnFailure { message },
+                    summary,
+                    queue_ms,
+                ))));
             }
         };
         let native_output_base_wait = NativeOutputBaseWaitObserver::start(
@@ -136,14 +387,11 @@ impl InvocationService {
             );
         }
         if cancellation.is_cancelled() {
-            return self.finish_cancelled(queued.request.id).await;
+            return Ok(StartExecution::Terminal(Box::new(
+                TerminalCommit::cancelled(queued.request.id, queue_ms),
+            )));
         }
-        let extension_limits = (!self.reducers.is_empty()).then_some({
-            (
-                self.config.starlark_reducers.limits.max_events,
-                self.config.starlark_reducers.limits.max_input_bytes,
-            )
-        });
+        let extension_limits = plan.extension_limits;
         let bes_bep = if queued.request.command.class() == CommandClass::BuildLike {
             match &self.bes {
                 Some(server) => Some(capture::LiveBepCapture::Bes(capture::BesBepCapture::start(
@@ -230,20 +478,17 @@ impl InvocationService {
             Ok(child) => child,
             Err(error) => {
                 let message = self.redactor.redact_bounded(&error.to_string(), 1_000);
-                let summary = bazel_mcp_types::InvocationSummary {
+                let summary = InvocationSummary {
                     success: false,
                     headline: format!("Could not start Bazel: {message}"),
                     ..Default::default()
                 };
-                return self
-                    .transition_invocation(
-                        queued.request.id,
-                        InvocationState::Failed,
-                        Some(Termination::SpawnFailure { message }),
-                        Some(summary),
-                    )
-                    .await
-                    .map_err(Into::into);
+                return Ok(StartExecution::Terminal(Box::new(TerminalCommit::failure(
+                    queued.request.id,
+                    Termination::SpawnFailure { message },
+                    summary,
+                    queue_ms,
+                ))));
             }
         };
         #[cfg(unix)]
@@ -256,7 +501,7 @@ impl InvocationService {
                 extension_limits,
             ))
         });
-        let mut process_group = ProcessGroupGuard::for_child(&child);
+        let process_group = ProcessGroupGuard::for_child(&child);
         if let Err(error) = self
             .transition_invocation(queued.request.id, InvocationState::Running, None, None)
             .await
@@ -277,35 +522,18 @@ impl InvocationService {
                 error = %message,
                 "could not record running Bazel invocation"
             );
-            if self
-                .store
-                .get_invocation_header(queued.request.id)
-                .await
-                .is_ok_and(|record| !record.state.is_terminal())
-            {
-                let summary = bazel_mcp_types::InvocationSummary {
+            return Ok(StartExecution::Terminal(Box::new(TerminalCommit::failure(
+                queued.request.id,
+                Termination::Interrupted,
+                InvocationSummary {
                     success: false,
                     headline: format!("Could not record Bazel execution state: {message}"),
                     truncated: true,
                     inspect_hint: Some(InspectHint::Log),
                     ..Default::default()
-                };
-                let _ = self
-                    .transition_invocation(
-                        queued.request.id,
-                        InvocationState::Failed,
-                        Some(Termination::Interrupted),
-                        Some(summary),
-                    )
-                    .await;
-            }
-            if let Ok(record) = self.store.get_invocation_header(queued.request.id).await
-                && record.state.is_terminal()
-                && record.summary.is_some()
-            {
-                return Ok(record.into_record());
-            }
-            return Err(error.into());
+                },
+                queue_ms,
+            ))));
         }
         #[cfg(unix)]
         let incremental_bep = fifo_bep.or(bes_bep).or_else(|| {
@@ -329,14 +557,30 @@ impl InvocationService {
                     ))
                 })
         });
-        let started = Instant::now();
-        let timeout = queued
-            .request
-            .timeout_ms
-            .map(Duration::from_millis)
-            .unwrap_or(self.config.default_timeout)
-            .max(Duration::from_secs(1))
-            .min(self.config.maximum_timeout);
+        Ok(StartExecution::Running(Box::new(RunningInvocation {
+            plan,
+            child,
+            process_group,
+            native_output_base_wait,
+            live_bep: incremental_bep,
+            started: Instant::now(),
+        })))
+    }
+
+    async fn wait_for_exit(
+        &self,
+        running: RunningInvocation,
+    ) -> Result<ExitedInvocation, RunnerError> {
+        let RunningInvocation {
+            plan,
+            mut child,
+            mut process_group,
+            native_output_base_wait,
+            live_bep,
+            started,
+        } = running;
+        let cancellation = plan.cancellation.clone();
+        let timeout = plan.timeout;
         let timeout_sleep = tokio::time::sleep(timeout);
         tokio::pin!(timeout_sleep);
         let (status, termination, state) = tokio::select! {
@@ -360,292 +604,369 @@ impl InvocationService {
         };
         process_group.disarm();
         native_output_base_wait.finish().await;
-        let output_base_wait_snapshot = output_base_wait.snapshot();
         let bazel_wall_ms = duration_millis(started.elapsed());
-        let postprocess: Result<InvocationRecord, RunnerError> = async {
-            let reduction_started = Instant::now();
-            let incremental_reduction = match incremental_bep {
-                Some(capture) => {
-                    let reduction = capture.finish(BES_COMPLETION_GRACE).await?;
-                    tracing::debug!(
-                        invocation_id = %queued.request.id,
-                        source = ?reduction.source,
-                        finalize_ms = reduction.finalize_ms,
-                        events = reduction.outcome.event_count,
-                        bytes = reduction.outcome.decoded_bytes,
-                        "completed incremental BEP reduction"
-                    );
-                    Some(reduction)
-                }
-                None => None,
-            };
-            let (query_row_count, query_sample) =
-                if queued.request.command.class() == CommandClass::Query {
-                    let query_row_count = self.store.count_query_rows(queued.request.id).await?;
-                    let redactor = self.redactor.clone();
-                    let page = self
-                        .store
-                        .page_query_rows_mapped_into(
-                            queued.request.id,
-                            None,
-                            PageRequest {
-                                scan_limit: 3,
-                                ..PageRequest::new(None, 3)
-                            },
-                            move |value, output| {
-                                redactor.redact_bounded_into(value, 4 * 1024, output);
-                            },
-                        )
-                        .await?;
-                    (query_row_count, page.items)
-                } else {
-                    (0, Vec::new())
-                };
-            let (bep, bep_outcome) = match incremental_reduction {
-                Some(reduction) => (reduction.accumulator, reduction.outcome),
-                None => capture::reduce_bep(paths.bep.clone(), extension_limits).await?,
-            };
-            if let Some(error) = &bep_outcome.terminal_error {
-                tracing::warn!(invocation_id = %queued.request.id, %error, "partially decoded BEP");
+        Ok(ExitedInvocation {
+            output_base_lock_wait_ms: plan.output_base_wait.snapshot().elapsed_ms,
+            plan,
+            status,
+            termination,
+            state,
+            live_bep,
+            bazel_wall_ms,
+        })
+    }
+
+    async fn capture_evidence(
+        &self,
+        mut exited: ExitedInvocation,
+    ) -> Result<CapturedEvidence, RunnerError> {
+        let queued = &exited.plan;
+        let paths = &exited.plan.paths;
+        let status = &exited.status;
+        let reduction_started = Instant::now();
+        let incremental_reduction = match exited.live_bep.take() {
+            Some(capture) => {
+                let reduction = capture.finish(BES_COMPLETION_GRACE).await?;
+                tracing::debug!(
+                    invocation_id = %exited.plan.request.id,
+                    source = ?reduction.source,
+                    finalize_ms = reduction.finalize_ms,
+                    events = reduction.outcome.event_count,
+                    bytes = reduction.outcome.decoded_bytes,
+                    "completed incremental BEP reduction"
+                );
+                Some(reduction)
             }
-            // Complete structured evidence needs only a small diagnostic tail;
-            // partial or missing BEP retains a larger bounded fallback.
-            let log_limit = if bep_outcome.event_count > 0 && bep_outcome.terminal_error.is_none() {
-                COMPLETE_BEP_LOG_LIMIT
+            None => None,
+        };
+        let (query_row_count, query_sample) =
+            if queued.request.command.class() == CommandClass::Query {
+                let query_row_count = self.store.count_query_rows(queued.request.id).await?;
+                let redactor = self.redactor.clone();
+                let page = self
+                    .store
+                    .page_query_rows_mapped_into(
+                        queued.request.id,
+                        None,
+                        PageRequest {
+                            scan_limit: 3,
+                            ..PageRequest::new(None, 3)
+                        },
+                        move |value, output| {
+                            redactor.redact_bounded_into(value, 4 * 1024, output);
+                        },
+                    )
+                    .await?;
+                (query_row_count, page.items)
             } else {
-                FALLBACK_LOG_LIMIT
+                (0, Vec::new())
             };
-            let stdout = capture::read_bounded_tail(&paths.stdout, log_limit).await?;
-            let stderr = capture::read_bounded_tail(&paths.stderr, log_limit).await?;
-            let exit_code = status.as_ref().and_then(ExitStatus::code);
-            let failed = exit_code != Some(0);
-            if should_persist_failure_evidence(&queued.request.command, failed) {
-                self.persist_failure_evidence(
-                    paths,
-                    &queued.request.workspace,
-                    &queued.request.command,
-                    failed,
-                    &stdout,
-                    &stderr,
-                )
-                .await?;
-            }
-            let reduced = catch_unwind(AssertUnwindSafe(|| {
-                bep.finish(
-                    &stdout,
-                    &stderr,
-                    exit_code,
-                    bazel_wall_ms,
-                    // Enrichment can add higher-value failed-test evidence.
-                    // Apply the public result budget only after that evidence
-                    // is present so ranking and aggregation precede limits.
-                    Budget {
-                        max_bytes: usize::MAX,
-                        max_items: usize::MAX,
-                    },
-                )
-            }));
-            let StreamReductionOutput {
-                mut summary,
-                mut artifacts,
-                canonical_arguments,
-                reducer_events,
-                reducer_input_truncated,
-            } = reduced.unwrap_or_else(|_| {
-                tracing::warn!(
-                    invocation_id = %queued.request.id,
-                    "streaming BEP reducer panicked; using bounded fallback summary"
-                );
-                StreamReductionOutput {
-                    summary: fallback_summary(exit_code, bazel_wall_ms, &stderr, &stdout),
-                    artifacts: Vec::new(),
-                    canonical_arguments: None,
-                    reducer_events: Vec::new(),
-                    reducer_input_truncated: false,
-                }
-            });
-            let canonical_arguments = canonical_arguments.map(|mut arguments| {
-                let workspace = queued.request.workspace.to_string_lossy();
-                for argument in &mut arguments {
-                    *argument = self.redactor.redact_bounded(
-                        &argument.replace(workspace.as_ref(), "<workspace>"),
-                        64 * 1024,
-                    );
-                }
-                arguments
-            });
-            for artifact in &mut artifacts {
-                artifact.name = self.redactor.redact_bounded(&artifact.name, 1_000);
-                artifact.uri = self.redactor.redact_bounded(&artifact.uri, 1_000);
-            }
-            if queued.request.command.class() == CommandClass::Query && exit_code == Some(0) {
-                summary.headline = format!("Bazel query returned {query_row_count} rows");
-                summary.inspect_hint =
-                    (query_row_count > 0).then_some(InspectHint::QueryResults);
-                summary.query_result_count = Some(query_row_count);
-                summary.query_sample = query_sample;
-            } else if matches!(
-                queued.request.command.class(),
-                CommandClass::Informational | CommandClass::Unknown
-            ) && exit_code == Some(0)
-            {
-                let text = if stdout.is_empty() { &stderr } else { &stdout };
-                let excerpt = normalize_terminal_text(text);
-                if !excerpt.is_empty() {
-                    summary.headline = bounded_text(&excerpt, 1_000);
-                    if excerpt.len() > 1_000 {
-                        summary.truncated = true;
-                        summary.inspect_hint = Some(InspectHint::Log);
-                    }
-                }
-            }
-            self.enrich_tests(paths, &queued.request.workspace, &mut summary, &artifacts)
-                .await;
-            if queued.request.command == BazelCommand::Coverage {
-                summary.coverage = self
-                    .load_coverage(&queued.request.workspace, &artifacts)
-                    .await;
-            }
-            let mut custom_headline = None;
-            let mut custom_notices = Vec::new();
-            if !self.reducers.is_empty() {
-                let context = self.reducer_context(
-                    &queued.request,
-                    exit_code,
-                    bazel_wall_ms,
-                    &stdout,
-                    &stderr,
-                    reducer_events,
-                    reducer_input_truncated,
-                    &summary,
-                );
-                let reducers = self.reducers.clone();
-                let (next_summary, report) = task::spawn_blocking(move || {
-                    let mut next_summary = summary;
-                    let report = reducers.apply(&context, &mut next_summary);
-                    (next_summary, report)
-                })
-                .await?;
-                summary = next_summary;
-                if report.headline_applied {
-                    custom_headline = Some(summary.headline.clone());
-                }
-                for name in report.applied {
-                    let name = self.redactor.redact_bounded(&name, 128);
-                    tracing::debug!(invocation_id = %queued.request.id, reducer = %name, "applied custom reducer");
-                }
-                for failure in report.failures {
-                    let name = self.redactor.redact_bounded(&failure.name, 128);
-                    let error = self.redactor.redact_bounded(&failure.error, 2 * 1024);
-                    tracing::warn!(
-                        invocation_id = %queued.request.id,
-                        reducer = %name,
-                        %error,
-                        "custom reducer failed; native result retained"
-                    );
-                    custom_notices.push(custom_reducer_notice(format!(
-                        "Custom reducer {:?} failed; native reducer output was retained",
-                        name
-                    )));
-                }
-                for collision in report.override_collisions {
-                    let collision = self.redactor.redact_bounded(&collision, 512);
-                    tracing::warn!(invocation_id = %queued.request.id, %collision, "custom reducer override collision");
-                    custom_notices.push(custom_reducer_notice(collision));
-                }
-            }
-            finalize_with_custom_notices(&mut summary, custom_notices);
-            if let Some(headline) = custom_headline {
-                summary.headline = headline;
-            }
-            if !summary.success && summary.inspect_hint.is_none() {
-                let hint = if summary
-                    .tests
-                    .iter()
-                    .any(|test| test.status != TestStatus::Passed && test.test_log_available)
-                {
-                    InspectHint::TestLog
-                } else {
-                    InspectHint::Log
-                };
-                summary.inspect_hint = Some(hint);
-            }
-            self.sanitize_summary(queued.request.id, &queued.request.workspace, &mut summary);
-            let metrics = InvocationMetrics {
-                raw_output_bytes: capture::file_size(&paths.stdout)
-                    .await
-                    .saturating_add(capture::file_size(&paths.stderr).await),
-                bep_bytes: capture::file_size(&paths.bep).await,
-                bep_events: u64::try_from(bep_outcome.event_count).unwrap_or(u64::MAX),
-                queue_ms,
-                output_base_lock_wait_ms: output_base_wait_snapshot.elapsed_ms,
+        let (bep, bep_outcome) = match incremental_reduction {
+            Some(reduction) => (reduction.accumulator, reduction.outcome),
+            None => capture::reduce_bep(paths.bep.clone(), exited.plan.extension_limits).await?,
+        };
+        if let Some(error) = &bep_outcome.terminal_error {
+            tracing::warn!(invocation_id = %queued.request.id, %error, "partially decoded BEP");
+        }
+        // Complete structured evidence needs only a small diagnostic tail;
+        // partial or missing BEP retains a larger bounded fallback.
+        let log_limit = if bep_outcome.event_count > 0 && bep_outcome.terminal_error.is_none() {
+            COMPLETE_BEP_LOG_LIMIT
+        } else {
+            FALLBACK_LOG_LIMIT
+        };
+        let stdout = capture::read_bounded_tail(&paths.stdout, log_limit).await?;
+        let stderr = capture::read_bounded_tail(&paths.stderr, log_limit).await?;
+        let exit_code = status.as_ref().and_then(ExitStatus::code);
+        let failed = exit_code != Some(0);
+        if should_persist_failure_evidence(&queued.request.command, failed) {
+            self.persist_failure_evidence(
+                paths,
+                &queued.request.workspace,
+                &queued.request.command,
+                failed,
+                &stdout,
+                &stderr,
+            )
+            .await?;
+        }
+        Ok(CapturedEvidence {
+            exited,
+            bep,
+            bep_outcome,
+            stdout,
+            stderr,
+            query_row_count,
+            query_sample,
+            reduction_started,
+        })
+    }
+
+    async fn reduce_evidence(
+        &self,
+        captured: CapturedEvidence,
+    ) -> Result<ReducedOutcome, RunnerError> {
+        let CapturedEvidence {
+            exited,
+            bep,
+            bep_outcome,
+            stdout,
+            stderr,
+            query_row_count,
+            query_sample,
+            reduction_started,
+        } = captured;
+        let queued = &exited.plan;
+        let paths = &exited.plan.paths;
+        let exit_code = exited.status.as_ref().and_then(ExitStatus::code);
+        let bazel_wall_ms = exited.bazel_wall_ms;
+        let reduced = catch_unwind(AssertUnwindSafe(|| {
+            bep.finish(
+                &stdout,
+                &stderr,
+                exit_code,
                 bazel_wall_ms,
-                reduction_ms: duration_millis(reduction_started.elapsed()),
-                ..Default::default()
-            };
-            self.finish_invocation(
-                queued.request.id,
-                InvocationCompletion {
-                    state,
-                    termination: termination.clone(),
-                    summary,
-                    metrics,
-                    canonical_arguments,
-                    artifacts,
+                // Enrichment can add higher-value failed-test evidence.
+                // Apply the public result budget only after that evidence
+                // is present so ranking and aggregation precede limits.
+                Budget {
+                    max_bytes: usize::MAX,
+                    max_items: usize::MAX,
                 },
             )
-            .await
-            .map_err(Into::into)
-        }
-        .await;
-
-        if let Err(error) = &postprocess {
-            let workspace = queued.request.workspace.to_string_lossy();
-            let message = self.redactor.redact_bounded(
-                &error.to_string().replace(workspace.as_ref(), "<workspace>"),
-                1_000,
-            );
+        }));
+        let StreamReductionOutput {
+            mut summary,
+            mut artifacts,
+            canonical_arguments,
+            reducer_events,
+            reducer_input_truncated,
+        } = reduced.unwrap_or_else(|_| {
             tracing::warn!(
                 invocation_id = %queued.request.id,
-                error = %message,
-                "Bazel result post-processing failed"
+                "streaming BEP reducer panicked; using bounded fallback summary"
             );
-            if self
-                .store
-                .get_invocation_header(queued.request.id)
-                .await
-                .is_ok_and(|record| !record.state.is_terminal())
+            StreamReductionOutput {
+                summary: fallback_summary(exit_code, bazel_wall_ms, &stderr, &stdout),
+                artifacts: Vec::new(),
+                canonical_arguments: None,
+                reducer_events: Vec::new(),
+                reducer_input_truncated: false,
+            }
+        });
+        let canonical_arguments = canonical_arguments.map(|mut arguments| {
+            let workspace = queued.request.workspace.to_string_lossy();
+            for argument in &mut arguments {
+                *argument = self.redactor.redact_bounded(
+                    &argument.replace(workspace.as_ref(), "<workspace>"),
+                    64 * 1024,
+                );
+            }
+            arguments
+        });
+        for artifact in &mut artifacts {
+            artifact.name = self.redactor.redact_bounded(&artifact.name, 1_000);
+            artifact.uri = self.redactor.redact_bounded(&artifact.uri, 1_000);
+        }
+        if queued.request.command.class() == CommandClass::Query && exit_code == Some(0) {
+            summary.headline = format!("Bazel query returned {query_row_count} rows");
+            summary.inspect_hint = (query_row_count > 0).then_some(InspectHint::QueryResults);
+            summary.query_result_count = Some(query_row_count);
+            summary.query_sample = query_sample;
+        } else if matches!(
+            queued.request.command.class(),
+            CommandClass::Informational | CommandClass::Unknown
+        ) && exit_code == Some(0)
+        {
+            let text = if stdout.is_empty() { &stderr } else { &stdout };
+            let excerpt = normalize_terminal_text(text);
+            if !excerpt.is_empty() {
+                summary.headline = bounded_text(&excerpt, 1_000);
+                if excerpt.len() > 1_000 {
+                    summary.truncated = true;
+                    summary.inspect_hint = Some(InspectHint::Log);
+                }
+            }
+        }
+        self.enrich_tests(paths, &queued.request.workspace, &mut summary, &artifacts)
+            .await;
+        if queued.request.command == BazelCommand::Coverage {
+            summary.coverage = self
+                .load_coverage(&queued.request.workspace, &artifacts)
+                .await;
+        }
+        let mut custom_headline = None;
+        let mut custom_notices = Vec::new();
+        if !self.reducers.is_empty() {
+            let context = self.reducer_context(
+                &queued.request,
+                exit_code,
+                bazel_wall_ms,
+                &stdout,
+                &stderr,
+                reducer_events,
+                reducer_input_truncated,
+                &summary,
+            );
+            let reducers = self.reducers.clone();
+            let (next_summary, report) = task::spawn_blocking(move || {
+                let mut next_summary = summary;
+                let report = reducers.apply(&context, &mut next_summary);
+                (next_summary, report)
+            })
+            .await?;
+            summary = next_summary;
+            if report.headline_applied {
+                custom_headline = Some(summary.headline.clone());
+            }
+            for name in report.applied {
+                let name = self.redactor.redact_bounded(&name, 128);
+                tracing::debug!(invocation_id = %queued.request.id, reducer = %name, "applied custom reducer");
+            }
+            for failure in report.failures {
+                let name = self.redactor.redact_bounded(&failure.name, 128);
+                let error = self.redactor.redact_bounded(&failure.error, 2 * 1024);
+                tracing::warn!(
+                    invocation_id = %queued.request.id,
+                    reducer = %name,
+                    %error,
+                    "custom reducer failed; native result retained"
+                );
+                custom_notices.push(custom_reducer_notice(format!(
+                    "Custom reducer {:?} failed; native reducer output was retained",
+                    name
+                )));
+            }
+            for collision in report.override_collisions {
+                let collision = self.redactor.redact_bounded(&collision, 512);
+                tracing::warn!(invocation_id = %queued.request.id, %collision, "custom reducer override collision");
+                custom_notices.push(custom_reducer_notice(collision));
+            }
+        }
+        finalize_with_custom_notices(&mut summary, custom_notices);
+        if let Some(headline) = custom_headline {
+            summary.headline = headline;
+        }
+        if !summary.success && summary.inspect_hint.is_none() {
+            let hint = if summary
+                .tests
+                .iter()
+                .any(|test| test.status != TestStatus::Passed && test.test_log_available)
             {
-                let terminal_state = if state == InvocationState::Succeeded {
-                    InvocationState::Failed
-                } else {
-                    state
-                };
-                let summary = bazel_mcp_types::InvocationSummary {
+                InspectHint::TestLog
+            } else {
+                InspectHint::Log
+            };
+            summary.inspect_hint = Some(hint);
+        }
+        self.sanitize_summary(queued.request.id, &queued.request.workspace, &mut summary);
+        let metrics = InvocationMetrics {
+            raw_output_bytes: capture::file_size(&paths.stdout)
+                .await
+                .saturating_add(capture::file_size(&paths.stderr).await),
+            bep_bytes: capture::file_size(&paths.bep).await,
+            bep_events: u64::try_from(bep_outcome.event_count).unwrap_or(u64::MAX),
+            queue_ms: exited.plan.queue_ms,
+            output_base_lock_wait_ms: exited.output_base_lock_wait_ms,
+            bazel_wall_ms,
+            reduction_ms: duration_millis(reduction_started.elapsed()),
+            ..Default::default()
+        };
+        Ok(ReducedOutcome {
+            id: queued.request.id,
+            completion: InvocationCompletion {
+                state: exited.state,
+                termination: exited.termination,
+                summary,
+                metrics,
+                canonical_arguments,
+                artifacts,
+            },
+        })
+    }
+
+    async fn commit_terminal(
+        &self,
+        commit: TerminalCommit,
+    ) -> Result<InvocationRecord, RunnerError> {
+        let fallback = commit.recover_without_evidence.then(|| {
+            (
+                commit.completion.state,
+                commit.completion.termination.clone(),
+                commit.completion.summary.clone(),
+            )
+        });
+        match self.finish_invocation(commit.id, commit.completion).await {
+            Ok(record) => Ok(record),
+            Err(error) => {
+                if let Ok(record) = self.store.get_invocation_header(commit.id).await
+                    && record.state.is_terminal()
+                    && record.summary.is_some()
+                {
+                    return Ok(record.into_record());
+                }
+                if matches!(&error, StoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+                    && let Some((state, termination, summary)) = fallback
+                {
+                    return self
+                        .transition_invocation(commit.id, state, Some(termination), Some(summary))
+                        .await
+                        .map_err(Into::into);
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn recover_terminal_failure(
+        &self,
+        context: TerminalContext,
+        error: RunnerError,
+    ) -> Result<InvocationRecord, RunnerError> {
+        let workspace = context.workspace.to_string_lossy();
+        let message = self.redactor.redact_bounded(
+            &error.to_string().replace(workspace.as_ref(), "<workspace>"),
+            1_000,
+        );
+        tracing::warn!(
+            invocation_id = %context.id,
+            error = %message,
+            "Bazel result post-processing failed"
+        );
+        if let Ok(record) = self.store.get_invocation_header(context.id).await
+            && record.state.is_terminal()
+            && record.summary.is_some()
+        {
+            return Ok(record.into_record());
+        }
+        let terminal_state = if context.state == InvocationState::Succeeded {
+            InvocationState::Failed
+        } else {
+            context.state
+        };
+        let commit = TerminalCommit {
+            id: context.id,
+            completion: InvocationCompletion {
+                state: terminal_state,
+                termination: context.termination,
+                summary: InvocationSummary {
                     success: false,
                     headline: format!("Could not finish processing Bazel results: {message}"),
-                    elapsed_ms: bazel_wall_ms,
+                    elapsed_ms: context.elapsed_ms,
                     truncated: true,
                     inspect_hint: Some(InspectHint::Log),
                     ..Default::default()
-                };
-                let _ = self
-                    .transition_invocation(
-                        queued.request.id,
-                        terminal_state,
-                        Some(termination),
-                        Some(summary),
-                    )
-                    .await;
-            }
-            if let Ok(record) = self.store.get_invocation_header(queued.request.id).await
-                && record.state.is_terminal()
-                && record.summary.is_some()
-            {
-                return Ok(record.into_record());
-            }
+                },
+                metrics: InvocationMetrics::default(),
+                canonical_arguments: None,
+                artifacts: Vec::new(),
+            },
+            recover_without_evidence: true,
+        };
+        match self.commit_terminal(commit).await {
+            Ok(record) => Ok(record),
+            Err(_) => Err(error),
         }
-        postprocess
     }
 
     fn sanitize_summary(
