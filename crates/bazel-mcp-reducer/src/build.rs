@@ -1214,6 +1214,7 @@ fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
 
         let mut frame_end = location_index;
         let mut source_line = None;
+        let mut first_source_line = None;
         let mut caret_line = None;
         for (index, frame_line) in lines
             .iter()
@@ -1228,8 +1229,12 @@ fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
             }
             frame_end = index;
             output.consumed_lines.insert(frame_line.trim().to_owned());
-            if source_line.is_none() && is_swc_source_line(frame_line) {
-                source_line = Some(bounded_text(frame_line.trim(), 256));
+            if let Some(line_number) = swc_source_line_number(frame_line) {
+                let bounded = bounded_text(frame_line.trim(), 256);
+                first_source_line.get_or_insert_with(|| bounded.clone());
+                if location.line == Some(line_number) {
+                    source_line = Some(bounded);
+                }
             } else if caret_line.is_none() && is_swc_caret_line(frame_line) {
                 caret_line = Some(bounded_text(frame_line.trim(), 256));
             }
@@ -1256,7 +1261,7 @@ fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
             message.push_str("\nSWC context: ");
             message.push_str(&bounded_text(&context, 512));
         }
-        if let Some(source_line) = source_line {
+        if let Some(source_line) = source_line.or(first_source_line) {
             message.push('\n');
             message.push_str(&source_line);
         }
@@ -1322,13 +1327,13 @@ fn parse_swc_source_frame_location(line: &str) -> Option<DiagnosticLocation> {
     })
 }
 
-fn is_swc_source_line(line: &str) -> bool {
+fn swc_source_line_number(line: &str) -> Option<u32> {
     let line = line.trim();
-    let Some((line_number, _)) = line.split_once('|').or_else(|| line.split_once('│')) else {
-        return false;
-    };
+    let (line_number, _) = line.split_once('|').or_else(|| line.split_once('│'))?;
     let line_number = line_number.trim();
-    !line_number.is_empty() && line_number.bytes().all(|byte| byte.is_ascii_digit())
+    (!line_number.is_empty() && line_number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| line_number.parse::<u32>().ok())
+        .flatten()
 }
 
 fn is_swc_caret_line(line: &str) -> bool {
@@ -2944,6 +2949,33 @@ mcp/js_fixture/syntax_failure.ts(9,1): error TS1005: '}' expected.
         assert_eq!(parsed.diagnostics.len(), 1);
         assert!(parsed.diagnostics[0].message.len() < 600);
         assert!(parsed.diagnostics[0].message.contains('…'));
+    }
+
+    #[test]
+    fn selects_the_located_line_from_multiline_swc_source_frames() {
+        let input = r#"  x Expression expected
+   ,-[cases/swc_syntax_failure.ts:2:1]
+ 1 | export const invoice = {
+ 2 |   total: ,
+   :          ^
+ 3 | };
+   `----
+Caused by:
+    0: failed to process js file
+    1: Syntax Error"#;
+        let parsed = parse_swc_diagnostics(input);
+
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(parsed.diagnostics[0].message.contains("2 |   total: ,"));
+        assert!(!parsed.diagnostics[0].message.contains("1 | export"));
+        assert_eq!(
+            parsed.diagnostics[0].location,
+            Some(DiagnosticLocation {
+                path: "cases/swc_syntax_failure.ts".into(),
+                line: Some(2),
+                column: Some(1),
+            })
+        );
     }
 
     #[test]
