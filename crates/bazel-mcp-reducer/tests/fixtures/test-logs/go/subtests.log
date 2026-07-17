@@ -1,0 +1,6 @@
+=== RUN   TestCache
+=== RUN   TestCache/miss
+    cache_test.go:42: cache lookup returned an empty entry
+--- FAIL: TestCache (0.00s)
+    --- FAIL: TestCache/miss (0.00s)
+FAIL

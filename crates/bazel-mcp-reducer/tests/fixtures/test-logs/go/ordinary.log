@@ -1,0 +1,4 @@
+=== RUN   TestInvoiceTotal
+    invoice_test.go:18: got 42; want 41
+--- FAIL: TestInvoiceTotal (0.00s)
+FAIL

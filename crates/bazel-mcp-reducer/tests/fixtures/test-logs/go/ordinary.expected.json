@@ -1,0 +1,11 @@
+[
+  {
+    "name": "TestInvoiceTotal",
+    "message": "Go test TestInvoiceTotal failed at invoice_test.go:18: got 42; want 41",
+    "location": {
+      "path": "invoice_test.go",
+      "line": 18,
+      "column": null
+    }
+  }
+]

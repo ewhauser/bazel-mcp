@@ -1,0 +1,11 @@
+[
+  {
+    "name": "TestWorkerPanic",
+    "message": "Go test TestWorkerPanic panicked at pkg/worker_test.go:57: queue closed",
+    "location": {
+      "path": "pkg/worker_test.go",
+      "line": 57,
+      "column": null
+    }
+  }
+]

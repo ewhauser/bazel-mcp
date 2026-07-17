@@ -1,0 +1,10 @@
+=== RUN   TestRetry
+    retry_test.go:9: got false; want true
+--- FAIL: TestRetry (0.00s)
+=== RUN   TestRetry
+    retry_test.go:9: got false; want true
+--- FAIL: TestRetry (0.00s)
+=== RUN   TestBackend
+    backend_test.go:11: fatal: service unavailable
+--- FAIL: TestBackend (0.00s)
+FAIL
