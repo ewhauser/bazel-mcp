@@ -66,6 +66,17 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { persist-credentials: false }
       - run: cargo check --workspace --all-targets --all-features
+  windows-release-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # PR CI validates native linking, archive layout, and startup. Tagged releases
+    # retain the fully optimized dist profile from Cargo.toml.
+    env:
+      CARGO_PROFILE_DIST_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_DIST_LTO: "off"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { persist-credentials: false }
       - name: Install dist
         shell: pwsh
         run: irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
