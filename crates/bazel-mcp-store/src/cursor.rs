@@ -36,6 +36,8 @@ pub(crate) struct FileCursor {
     context: [u8; CONTEXT_BYTES],
     pub offset: u64,
     pub ordinal: u64,
+    pub total_scanned: u64,
+    pub filtered_scanned: u64,
 }
 
 impl DeferredCursor {
@@ -135,25 +137,31 @@ impl FileCursor {
         filter: Option<&str>,
         offset: u64,
         ordinal: u64,
+        total_scanned: u64,
+        filtered_scanned: u64,
     ) -> Self {
         Self {
             context: cursor_context(&[scope, invocation_id, filter.unwrap_or_default()]),
             offset,
             ordinal,
+            total_scanned,
+            filtered_scanned,
         }
     }
 
     pub fn encode(&self) -> Result<String, StoreError> {
-        let mut bytes = Vec::with_capacity(34);
+        let mut bytes = Vec::with_capacity(50);
         bytes.extend_from_slice(&[VERSION, FILE_KIND]);
         bytes.extend_from_slice(&self.context);
         bytes.extend_from_slice(&self.offset.to_le_bytes());
         bytes.extend_from_slice(&self.ordinal.to_le_bytes());
+        bytes.extend_from_slice(&self.total_scanned.to_le_bytes());
+        bytes.extend_from_slice(&self.filtered_scanned.to_le_bytes());
         Ok(URL_SAFE_NO_PAD.encode(bytes))
     }
 
     pub fn decode(value: &str) -> Result<Self, StoreError> {
-        let bytes = decode_exact(value, 34, FILE_KIND)?;
+        let bytes = decode_exact(value, 50, FILE_KIND)?;
         let context = bytes[2..18]
             .try_into()
             .map_err(|_| StoreError::InvalidCursor)?;
@@ -167,10 +175,22 @@ impl FileCursor {
                 .try_into()
                 .map_err(|_| StoreError::InvalidCursor)?,
         );
+        let total_scanned = u64::from_le_bytes(
+            bytes[34..42]
+                .try_into()
+                .map_err(|_| StoreError::InvalidCursor)?,
+        );
+        let filtered_scanned = u64::from_le_bytes(
+            bytes[42..50]
+                .try_into()
+                .map_err(|_| StoreError::InvalidCursor)?,
+        );
         Ok(Self {
             context,
             offset,
             ordinal,
+            total_scanned,
+            filtered_scanned,
         })
     }
 
@@ -292,12 +312,14 @@ mod tests {
     #[test]
     fn fixed_binary_cursors_are_compact_and_context_bound() {
         let id = Uuid::now_v7().to_string();
-        let file = FileCursor::new("query_rows", &id, Some("needle"), 42, 7);
+        let file = FileCursor::new("query_rows", &id, Some("needle"), 42, 7, 8, 3);
         let encoded = file.encode().unwrap();
-        assert_eq!(encoded.len(), 46);
+        assert_eq!(encoded.len(), 67);
         let decoded = FileCursor::decode_for(&encoded, "query_rows", &id, Some("needle")).unwrap();
         assert_eq!(decoded.offset, 42);
         assert_eq!(decoded.ordinal, 7);
+        assert_eq!(decoded.total_scanned, 8);
+        assert_eq!(decoded.filtered_scanned, 3);
         assert!(FileCursor::decode_for(&encoded, "query_rows", &id, Some("other")).is_err());
         assert!(
             FileCursor::decode_for(

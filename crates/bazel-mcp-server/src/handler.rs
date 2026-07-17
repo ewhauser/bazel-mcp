@@ -1,10 +1,9 @@
-use std::{collections::BTreeMap, path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use bazel_mcp_runner::{InspectRequest, InspectView, InvocationService};
 use bazel_mcp_types::{
-    BazelCommand, DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic,
-    InvocationId, InvocationRecord, InvocationRequest, InvocationState, PageRequest, QueryRow,
-    ResultDisposition, TargetCounts, Termination, TestCounts,
+    BazelCommand, DeferredResultView, DeferredRetrieval, DeferredTerminalState, InvocationId,
+    InvocationRecord, InvocationRequest, InvocationState, PageRequest, ResultDisposition,
 };
 use rmcp::{
     ErrorData, RoleServer,
@@ -17,15 +16,21 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{McpExecutionPolicy, ResultEncoding};
-
-const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
-const IMMEDIATE_RESPONSE: &str = "io.modelcontextprotocol/model-immediate-response";
+use crate::{
+    McpExecutionPolicy, ResultEncoding,
+    protocol::{
+        IMMEDIATE_RESPONSE, LegacyTasksAdapter, ProtocolAdapter, ProtocolFamily, TASKS_EXTENSION,
+        TasksExtensionAdapter,
+    },
+    result::{EncodedResult, ExecutionResult, ResultEncoder, RunResultBuilder},
+    tasks::{TaskResultState, TaskSnapshot},
+};
 
 #[derive(Clone)]
 pub struct BazelMcpServer {
     runner: InvocationService,
-    result_encoding: ResultEncoding,
+    result_encoder: ResultEncoder,
+    run_result_builder: RunResultBuilder,
     progress_initial_delay: std::time::Duration,
     progress_interval: std::time::Duration,
     execution_policy: McpExecutionPolicy,
@@ -88,32 +93,14 @@ pub struct CancelParams {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct RunResult<'a> {
-    invocation_id: String,
-    state: bazel_mcp_types::InvocationState,
-    command: &'a str,
-    exit_code: Option<i32>,
-    duration_ms: u64,
-    headline: &'a str,
-    targets: TargetCounts,
-    tests: TestCounts,
-    diagnostics: &'a [Diagnostic],
-    query_result_count: Option<u64>,
-    query_sample: Option<&'a [QueryRow]>,
-    truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inspect_hint: Option<&'a str>,
-    available_views: &'static [&'static str],
-    more_available: bool,
-}
-
 impl BazelMcpServer {
     #[must_use]
     pub fn new(runner: InvocationService, result_encoding: ResultEncoding) -> Self {
+        let result_encoder = ResultEncoder::new(result_encoding);
         Self {
             runner,
-            result_encoding,
+            result_encoder: result_encoder.clone(),
+            run_result_builder: RunResultBuilder::new(result_encoder),
             progress_initial_delay: std::time::Duration::from_secs(30),
             progress_interval: std::time::Duration::from_secs(60),
             execution_policy: McpExecutionPolicy::Auto,
@@ -239,19 +226,8 @@ impl BazelMcpServer {
         &self,
         Parameters(params): Parameters<InspectParams>,
     ) -> Result<CallToolResult, String> {
-        let view = match params.view.as_str() {
-            "summary" => InspectView::Summary,
-            "metrics" => InspectView::Metrics,
-            "diagnostics" => InspectView::Diagnostics,
-            "tests" => InspectView::Tests,
-            "log" => InspectView::Log,
-            "test_log" => InspectView::TestLog,
-            "coverage" => InspectView::Coverage,
-            "artifacts" => InspectView::Artifacts,
-            "query_results" => InspectView::QueryResults,
-            "invocations" => InspectView::Invocations,
-            other => return Err(format!("unsupported inspection view: {other}")),
-        };
+        let view = InspectView::parse(&params.view)
+            .ok_or_else(|| format!("unsupported inspection view: {}", params.view))?;
         let id = if view == InspectView::Invocations {
             if params.invocation_id.is_some() {
                 return Err("invocation_id is not supported for the invocations view".into());
@@ -287,55 +263,36 @@ impl BazelMcpServer {
             return Err("command is supported only for the invocations view".into());
         }
         let visible_budget = inspect_visible_budget(params.max_bytes);
-        let mut representation_budget = self.single_representation_budget(visible_budget);
-        loop {
-            let result = self
+        let item_limit = params.limit.unwrap_or(20).clamp(1, 100);
+        let result = self
+            .runner
+            .inspect(InspectRequest {
+                invocation_id: id,
+                workspace,
+                state,
+                command,
+                view,
+                cursor: params.cursor,
+                filter: params.filter,
+                item_limit,
+                scan_limit: item_limit.saturating_mul(20).clamp(1_000, 10_000),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let encoded = self.result_encoder.encode_inspect(result, visible_budget)?;
+        if let Some(id) = id
+            && let Err(error) = self
                 .runner
-                .inspect(InspectRequest {
-                    invocation_id: id,
-                    workspace: workspace.clone(),
-                    state,
-                    command: command.clone(),
-                    view,
-                    cursor: params.cursor.clone(),
-                    filter: params.filter.clone(),
-                    limit: params.limit.unwrap_or(20).clamp(1, 100),
-                    max_bytes: representation_budget,
-                })
+                .record_model_visible_result(id, encoded.visible_bytes, true)
                 .await
-                .map_err(|error| error.to_string())?;
-            let value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-            let (encoded, bytes) = self.encode_with_size(value)?;
-            if bytes > visible_budget {
-                let proportional_budget = representation_budget
-                    .saturating_mul(visible_budget)
-                    .checked_div(bytes)
-                    .unwrap_or_default();
-                let headroom = (proportional_budget / 20).max(1);
-                representation_budget = proportional_budget
-                    .saturating_sub(headroom)
-                    .min(representation_budget.saturating_sub(1));
-                if representation_budget == 0 {
-                    return Err(
-                        "bounded bazel.inspect response could not fit its hard byte limit".into(),
-                    );
-                }
-                continue;
-            }
-            if let Some(id) = id
-                && let Err(error) = self
-                    .runner
-                    .record_model_visible_result(id, bytes, true)
-                    .await
-            {
-                tracing::warn!(
-                    invocation_id = %id,
-                    %error,
-                    "could not persist model-visible inspection metrics"
-                );
-            }
-            return Ok(encoded);
+        {
+            tracing::warn!(
+                invocation_id = %id,
+                %error,
+                "could not persist model-visible inspection metrics"
+            );
         }
+        Ok(encoded.result)
     }
 
     #[tool(
@@ -352,7 +309,9 @@ impl BazelMcpServer {
             .cancel_with_reason(id, params.reason.as_deref())
             .await
             .map_err(|error| error.to_string())?;
-        self.encode(serde_json::to_value(result).map_err(|error| error.to_string())?)
+        self.result_encoder
+            .encode(&result)
+            .map(|encoded| encoded.result)
     }
 }
 
@@ -362,197 +321,54 @@ impl BazelMcpServer {
         record: &InvocationRecord,
         tool_error: bool,
     ) -> Result<CallToolResult, String> {
-        let exit_code = match &record.termination {
-            Some(Termination::Exit { code }) => Some(*code),
-            _ => None,
-        };
-        let summary = record
-            .summary
-            .as_ref()
-            .ok_or_else(|| "completed invocation has no summary".to_owned())?;
-        let mut diagnostic_count = summary.diagnostics.len();
-        let mut query_sample_count = summary.query_sample.len();
-        loop {
-            let result = RunResult {
-                invocation_id: record.request.id.to_string(),
-                state: record.state,
-                command: record.request.command.as_str(),
-                exit_code,
-                duration_ms: record.metrics.bazel_wall_ms,
-                headline: &summary.headline,
-                targets: summary.target_counts.clone(),
-                tests: summary.test_counts.clone(),
-                diagnostics: &summary.diagnostics[..diagnostic_count],
-                query_result_count: summary.query_result_count,
-                query_sample: (query_sample_count > 0)
-                    .then_some(&summary.query_sample[..query_sample_count]),
-                truncated: summary.truncated
-                    || diagnostic_count < summary.diagnostics.len()
-                    || query_sample_count < summary.query_sample.len(),
-                inspect_hint: summary.inspect_hint.as_deref(),
-                available_views: &[
-                    "summary",
-                    "metrics",
-                    "diagnostics",
-                    "tests",
-                    "test_log",
-                    "coverage",
-                    "artifacts",
-                    "query_results",
-                    "log",
-                ],
-                more_available: summary.truncated
-                    || diagnostic_count < summary.diagnostics.len()
-                    || query_sample_count < summary.query_sample.len()
-                    || !summary.targets.is_empty()
-                    || !summary.tests.is_empty()
-                    || summary.inspect_hint.is_some(),
-            };
-            let value = serde_json::to_value(&result).map_err(|error| error.to_string())?;
-            let limit = if summary.success { 2 * 1024 } else { 8 * 1024 };
-            let (mut encoded, bytes) = self.encode_with_size(value)?;
-            if bytes <= limit {
-                if let Err(error) = self
-                    .runner
-                    .record_model_visible_result(record.request.id, bytes, false)
-                    .await
-                {
-                    tracing::warn!(
-                        invocation_id = %record.request.id,
-                        %error,
-                        "could not persist model-visible response metrics"
-                    );
-                }
-                if tool_error {
-                    encoded.is_error = Some(true);
-                }
-                return Ok(encoded);
-            }
-            if query_sample_count > 0 {
-                query_sample_count -= 1;
-            } else if diagnostic_count > 0 {
-                diagnostic_count -= 1;
-            } else {
-                return Err("bounded bazel.run response could not fit its hard byte limit".into());
-            }
+        let EncodedResult {
+            result,
+            visible_bytes,
+        } = self
+            .run_result_builder
+            .build(ExecutionResult::new(record, tool_error))?;
+        if let Err(error) = self
+            .runner
+            .record_model_visible_result(record.request.id, visible_bytes, false)
+            .await
+        {
+            tracing::warn!(
+                invocation_id = %record.request.id,
+                %error,
+                "could not persist model-visible response metrics"
+            );
         }
-    }
-
-    fn single_representation_budget(&self, visible_budget: usize) -> usize {
-        match self.result_encoding {
-            ResultEncoding::Text | ResultEncoding::Toon | ResultEncoding::Structured => {
-                visible_budget
-            }
-            ResultEncoding::Both => visible_budget / 2,
-        }
+        Ok(result)
     }
 
     #[cfg(test)]
     fn model_visible_bytes(&self, value: &serde_json::Value) -> Result<usize, String> {
-        self.encode_with_size(value.clone()).map(|(_, bytes)| bytes)
+        self.result_encoder
+            .encode_value(value.clone())
+            .map(|encoded| encoded.visible_bytes)
     }
 
+    #[cfg(test)]
     fn encode(&self, value: serde_json::Value) -> Result<CallToolResult, String> {
-        self.encode_with_size(value).map(|(result, _)| result)
+        self.result_encoder
+            .encode_value(value)
+            .map(|encoded| encoded.result)
     }
 
-    fn encode_with_size(
-        &self,
-        value: serde_json::Value,
-    ) -> Result<(CallToolResult, usize), String> {
-        Ok(match self.result_encoding {
-            ResultEncoding::Text => {
-                let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-                let bytes = text.len();
-                (
-                    CallToolResult::success(vec![ContentBlock::text(text)]),
-                    bytes,
-                )
-            }
-            ResultEncoding::Toon => {
-                let text = Self::encode_toon(&value)?;
-                let bytes = text.len();
-                (
-                    CallToolResult::success(vec![ContentBlock::text(text)]),
-                    bytes,
-                )
-            }
-            ResultEncoding::Structured => {
-                let bytes = serde_json::to_vec(&value)
-                    .map_err(|error| error.to_string())?
-                    .len();
-                let mut result = CallToolResult::default();
-                result.structured_content = Some(value);
-                result.is_error = Some(false);
-                (result, bytes)
-            }
-            ResultEncoding::Both => {
-                let text = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-                let bytes = text.len().saturating_mul(2);
-                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-                result.structured_content = Some(value);
-                (result, bytes)
-            }
-        })
-    }
-
+    #[cfg(test)]
     fn encode_toon(value: &serde_json::Value) -> Result<String, String> {
         toon_format::encode_default(value).map_err(|error| format!("encode TOON result: {error}"))
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProtocolFamily {
-    Earlier,
-    LegacyTasks,
-    TasksExtension,
-}
-
-impl ProtocolFamily {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Earlier => "synchronous",
-            Self::LegacyTasks => "legacy_tasks",
-            Self::TasksExtension => "tasks_extension",
-        }
-    }
-}
-
 impl BazelMcpServer {
     fn protocol_family(version: Option<&ProtocolVersion>) -> ProtocolFamily {
-        match version {
-            Some(version) if version == &ProtocolVersion::V_2025_11_25 => {
-                ProtocolFamily::LegacyTasks
-            }
-            Some(version) if version.as_str() >= "2026-06-30" => ProtocolFamily::TasksExtension,
-            _ => ProtocolFamily::Earlier,
-        }
+        ProtocolAdapter::negotiate(version).family()
     }
 
     fn initialize_result(&self, version: ProtocolVersion) -> InitializeResult {
-        let family = Self::protocol_family(Some(&version));
-        let mut capabilities = ServerCapabilities::default();
-        capabilities.tools = Some(ToolsCapability::default());
-        match family {
-            ProtocolFamily::LegacyTasks => {
-                let tasks = if self.execution_policy == McpExecutionPolicy::SyncOnly {
-                    let mut tasks = TasksCapability::default();
-                    tasks.list = Some(JsonObject::new());
-                    tasks.cancel = Some(JsonObject::new());
-                    tasks
-                } else {
-                    TasksCapability::server_default()
-                };
-                capabilities.tasks = Some(tasks);
-            }
-            ProtocolFamily::TasksExtension => {
-                capabilities.extensions = Some(BTreeMap::from([(
-                    TASKS_EXTENSION.to_owned(),
-                    JsonObject::new(),
-                )]));
-            }
-            ProtocolFamily::Earlier => {}
-        }
+        let adapter = ProtocolAdapter::negotiate(Some(&version));
+        let capabilities = adapter.capabilities(self.execution_policy);
         let mut result = InitializeResult::new(capabilities)
             .with_server_info(Implementation::new("bazel-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
@@ -564,21 +380,14 @@ impl BazelMcpServer {
 
     fn tools_for(&self, family: ProtocolFamily) -> Vec<Tool> {
         let mut tools = self.tool_router.list_all();
-        if family == ProtocolFamily::LegacyTasks {
-            for tool in &mut tools {
-                if tool.name == "bazel.run" {
-                    tool.execution = match self.execution_policy {
-                        McpExecutionPolicy::Auto => {
-                            Some(ToolExecution::new().with_task_support(TaskSupport::Optional))
-                        }
-                        McpExecutionPolicy::SyncOnly => None,
-                        McpExecutionPolicy::TasksRequired => {
-                            Some(ToolExecution::new().with_task_support(TaskSupport::Required))
-                        }
-                    };
-                }
+        let adapter = match family {
+            ProtocolFamily::Earlier => ProtocolAdapter::negotiate(None),
+            ProtocolFamily::LegacyTasks => {
+                ProtocolAdapter::negotiate(Some(&ProtocolVersion::V_2025_11_25))
             }
-        }
+            ProtocolFamily::TasksExtension => ProtocolAdapter::Extension(TasksExtensionAdapter),
+        };
+        adapter.adapt_tools(&mut tools, self.execution_policy);
         tools
     }
 
@@ -721,107 +530,37 @@ impl BazelMcpServer {
     }
 
     fn legacy_task(&self, view: &DeferredResultView) -> Task {
-        let status = if view.deferred.terminal_override == Some(DeferredTerminalState::Cancelled) {
-            TaskStatus::Cancelled
-        } else if view.deferred.failure.is_some() {
-            TaskStatus::Failed
-        } else if view.invocation.state.is_terminal() {
-            TaskStatus::Completed
-        } else {
-            TaskStatus::Working
-        };
-        self.task_object(view, status)
-    }
-
-    fn extension_status(&self, view: &DeferredResultView) -> TaskStatus {
-        if view
-            .deferred
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.kind == bazel_mcp_types::DeferredFailureKind::Internal)
-        {
-            TaskStatus::Failed
-        } else if view.invocation.state == InvocationState::Cancelled {
-            TaskStatus::Cancelled
-        } else if view.invocation.state.is_terminal() {
-            TaskStatus::Completed
-        } else {
-            TaskStatus::Working
-        }
-    }
-
-    fn task_object(&self, view: &DeferredResultView, status: TaskStatus) -> Task {
-        let elapsed_ms = bazel_mcp_types::unix_timestamp_ms()
-            .saturating_sub(view.deferred.created_at_ms)
-            .max(0);
-        let status_name = match status {
-            TaskStatus::Working => "working",
-            TaskStatus::InputRequired => "input_required",
-            TaskStatus::Completed => "completed",
-            TaskStatus::Failed => "failed",
-            TaskStatus::Cancelled => "cancelled",
-            _ => "unknown",
-        };
-        Task::new(
-            view.deferred.invocation_id.to_string(),
-            status,
-            format_timestamp(view.deferred.created_at_ms),
-            format_timestamp(view.deferred.updated_at_ms),
-        )
-        .with_status_message(format!("state={status_name} elapsed_ms={elapsed_ms}"))
-        .with_ttl(view.deferred.advertised_ttl_ms())
-        .with_poll_interval(self.task_poll_interval_ms)
+        let snapshot = TaskSnapshot::from_view(view, self.task_poll_interval_ms);
+        LegacyTasksAdapter.task(&snapshot)
     }
 
     fn extension_task_value(&self, view: &DeferredResultView) -> serde_json::Value {
-        let status = self.extension_status(view);
-        serde_json::json!({
-            "resultType": "task",
-            "taskId": view.deferred.invocation_id.to_string(),
-            "status": task_status_name(&status),
-            "createdAt": format_timestamp(view.deferred.created_at_ms),
-            "lastUpdatedAt": format_timestamp(view.deferred.updated_at_ms),
-            "ttlMs": view.deferred.advertised_ttl_ms(),
-            "pollIntervalMs": self.task_poll_interval_ms,
-        })
+        let snapshot = TaskSnapshot::from_view(view, self.task_poll_interval_ms);
+        TasksExtensionAdapter.creation(&snapshot)
     }
 
     async fn extension_get_value(
         &self,
         view: &DeferredResultView,
     ) -> Result<serde_json::Value, ErrorData> {
-        let status = self.extension_status(view);
-        let mut value = serde_json::json!({
-            "resultType": "complete",
-            "taskId": view.deferred.invocation_id.to_string(),
-            "status": task_status_name(&status),
-            "createdAt": format_timestamp(view.deferred.created_at_ms),
-            "lastUpdatedAt": format_timestamp(view.deferred.updated_at_ms),
-            "ttlMs": view.deferred.advertised_ttl_ms(),
-            "pollIntervalMs": self.task_poll_interval_ms,
-        });
-        if status == TaskStatus::Completed {
-            let tool_error = view.deferred.failure.is_some();
-            let result = self
-                .build_run_result(&view.invocation, tool_error)
-                .await
-                .map_err(|error| ErrorData::internal_error(error, None))?;
-            value["result"] = serde_json::to_value(result)
-                .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-        } else if status == TaskStatus::Failed {
-            let message = view
-                .deferred
-                .failure
-                .as_ref()
-                .map_or("Deferred invocation failed", |failure| {
-                    failure.redacted_message.as_str()
-                });
-            value["error"] = serde_json::json!({
-                "code": ErrorCode::INTERNAL_ERROR.0,
-                "message": message,
-            });
-        }
-        Ok(value)
+        let snapshot = TaskSnapshot::from_view(view, self.task_poll_interval_ms);
+        let (result, error) = match &snapshot.result {
+            TaskResultState::Invocation { tool_error } if snapshot.state.is_terminal() => {
+                let result = self
+                    .build_run_result(&view.invocation, *tool_error)
+                    .await
+                    .map_err(|error| ErrorData::internal_error(error, None))?;
+                (Some(result), None)
+            }
+            TaskResultState::InternalFailure { redacted_message } => {
+                (None, Some(redacted_message.as_str()))
+            }
+            TaskResultState::Pending | TaskResultState::Cancelled => (None, None),
+            TaskResultState::Invocation { .. } => (None, None),
+        };
+        TasksExtensionAdapter
+            .complete(&snapshot, result, error)
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))
     }
 
     async fn call_tool_request(
@@ -1034,7 +773,9 @@ impl BazelMcpServer {
             .deferred_result(id, DeferredRetrieval::InlineResult)
             .await
             .map_err(|_| Self::task_not_found(task_id))?;
-        let terminal = self.extension_status(&view) != TaskStatus::Working;
+        let terminal = TaskSnapshot::from_view(&view, self.task_poll_interval_ms)
+            .state
+            .is_terminal();
         let result = self
             .extension_get_value(&view)
             .await
@@ -1061,7 +802,7 @@ impl BazelMcpServer {
             .cancel(id)
             .await
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-        let result = CustomResult::new(serde_json::json!({"resultType": "complete"}));
+        let result = TasksExtensionAdapter.acknowledge();
         Self::trace_task_response(ProtocolFamily::TasksExtension, "control", &result);
         Ok(result)
     }
@@ -1098,7 +839,7 @@ impl BazelMcpServer {
                     .deferred_result(id, DeferredRetrieval::InlineResult)
                     .await
                     .map_err(|_| Self::task_not_found(task_id))?;
-                let result = CustomResult::new(serde_json::json!({"resultType": "complete"}));
+                let result = TasksExtensionAdapter.acknowledge();
                 Self::trace_task_response(ProtocolFamily::TasksExtension, "control", &result);
                 Ok(ServerResult::CustomResult(result))
             }
@@ -1175,11 +916,7 @@ impl Service<RoleServer> for BazelMcpServer {
                     .runner
                     .list_deferred_results(
                         DeferredRetrieval::SeparateResult,
-                        PageRequest {
-                            cursor,
-                            limit: 100,
-                            max_bytes: None,
-                        },
+                        PageRequest::new(cursor, 100),
                     )
                     .await
                     .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
@@ -1248,29 +985,6 @@ fn parse_task_id(value: &str) -> Result<InvocationId, ErrorData> {
     parse_id(value).map_err(|_| ErrorData::invalid_params("taskId must be a UUID", None))
 }
 
-fn task_status_name(status: &TaskStatus) -> &'static str {
-    match status {
-        TaskStatus::Working => "working",
-        TaskStatus::InputRequired => "input_required",
-        TaskStatus::Completed => "completed",
-        TaskStatus::Failed => "failed",
-        TaskStatus::Cancelled => "cancelled",
-        _ => "unknown",
-    }
-}
-
-fn format_timestamp(timestamp_ms: i64) -> String {
-    let nanos = i128::from(timestamp_ms).saturating_mul(1_000_000);
-    time::OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .ok()
-        .and_then(|timestamp| {
-            timestamp
-                .format(&time::format_description::well_known::Rfc3339)
-                .ok()
-        })
-        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
-}
-
 fn parse_id(value: &str) -> Result<InvocationId, String> {
     Uuid::parse_str(value)
         .map(InvocationId::from_uuid)
@@ -1299,6 +1013,7 @@ fn inspect_visible_budget(requested: Option<u32>) -> usize {
 mod tests {
     use bazel_mcp_runner::RunnerConfig;
     use bazel_mcp_store::Store;
+    use bazel_mcp_types::{Diagnostic, Termination};
     use tempfile::tempdir;
 
     use super::*;
@@ -1418,7 +1133,6 @@ mod tests {
 
         let text = BazelMcpServer::new(runner.clone(), ResultEncoding::Text);
         assert_eq!(text.model_visible_bytes(&value).unwrap(), one);
-        assert_eq!(text.single_representation_budget(8_192), 8_192);
         let text_result = text.encode(value.clone()).unwrap();
         let Some(ContentBlock::Text(content)) = text_result.content.first() else {
             panic!("text result did not contain one text block");
@@ -1431,7 +1145,6 @@ mod tests {
         let toon = BazelMcpServer::new(runner.clone(), ResultEncoding::Toon);
         let toon_text = BazelMcpServer::encode_toon(&value).unwrap();
         assert_eq!(toon.model_visible_bytes(&value).unwrap(), toon_text.len());
-        assert_eq!(toon.single_representation_budget(8_192), 8_192);
         let decoded: serde_json::Value = toon_format::decode_default(&toon_text).unwrap();
         assert_eq!(decoded, value);
         let result = toon.encode(value.clone()).unwrap();
@@ -1450,7 +1163,6 @@ mod tests {
 
         let both = BazelMcpServer::new(runner, ResultEncoding::Both);
         assert_eq!(both.model_visible_bytes(&value).unwrap(), one * 2);
-        assert_eq!(both.single_representation_budget(8_192), 4_096);
         assert_eq!(
             both.encode(value.clone()).unwrap().structured_content,
             Some(value)

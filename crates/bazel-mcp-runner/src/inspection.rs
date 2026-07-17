@@ -10,8 +10,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bazel_mcp_reducer::normalize_terminal_text;
 use bazel_mcp_store::{InvocationHeader, InvocationPaths, StoreError};
 use bazel_mcp_types::{
-    ArtifactKind, BazelCommand, CommandClass, InvocationId, InvocationState, PageRequest,
-    Termination,
+    ArtifactKind, BazelCommand, CommandClass, InspectCoverageItem, InspectCoverageSummary,
+    InspectCoverageUnavailable, InspectMetrics, InspectPayload, InspectResult, InspectSummary,
+    InspectView, InvocationId, InvocationLedgerEntry, InvocationState, PageRequest, Termination,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -22,21 +23,6 @@ use crate::{
     service::{InvocationService, RunnerError, bounded_text},
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InspectView {
-    Summary,
-    Metrics,
-    Diagnostics,
-    Tests,
-    TestLog,
-    Coverage,
-    Artifacts,
-    QueryResults,
-    Log,
-    Invocations,
-}
-
 #[derive(Clone, Debug)]
 pub struct InspectRequest {
     pub invocation_id: Option<InvocationId>,
@@ -46,8 +32,8 @@ pub struct InspectRequest {
     pub view: InspectView,
     pub cursor: Option<String>,
     pub filter: Option<String>,
-    pub limit: u32,
-    pub max_bytes: usize,
+    pub item_limit: u32,
+    pub scan_limit: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,6 +49,13 @@ pub(crate) struct EvidenceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) label: Option<String>,
     pub(crate) text: String,
+}
+
+pub(crate) struct EvidencePage {
+    pub(crate) items: Vec<String>,
+    pub(crate) item_cursors: Vec<String>,
+    pub(crate) truncated: bool,
+    pub(crate) next_cursor: Option<String>,
 }
 
 impl LogCursor {
@@ -94,84 +87,68 @@ impl LogCursor {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct InspectResult {
-    pub invocation_id: Option<InvocationId>,
-    pub view: InspectView,
-    pub items: serde_json::Value,
-    pub total_count: Option<u64>,
-    pub filtered_count: Option<u64>,
-    pub next_cursor: Option<String>,
-    pub truncated: bool,
-}
-
 impl InvocationService {
     pub async fn inspect(&self, request: InspectRequest) -> Result<InspectResult, RunnerError> {
         if request.view == InspectView::Invocations {
-            let mut limit = request.limit.clamp(1, 100);
-            loop {
-                let page = self
-                    .store
-                    .list_invocations(
-                        request.workspace.as_deref(),
-                        request.state,
-                        request.command.as_ref(),
-                        PageRequest {
-                            cursor: request.cursor.clone(),
-                            limit,
-                            max_bytes: None,
-                        },
-                    )
-                    .await?;
-                let result = InspectResult {
-                    invocation_id: None,
-                    view: request.view,
-                    items: serde_json::Value::Array(
-                        page.items.iter().map(invocation_ledger_row).collect(),
-                    ),
-                    total_count: None,
-                    filtered_count: None,
-                    next_cursor: page.next_cursor,
-                    truncated: page.truncated,
-                };
-                if serialized_len(&result)? <= request.max_bytes || limit == 1 {
-                    return enforce_inspect_budget(result, request.max_bytes);
-                }
-                limit = (limit / 2).max(1);
-            }
+            let page = self
+                .store
+                .list_invocations(
+                    request.workspace.as_deref(),
+                    request.state,
+                    request.command.as_ref(),
+                    PageRequest {
+                        cursor: request.cursor.clone(),
+                        item_limit: request.item_limit.clamp(1, 100),
+                        scan_limit: request.scan_limit,
+                    },
+                )
+                .await?;
+            return Ok(InspectResult::new(
+                None,
+                InspectPayload::Invocations(page.items.iter().map(invocation_ledger_row).collect()),
+                page.total_count,
+                page.filtered_count,
+                page.next_cursor,
+                page.truncated,
+                page.item_cursors,
+            )
+            .with_start_cursor(request.cursor));
         }
 
         let id = request.invocation_id.ok_or(StoreError::InvalidCursor)?;
         let record = self.store.get_invocation(id).await?;
         let page_request = PageRequest {
             cursor: request.cursor.clone(),
-            limit: request.limit.clamp(1, 100),
-            max_bytes: Some(request.max_bytes.saturating_sub(512)),
+            item_limit: request.item_limit.clamp(1, 100),
+            scan_limit: request.scan_limit,
         };
         let paths = self.store.paths_for(&record);
-        let (items, total_count, filtered_count, next_cursor, truncated) = match request.view {
+        let result = match request.view {
             InspectView::Summary => {
                 let items = record.summary.as_ref().map_or_else(Vec::new, |summary| {
-                    vec![serde_json::json!({
-                        "success": summary.success,
-                        "headline": summary.headline,
-                        "targets": summary.target_counts,
-                        "tests": summary.test_counts,
-                        "diagnostics": summary.diagnostics,
-                        "coverage": summary.coverage.as_ref().map(|coverage| serde_json::json!({
-                            "lines_found": coverage.lines_found,
-                            "lines_hit": coverage.lines_hit,
-                            "coverage_percent": coverage.coverage_percent,
-                        })),
-                        "query_result_count": summary.query_result_count,
-                        "query_sample": summary.query_sample,
-                        "elapsed_ms": summary.elapsed_ms,
-                        "truncated": summary.truncated,
-                        "inspect_hint": summary.inspect_hint,
-                    })]
+                    vec![InspectSummary {
+                        success: summary.success,
+                        headline: summary.headline.clone(),
+                        targets: summary.target_counts.clone(),
+                        tests: summary.test_counts.clone(),
+                        diagnostics: summary.diagnostics.clone(),
+                        coverage: summary.coverage.as_ref().map(|coverage| {
+                            InspectCoverageSummary {
+                                lines_found: coverage.lines_found,
+                                lines_hit: coverage.lines_hit,
+                                coverage_percent: coverage.coverage_percent,
+                            }
+                        }),
+                        query_result_count: summary.query_result_count,
+                        query_sample: summary.query_sample.clone(),
+                        elapsed_ms: summary.elapsed_ms,
+                        truncated: summary.truncated,
+                        inspect_hint: summary.inspect_hint,
+                    }]
                 });
-                (
-                    serde_json::to_value(items)?,
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::Summary(items),
                     Some(u64::from(record.summary.is_some())),
                     Some(u64::from(record.summary.is_some())),
                     None,
@@ -179,61 +156,73 @@ impl InvocationService {
                         .summary
                         .as_ref()
                         .is_some_and(|summary| summary.truncated),
+                    Vec::new(),
                 )
             }
-            InspectView::Metrics => {
-                let items = vec![serde_json::json!({
-                    "state": record.state,
-                    "requested_at_ms": record.request.requested_at_ms,
-                    "started_at_ms": record.started_at_ms,
-                    "finished_at_ms": record.finished_at_ms,
-                    "termination": record.termination,
-                    "metrics": record.metrics,
-                })];
-                (serde_json::to_value(items)?, Some(1), Some(1), None, false)
-            }
+            InspectView::Metrics => InspectResult::new(
+                Some(id),
+                InspectPayload::Metrics(vec![InspectMetrics {
+                    state: record.state,
+                    requested_at_ms: record.request.requested_at_ms,
+                    started_at_ms: record.started_at_ms,
+                    finished_at_ms: record.finished_at_ms,
+                    termination: record.termination.clone(),
+                    metrics: record.metrics.clone(),
+                }]),
+                Some(1),
+                Some(1),
+                None,
+                false,
+                Vec::new(),
+            ),
             InspectView::Diagnostics => {
-                let (page, total, filtered) = self
+                let page = self
                     .store
                     .page_diagnostics(id, request.filter.as_deref(), page_request)
                     .await?;
-                (
-                    serde_json::to_value(page.items)?,
-                    Some(total),
-                    Some(filtered),
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::Diagnostics(page.items),
+                    page.total_count,
+                    page.filtered_count,
                     page.next_cursor,
                     page.truncated,
+                    page.item_cursors,
                 )
             }
             InspectView::Tests => {
-                let (page, total, filtered) = self
+                let page = self
                     .store
                     .page_tests(id, request.filter.as_deref(), page_request)
                     .await?;
-                (
-                    serde_json::to_value(page.items)?,
-                    Some(total),
-                    Some(filtered),
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::Tests(page.items),
+                    page.total_count,
+                    page.filtered_count,
                     page.next_cursor,
                     page.truncated,
+                    page.item_cursors,
                 )
             }
             InspectView::Artifacts => {
-                let (page, total, filtered) = self
+                let page = self
                     .store
                     .page_artifacts(id, request.filter.as_deref(), page_request)
                     .await?;
-                (
-                    serde_json::to_value(page.items)?,
-                    Some(total),
-                    Some(filtered),
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::Artifacts(page.items),
+                    page.total_count,
+                    page.filtered_count,
                     page.next_cursor,
                     page.truncated,
+                    page.item_cursors,
                 )
             }
             InspectView::QueryResults => {
                 let redactor = self.redactor.clone();
-                let (page, total, filtered) = self
+                let page = self
                     .store
                     .page_query_rows_mapped_into(
                         id,
@@ -244,108 +233,116 @@ impl InvocationService {
                         },
                     )
                     .await?;
-                (
-                    serde_json::to_value(page.items)?,
-                    Some(total),
-                    Some(filtered),
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::QueryResults(page.items),
+                    page.total_count,
+                    page.filtered_count,
                     page.next_cursor,
                     page.truncated,
+                    page.item_cursors,
                 )
             }
             InspectView::Coverage => {
-                let (page, total, filtered) = self
+                let page = self
                     .store
                     .page_coverage(id, request.filter.as_deref(), page_request)
                     .await?;
-                let mut items = serde_json::to_value(page.items)?;
-                let mut total = total;
-                let mut filtered = filtered;
-                if items.as_array().is_some_and(Vec::is_empty) {
-                    let (artifacts, _, _) = self
+                let mut items = page
+                    .items
+                    .into_iter()
+                    .map(InspectCoverageItem::File)
+                    .collect::<Vec<_>>();
+                let mut total_count = page.total_count;
+                let mut filtered_count = page.filtered_count;
+                let mut next_cursor = page.next_cursor;
+                let mut truncated = page.truncated;
+                let mut item_cursors = page.item_cursors;
+                if items.is_empty() {
+                    let artifacts = self
                         .store
                         .page_artifacts(
                             id,
                             request.filter.as_deref(),
                             PageRequest {
                                 cursor: None,
-                                limit: request.limit,
-                                max_bytes: Some(request.max_bytes.saturating_sub(512)),
+                                item_limit: request.item_limit,
+                                scan_limit: request.scan_limit,
                             },
                         )
                         .await?;
-                    let unavailable = artifacts
-                        .items
-                        .into_iter()
-                        .filter(|artifact| {
-                            artifact.kind == ArtifactKind::Coverage && !artifact.locally_available
-                        })
-                        .map(|artifact| {
-                            serde_json::json!({
-                                "availability_reason": "remote_artifact_unavailable",
-                                "artifact": artifact,
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    let unavailable = if unavailable.is_empty() {
-                        vec![serde_json::json!({
-                            "availability_reason": "coverage_artifact_not_found",
-                        })]
-                    } else {
-                        unavailable
-                    };
-                    total = unavailable.len() as u64;
-                    filtered = total;
-                    items = serde_json::Value::Array(unavailable);
+                    items.clear();
+                    item_cursors.clear();
+                    for (artifact, cursor) in
+                        artifacts.items.into_iter().zip(artifacts.item_cursors)
+                    {
+                        if artifact.kind == ArtifactKind::Coverage && !artifact.locally_available {
+                            items.push(InspectCoverageItem::Unavailable(
+                                InspectCoverageUnavailable {
+                                    availability_reason: "remote_artifact_unavailable",
+                                    artifact: Some(artifact),
+                                },
+                            ));
+                            item_cursors.push(cursor);
+                        }
+                    }
+                    if items.is_empty() {
+                        items.push(InspectCoverageItem::Unavailable(
+                            InspectCoverageUnavailable {
+                                availability_reason: "coverage_artifact_not_found",
+                                artifact: None,
+                            },
+                        ));
+                    }
+                    total_count = Some(items.len() as u64);
+                    filtered_count = total_count;
+                    next_cursor = artifacts.next_cursor;
+                    truncated = artifacts.truncated;
                 }
-                (
-                    items,
-                    Some(total),
-                    Some(filtered),
-                    page.next_cursor,
-                    page.truncated,
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::Coverage(items),
+                    total_count,
+                    filtered_count,
+                    next_cursor,
+                    truncated,
+                    item_cursors,
                 )
             }
             InspectView::Log => {
-                let (items, truncated, next_cursor) = self
+                let page = self
                     .read_evidence_page(&paths.evidence, &paths, &request)
                     .await?;
-                (
-                    serde_json::to_value(items)?,
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::Log(page.items),
                     None,
                     None,
-                    next_cursor,
-                    truncated,
+                    page.next_cursor,
+                    page.truncated,
+                    page.item_cursors,
                 )
             }
             InspectView::TestLog => {
-                let (items, truncated, next_cursor) = if paths.test_log_evidence.exists() {
+                let page = if paths.test_log_evidence.exists() {
                     self.read_evidence_page(&paths.test_log_evidence, &paths, &request)
                         .await?
                 } else {
                     self.read_test_log_unavailable_page(id, &request).await?
                 };
-                (
-                    serde_json::to_value(items)?,
+                InspectResult::new(
+                    Some(id),
+                    InspectPayload::TestLog(page.items),
                     None,
                     None,
-                    next_cursor,
-                    truncated,
+                    page.next_cursor,
+                    page.truncated,
+                    page.item_cursors,
                 )
             }
             InspectView::Invocations => unreachable!("handled above"),
         };
-        enforce_inspect_budget(
-            InspectResult {
-                invocation_id: Some(id),
-                view: request.view,
-                items,
-                total_count,
-                filtered_count,
-                next_cursor,
-                truncated,
-            },
-            request.max_bytes,
-        )
+        Ok(result.with_start_cursor(request.cursor))
     }
 
     pub(crate) async fn persist_failure_evidence(
@@ -377,7 +374,7 @@ impl InvocationService {
         path: &Path,
         paths: &InvocationPaths,
         request: &InspectRequest,
-    ) -> Result<(Vec<String>, bool, Option<String>), RunnerError> {
+    ) -> Result<EvidencePage, RunnerError> {
         let invocation_id = request.invocation_id.ok_or(StoreError::InvalidCursor)?;
         let start = request
             .cursor
@@ -421,7 +418,7 @@ impl InvocationService {
         &self,
         invocation_id: InvocationId,
         request: &InspectRequest,
-    ) -> Result<(Vec<String>, bool, Option<String>), RunnerError> {
+    ) -> Result<EvidencePage, RunnerError> {
         let start = request
             .cursor
             .as_deref()
@@ -435,26 +432,22 @@ impl InvocationService {
             })
             .transpose()?
             .map_or(0, |cursor| cursor.next_record);
-        let maximum_bytes = request.max_bytes.saturating_sub(512).max(1);
-        let maximum_items = usize::try_from(request.limit.clamp(1, 100)).unwrap_or(100);
+        let maximum_items = usize::try_from(request.item_limit.clamp(1, 100)).unwrap_or(100);
+        let maximum_scanned =
+            usize::try_from(request.scan_limit.clamp(request.item_limit.max(1), 10_000))
+                .unwrap_or(10_000);
         let filter = request.filter.as_deref().map(str::to_ascii_lowercase);
         let mut items = Vec::new();
-        let mut used_bytes = 2_usize;
+        let mut item_cursors = Vec::new();
         let mut reason_index = 0_u64;
+        let mut next_record = start;
+        let mut scanned = 0_usize;
         let mut storage_cursor = None;
 
         loop {
-            let (page, _, _) = self
+            let page = self
                 .store
-                .page_tests(
-                    invocation_id,
-                    None,
-                    PageRequest {
-                        cursor: storage_cursor,
-                        limit: 100,
-                        max_bytes: Some(128 * 1024),
-                    },
-                )
+                .page_tests(invocation_id, None, PageRequest::new(storage_cursor, 100))
                 .await?;
             for test in page.items {
                 let Some(reason) = test.test_log_unavailable_reason else {
@@ -465,24 +458,28 @@ impl InvocationService {
                 if index < start {
                     continue;
                 }
+                if scanned == maximum_scanned {
+                    let next_cursor = LogCursor {
+                        invocation_id,
+                        view: request.view,
+                        next_record,
+                        filter: request.filter.clone(),
+                    }
+                    .encode()?;
+                    return Ok(EvidencePage {
+                        items,
+                        item_cursors,
+                        truncated: true,
+                        next_cursor: Some(next_cursor),
+                    });
+                }
                 let text = self
                     .redactor
                     .redact_bounded(&format!("{}: {reason}", test.label), 4 * 1024);
-                if !filter
+                let matches = filter
                     .as_ref()
-                    .is_none_or(|filter| text.to_ascii_lowercase().contains(filter))
-                {
-                    continue;
-                }
-                let item_bytes = serde_json::to_vec(&text)?.len();
-                let separator = usize::from(!items.is_empty());
-                if items.len() == maximum_items
-                    || (!items.is_empty()
-                        && used_bytes
-                            .saturating_add(separator)
-                            .saturating_add(item_bytes)
-                            > maximum_bytes)
-                {
+                    .is_none_or(|filter| text.to_ascii_lowercase().contains(filter));
+                if matches && items.len() == maximum_items {
                     let next_cursor = LogCursor {
                         invocation_id,
                         view: request.view,
@@ -490,15 +487,34 @@ impl InvocationService {
                         filter: request.filter.clone(),
                     }
                     .encode()?;
-                    return Ok((items, true, Some(next_cursor)));
+                    return Ok(EvidencePage {
+                        items,
+                        item_cursors,
+                        truncated: true,
+                        next_cursor: Some(next_cursor),
+                    });
                 }
-                used_bytes = used_bytes
-                    .saturating_add(separator)
-                    .saturating_add(item_bytes);
-                items.push(text);
+                scanned = scanned.saturating_add(1);
+                next_record = index.saturating_add(1);
+                if matches {
+                    let cursor = LogCursor {
+                        invocation_id,
+                        view: request.view,
+                        next_record,
+                        filter: request.filter.clone(),
+                    }
+                    .encode()?;
+                    items.push(text);
+                    item_cursors.push(cursor);
+                }
             }
             if !page.truncated {
-                return Ok((items, false, None));
+                return Ok(EvidencePage {
+                    items,
+                    item_cursors,
+                    truncated: false,
+                    next_cursor: None,
+                });
             }
             storage_cursor = page.next_cursor;
         }
@@ -510,18 +526,25 @@ pub(crate) fn page_evidence_records(
     start: u64,
     request: &InspectRequest,
     invocation_id: InvocationId,
-) -> Result<(Vec<String>, bool, Option<String>), RunnerError> {
-    let maximum_bytes = request.max_bytes.saturating_sub(512).max(1);
-    let maximum_items = usize::try_from(request.limit.clamp(1, 100)).unwrap_or(100);
+) -> Result<EvidencePage, RunnerError> {
+    let maximum_items = usize::try_from(request.item_limit.clamp(1, 100)).unwrap_or(100);
+    let maximum_scanned =
+        usize::try_from(request.scan_limit.clamp(request.item_limit.max(1), 10_000))
+            .unwrap_or(10_000);
     let filter = request.filter.as_deref().map(str::to_ascii_lowercase);
     let mut items = Vec::new();
-    let mut used_bytes = 2_usize;
+    let mut item_cursors = Vec::new();
     let mut next_record = start;
+    let mut scanned = 0_usize;
     let mut truncated = false;
     for (index, record) in records.enumerate() {
         let index = u64::try_from(index).unwrap_or(u64::MAX);
         if index < start {
             continue;
+        }
+        if scanned == maximum_scanned {
+            truncated = true;
+            break;
         }
         let matches = filter.as_ref().is_none_or(|filter| {
             record.text.to_ascii_lowercase().contains(filter)
@@ -530,28 +553,24 @@ pub(crate) fn page_evidence_records(
                     .as_deref()
                     .is_some_and(|label| label.to_ascii_lowercase().contains(filter))
         });
-        if !matches {
-            next_record = index.saturating_add(1);
-            continue;
-        }
-        let item_bytes = serde_json::to_vec(&record.text)?.len();
-        let separator = usize::from(!items.is_empty());
-        if items.len() == maximum_items
-            || (!items.is_empty()
-                && used_bytes
-                    .saturating_add(separator)
-                    .saturating_add(item_bytes)
-                    > maximum_bytes)
-        {
+        if matches && items.len() == maximum_items {
             next_record = index;
             truncated = true;
             break;
         }
-        used_bytes = used_bytes
-            .saturating_add(separator)
-            .saturating_add(item_bytes);
-        items.push(record.text);
+        scanned = scanned.saturating_add(1);
         next_record = index.saturating_add(1);
+        if matches {
+            let cursor = LogCursor {
+                invocation_id,
+                view: request.view,
+                next_record,
+                filter: request.filter.clone(),
+            }
+            .encode()?;
+            items.push(record.text);
+            item_cursors.push(cursor);
+        }
     }
     let next_cursor = truncated
         .then_some(LogCursor {
@@ -562,7 +581,12 @@ pub(crate) fn page_evidence_records(
         })
         .map(|cursor| cursor.encode())
         .transpose()?;
-    Ok((items, truncated, next_cursor))
+    Ok(EvidencePage {
+        items,
+        item_cursors,
+        truncated,
+        next_cursor,
+    })
 }
 
 pub(crate) fn should_persist_failure_evidence(command: &BazelCommand, failed: bool) -> bool {
@@ -663,7 +687,7 @@ fn failure_evidence_priority(line: &str) -> Option<u8> {
     }
 }
 
-fn invocation_ledger_row(record: &InvocationHeader) -> serde_json::Value {
+fn invocation_ledger_row(record: &InvocationHeader) -> InvocationLedgerEntry {
     let arguments = record
         .request
         .arguments
@@ -675,114 +699,31 @@ fn invocation_ledger_row(record: &InvocationHeader) -> serde_json::Value {
         Some(Termination::Exit { code }) => Some(code),
         _ => None,
     };
-    serde_json::json!({
-        "invocation_id": record.request.id,
-        "workspace": bounded_text(&record.request.workspace.to_string_lossy(), 256),
-        "state": record.state,
-        "command": record.request.command,
-        "arguments": arguments,
-        "arguments_truncated": record.request.arguments.len() > 3,
-        "requested_at_ms": record.request.requested_at_ms,
-        "finished_at_ms": record.finished_at_ms,
-        "exit_code": exit_code,
-        "duration_ms": record.metrics.bazel_wall_ms,
-        "headline": record
+    InvocationLedgerEntry {
+        invocation_id: record.request.id,
+        workspace: bounded_text(&record.request.workspace.to_string_lossy(), 256),
+        state: record.state,
+        command: record.request.command.clone(),
+        arguments,
+        arguments_truncated: record.request.arguments.len() > 3,
+        requested_at_ms: record.request.requested_at_ms,
+        finished_at_ms: record.finished_at_ms,
+        exit_code,
+        duration_ms: record.metrics.bazel_wall_ms,
+        headline: record
             .summary
             .as_ref()
             .map(|summary| bounded_text(&summary.headline, 256)),
-        "targets": record.summary.as_ref().map(|summary| &summary.target_counts),
-        "tests": record.summary.as_ref().map(|summary| &summary.test_counts),
-        "raw_output_bytes": record.metrics.raw_output_bytes,
-        "model_visible_bytes": record.metrics.model_visible_bytes,
-        "inspect_calls": record.metrics.inspect_calls,
-    })
-}
-
-fn enforce_inspect_budget(
-    mut result: InspectResult,
-    requested_bytes: usize,
-) -> Result<InspectResult, RunnerError> {
-    let hard_limit = requested_bytes.min(32 * 1024);
-    if serialized_len(&result)? <= hard_limit {
-        return Ok(result);
-    }
-    result.truncated = true;
-
-    match result.view {
-        InspectView::Summary => {
-            while serialized_len(&result)? > hard_limit {
-                let Some(summary) = result
-                    .items
-                    .as_array_mut()
-                    .and_then(|items| items.first_mut())
-                else {
-                    break;
-                };
-                let Some(diagnostics) = summary
-                    .get_mut("diagnostics")
-                    .and_then(serde_json::Value::as_array_mut)
-                else {
-                    break;
-                };
-                if diagnostics.pop().is_none() {
-                    break;
-                }
-                summary["truncated"] = serde_json::Value::Bool(true);
-            }
-        }
-        InspectView::Tests => {
-            while serialized_len(&result)? > hard_limit {
-                let Some(tests) = result.items.as_array_mut() else {
-                    break;
-                };
-                let Some(cases) = tests.iter_mut().rev().find_map(|test| {
-                    test.get_mut("cases")
-                        .and_then(serde_json::Value::as_array_mut)
-                        .filter(|cases| !cases.is_empty())
-                }) else {
-                    break;
-                };
-                cases.pop();
-            }
-        }
-        _ => {}
-    }
-
-    for string_limit in [1_000, 512, 256, 64, 0] {
-        if serialized_len(&result)? <= hard_limit {
-            return Ok(result);
-        }
-        bound_json_strings(&mut result.items, string_limit);
-    }
-    if serialized_len(&result)? > hard_limit {
-        return Err(RunnerError::ResponseTooLarge(hard_limit));
-    }
-    Ok(result)
-}
-
-fn serialized_len(result: &InspectResult) -> Result<usize, RunnerError> {
-    Ok(serde_json::to_vec(result)?.len())
-}
-
-fn bound_json_strings(value: &mut serde_json::Value, maximum_bytes: usize) {
-    match value {
-        serde_json::Value::String(text) => {
-            if maximum_bytes == 0 {
-                text.clear();
-            } else if text.len() > maximum_bytes {
-                *text = bounded_text(text, maximum_bytes);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                bound_json_strings(item, maximum_bytes);
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            for value in fields.values_mut() {
-                bound_json_strings(value, maximum_bytes);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+        targets: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.target_counts.clone()),
+        tests: record
+            .summary
+            .as_ref()
+            .map(|summary| summary.test_counts.clone()),
+        raw_output_bytes: record.metrics.raw_output_bytes,
+        model_visible_bytes: record.metrics.model_visible_bytes,
+        inspect_calls: record.metrics.inspect_calls,
     }
 }

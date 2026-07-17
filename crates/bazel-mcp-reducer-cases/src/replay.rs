@@ -8,7 +8,8 @@ use bazel_mcp_reducer::{
     normalize_terminal_text, parse_go_diagnostic, reduce_artifacts, reduce_invocation,
 };
 use bazel_mcp_types::{
-    Artifact, Diagnostic, DiagnosticCategory, DiagnosticLocation, InvocationSummary, Severity,
+    Artifact, Diagnostic, DiagnosticCategory, DiagnosticLocation, InspectHint, InvocationSummary,
+    Severity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -226,7 +227,7 @@ pub fn replay_with_evidence(case: &LoadedCase, evidence: &EvidenceSpec) -> Resul
         }
         finalize_diagnostics(&mut summary, budget);
         if !summary.success && summary.inspect_hint.is_none() {
-            summary.inspect_hint = Some("test_log".to_owned());
+            summary.inspect_hint = Some(InspectHint::TestLog);
         }
     }
 

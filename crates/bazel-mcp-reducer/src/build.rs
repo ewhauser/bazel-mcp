@@ -3,8 +3,8 @@ use bazel_mcp_bep::{
     view::{BuildEventIdView, FileView, NamedSetOfFilesView, build_event, build_event_id, file},
 };
 use bazel_mcp_types::{
-    Artifact, ArtifactKind, Diagnostic, DiagnosticCategory, InvocationSummary, Severity,
-    TargetCounts, TargetResult, TestCounts, TestResult, TestStatus,
+    Artifact, ArtifactKind, Diagnostic, DiagnosticCategory, InspectHint, InvocationSummary,
+    Severity, TargetCounts, TargetResult, TestCounts, TestResult, TestStatus,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -318,7 +318,7 @@ impl BepAccumulator {
             query_result_count: None,
             elapsed_ms,
             truncated: self.truncated,
-            inspect_hint: self.truncated.then(|| "diagnostics".to_owned()),
+            inspect_hint: self.truncated.then_some(InspectHint::Diagnostics),
         };
         finalize_diagnostics(&mut summary, budget);
         StreamReductionOutput {
@@ -655,7 +655,7 @@ pub fn finalize_diagnostics(summary: &mut InvocationSummary, budget: Budget) {
     summary.diagnostics = diagnostics;
     summary.truncated |= truncated;
     if summary.truncated {
-        summary.inspect_hint = Some("diagnostics".to_owned());
+        summary.inspect_hint = Some(InspectHint::Diagnostics);
     }
     if !summary.success
         && let Some(first) = summary.diagnostics.first()

@@ -2,6 +2,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CoverageSummary, Diagnostic, QueryRow, TestResult};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectHint {
+    Diagnostics,
+    Tests,
+    TestLog,
+    Coverage,
+    Artifacts,
+    QueryResults,
+    Log,
+}
+
+impl InspectHint {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Diagnostics => "diagnostics",
+            Self::Tests => "tests",
+            Self::TestLog => "test_log",
+            Self::Coverage => "coverage",
+            Self::Artifacts => "artifacts",
+            Self::QueryResults => "query_results",
+            Self::Log => "log",
+        }
+    }
+}
+
+#[cfg(test)]
+mod inspect_hint_tests {
+    use super::InspectHint;
+
+    #[test]
+    fn typed_inspect_hints_preserve_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&InspectHint::QueryResults).unwrap(),
+            "\"query_results\""
+        );
+        assert_eq!(InspectHint::TestLog.as_str(), "test_log");
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TargetCounts {
     pub requested: usize,
@@ -40,5 +81,5 @@ pub struct InvocationSummary {
     pub query_result_count: Option<u64>,
     pub elapsed_ms: u64,
     pub truncated: bool,
-    pub inspect_hint: Option<String>,
+    pub inspect_hint: Option<InspectHint>,
 }

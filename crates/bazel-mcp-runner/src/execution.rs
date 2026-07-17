@@ -18,9 +18,9 @@ use bazel_mcp_reducer::{
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, StoreError};
 use bazel_mcp_types::{
-    BazelCommand, CommandClass, Diagnostic, DiagnosticCategory, InvocationId, InvocationMetrics,
-    InvocationRecord, InvocationRequest, InvocationState, PageRequest, Severity, Termination,
-    TestStatus,
+    BazelCommand, CommandClass, Diagnostic, DiagnosticCategory, InspectHint, InvocationId,
+    InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState, PageRequest, Severity,
+    Termination, TestStatus,
 };
 use tokio::{process::Command, task};
 use tokio_util::sync::CancellationToken;
@@ -287,7 +287,7 @@ impl InvocationService {
                     success: false,
                     headline: format!("Could not record Bazel execution state: {message}"),
                     truncated: true,
-                    inspect_hint: Some("log".to_owned()),
+                    inspect_hint: Some(InspectHint::Log),
                     ..Default::default()
                 };
                 let _ = self
@@ -381,23 +381,23 @@ impl InvocationService {
             };
             let (query_row_count, query_sample) =
                 if queued.request.command.class() == CommandClass::Query {
+                    let query_row_count = self.store.count_query_rows(queued.request.id).await?;
                     let redactor = self.redactor.clone();
-                    let (page, total, _) = self
+                    let page = self
                         .store
                         .page_query_rows_mapped_into(
                             queued.request.id,
                             None,
                             PageRequest {
-                                cursor: None,
-                                limit: 3,
-                                max_bytes: None,
+                                scan_limit: 3,
+                                ..PageRequest::new(None, 3)
                             },
                             move |value, output| {
                                 redactor.redact_bounded_into(value, 4 * 1024, output);
                             },
                         )
                         .await?;
-                    (total, page.items)
+                    (query_row_count, page.items)
                 } else {
                     (0, Vec::new())
                 };
@@ -480,7 +480,8 @@ impl InvocationService {
             }
             if queued.request.command.class() == CommandClass::Query && exit_code == Some(0) {
                 summary.headline = format!("Bazel query returned {query_row_count} rows");
-                summary.inspect_hint = (query_row_count > 0).then(|| "query_results".to_owned());
+                summary.inspect_hint =
+                    (query_row_count > 0).then_some(InspectHint::QueryResults);
                 summary.query_result_count = Some(query_row_count);
                 summary.query_sample = query_sample;
             } else if matches!(
@@ -494,7 +495,7 @@ impl InvocationService {
                     summary.headline = bounded_text(&excerpt, 1_000);
                     if excerpt.len() > 1_000 {
                         summary.truncated = true;
-                        summary.inspect_hint = Some("log".to_owned());
+                        summary.inspect_hint = Some(InspectHint::Log);
                     }
                 }
             }
@@ -558,16 +559,16 @@ impl InvocationService {
                 summary.headline = headline;
             }
             if !summary.success && summary.inspect_hint.is_none() {
-                let view = if summary
+                let hint = if summary
                     .tests
                     .iter()
                     .any(|test| test.status != TestStatus::Passed && test.test_log_available)
                 {
-                    "test_log"
+                    InspectHint::TestLog
                 } else {
-                    "log"
+                    InspectHint::Log
                 };
-                summary.inspect_hint = Some(view.to_owned());
+                summary.inspect_hint = Some(hint);
             }
             self.sanitize_summary(queued.request.id, &queued.request.workspace, &mut summary);
             let metrics = InvocationMetrics {
@@ -625,7 +626,7 @@ impl InvocationService {
                     headline: format!("Could not finish processing Bazel results: {message}"),
                     elapsed_ms: bazel_wall_ms,
                     truncated: true,
-                    inspect_hint: Some("log".to_owned()),
+                    inspect_hint: Some(InspectHint::Log),
                     ..Default::default()
                 };
                 let _ = self
@@ -939,7 +940,7 @@ pub(crate) fn finalize_with_custom_notices(
     summary.diagnostics.extend(notices);
     if notice_summary.truncated {
         summary.truncated = true;
-        summary.inspect_hint = Some("diagnostics".to_owned());
+        summary.inspect_hint = Some(InspectHint::Diagnostics);
     }
 }
 
@@ -1021,7 +1022,7 @@ pub(crate) fn fallback_summary(
         diagnostics,
         elapsed_ms,
         truncated: true,
-        inspect_hint: Some("log".to_owned()),
+        inspect_hint: Some(InspectHint::Log),
         ..Default::default()
     }
 }
