@@ -9,7 +9,7 @@ mod redaction;
 mod workspace;
 
 pub use command::validate_command;
-pub use config::PolicyConfig;
+pub use config::{PolicyConfig, RawPolicyConfig};
 pub use environment::filtered_environment;
 pub use executable::resolve_bazel_executable;
 pub use flags::{

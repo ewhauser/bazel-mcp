@@ -27,7 +27,8 @@ pub use extension::{
 };
 pub use query::reduce_query;
 pub use starlark::{
-    REDUCER_API_VERSION, StarlarkLimits, StarlarkReducerConfig, load_starlark_reducers,
+    REDUCER_API_VERSION, RawStarlarkConfig, StarlarkLimits, StarlarkReducerConfig,
+    load_starlark_reducers,
 };
 pub use test::{TestFailureAccumulator, TestFailureEvidence, TestXmlError, parse_test_xml};
 pub use test_evidence::{TestEvidenceInput, TestEvidenceReducer, TestEvidenceResult};

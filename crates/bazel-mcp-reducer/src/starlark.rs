@@ -14,6 +14,7 @@ use bazel_mcp_types::{
     TestResult, TestStatus,
 };
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use starlark::{
     PrintHandler,
     environment::{FrozenModule, Globals, GlobalsBuilder, Module},
@@ -65,10 +66,67 @@ impl Default for StarlarkLimits {
     }
 }
 
+/// Serializable Starlark reducer settings owned by the reducer subsystem.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawStarlarkConfig {
+    pub files: Vec<PathBuf>,
+    pub max_source_bytes: usize,
+    pub max_input_bytes: usize,
+    pub max_events: usize,
+    pub max_output_bytes: usize,
+    pub max_output_items: usize,
+    pub max_ticks: u64,
+    pub max_heap_bytes: usize,
+    pub max_callstack_size: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for RawStarlarkConfig {
+    fn default() -> Self {
+        let limits = StarlarkLimits::default();
+        Self {
+            files: Vec::new(),
+            max_source_bytes: limits.max_source_bytes,
+            max_input_bytes: limits.max_input_bytes,
+            max_events: limits.max_events,
+            max_output_bytes: limits.max_output_bytes,
+            max_output_items: limits.max_output_items,
+            max_ticks: limits.max_ticks,
+            max_heap_bytes: limits.max_heap_bytes,
+            max_callstack_size: limits.max_callstack_size,
+            timeout_ms: u64::try_from(limits.timeout.as_millis()).unwrap_or(100),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StarlarkReducerConfig {
     pub files: Vec<PathBuf>,
     pub limits: StarlarkLimits,
+}
+
+impl TryFrom<RawStarlarkConfig> for StarlarkReducerConfig {
+    type Error = ReducerError;
+
+    fn try_from(raw: RawStarlarkConfig) -> Result<Self, Self::Error> {
+        let config = Self {
+            files: raw.files,
+            limits: StarlarkLimits {
+                max_source_bytes: raw.max_source_bytes,
+                max_input_bytes: raw.max_input_bytes,
+                max_events: raw.max_events,
+                max_output_bytes: raw.max_output_bytes,
+                max_output_items: raw.max_output_items,
+                max_ticks: raw.max_ticks,
+                max_heap_bytes: raw.max_heap_bytes,
+                max_callstack_size: raw.max_callstack_size,
+                timeout: Duration::from_millis(raw.timeout_ms),
+            },
+        };
+        validate_limits(&config.limits)?;
+        Ok(config)
+    }
 }
 
 pub fn load_starlark_reducers(
@@ -1154,6 +1212,20 @@ mod tests {
     #[test]
     fn caches_reducer_globals() {
         assert!(std::ptr::eq(reducer_globals(), reducer_globals()));
+    }
+
+    #[test]
+    fn raw_starlark_defaults_project_and_validate_in_the_reducer() {
+        let expected = StarlarkLimits::default();
+        let actual = StarlarkReducerConfig::try_from(RawStarlarkConfig::default()).unwrap();
+        assert!(actual.files.is_empty());
+        assert_eq!(actual.limits, expected);
+
+        let invalid = RawStarlarkConfig {
+            max_ticks: 0,
+            ..RawStarlarkConfig::default()
+        };
+        assert!(StarlarkReducerConfig::try_from(invalid).is_err());
     }
 
     #[test]
