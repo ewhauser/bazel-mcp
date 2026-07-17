@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader},
@@ -1128,8 +1129,11 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
     ) -> Result<(Page<QueryRow>, u64, u64), StoreError> {
-        self.page_query_rows_mapped(id, filter, page, str::to_owned)
-            .await
+        self.page_query_rows_mapped_into(id, filter, page, |value, output| {
+            output.clear();
+            output.push_str(value);
+        })
+        .await
     }
 
     /// Page raw query output after applying a caller-supplied text transform.
@@ -1144,6 +1148,24 @@ impl Store {
     ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
     where
         F: Fn(&str) -> String + Send + 'static,
+    {
+        self.page_query_rows_mapped_into(id, filter, page, move |value, output| {
+            *output = transform(value);
+        })
+        .await
+    }
+
+    /// Page raw query output while reusing a caller-populated transformation
+    /// buffer across scanned rows.
+    pub async fn page_query_rows_mapped_into<F>(
+        &self,
+        id: InvocationId,
+        filter: Option<&str>,
+        page: PageRequest,
+        transform: F,
+    ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
+    where
+        F: Fn(&str, &mut String) + Send + 'static,
     {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
@@ -1811,7 +1833,7 @@ fn page_query_file<F>(
     transform: F,
 ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
 where
-    F: Fn(&str) -> String,
+    F: Fn(&str, &mut String),
 {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -1839,38 +1861,41 @@ where
     let mut reader = BoundedLineReader::new(BufReader::new(file), QUERY_LINE_LIMIT);
     let mut total = 0_u64;
     let mut filtered = 0_u64;
-    let normalized_filter = filter.map(str::to_ascii_lowercase);
     let mut selected = Vec::with_capacity(request.limit);
     let mut used_bytes = 2_usize;
     let mut truncated = false;
-    while let Some(mut line) = reader.next_line()? {
+    let mut transformed = String::new();
+    let mut serialized = Vec::new();
+    while let Some(line) = reader.next_line()? {
         total = total.saturating_add(1);
-        line.value = transform(&line.value);
-        let matches = normalized_filter
-            .as_ref()
-            .is_none_or(|filter| line.value.to_ascii_lowercase().contains(filter));
+        transform(line.value.as_ref(), &mut transformed);
+        let matches = filter.is_none_or(|filter| contains_ignore_ascii_case(&transformed, filter));
         if matches {
             filtered = filtered.saturating_add(1);
             if line.start_offset >= request.start_offset && !truncated {
-                let item_bytes = serde_json::to_vec(&QueryRow {
-                    ordinal: line.ordinal,
-                    value: line.value.clone(),
-                })?
-                .len();
-                let separator = usize::from(!selected.is_empty());
-                if selected.len() == request.limit
-                    || (!selected.is_empty()
+                if selected.len() == request.limit {
+                    truncated = true;
+                } else {
+                    let item_bytes =
+                        serialized_query_row_len(line.ordinal, &transformed, &mut serialized)?;
+                    let separator = usize::from(!selected.is_empty());
+                    if !selected.is_empty()
                         && used_bytes
                             .saturating_add(separator)
                             .saturating_add(item_bytes)
-                            > request.maximum_bytes)
-                {
-                    truncated = true;
-                } else {
-                    used_bytes = used_bytes
-                        .saturating_add(separator)
-                        .saturating_add(item_bytes);
-                    selected.push(line);
+                            > request.maximum_bytes
+                    {
+                        truncated = true;
+                    } else {
+                        used_bytes = used_bytes
+                            .saturating_add(separator)
+                            .saturating_add(item_bytes);
+                        selected.push(SelectedQueryLine {
+                            end_offset: line.end_offset,
+                            ordinal: line.ordinal,
+                            value: std::mem::take(&mut transformed),
+                        });
+                    }
                 }
             }
         }
@@ -1942,7 +1967,7 @@ fn page_unfiltered_query_file<F>(
     transform: F,
 ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
 where
-    F: Fn(&str) -> String,
+    F: Fn(&str, &mut String),
 {
     use std::io::{Seek, SeekFrom};
 
@@ -1956,20 +1981,21 @@ where
     let mut selected = Vec::with_capacity(request.limit);
     let mut used_bytes = 2_usize;
     let mut truncated = false;
-    while let Some(mut line) = reader.next_line()? {
-        line.value = transform(&line.value);
-        let item_bytes = serde_json::to_vec(&QueryRow {
-            ordinal: line.ordinal,
-            value: line.value.clone(),
-        })?
-        .len();
+    let mut transformed = String::new();
+    let mut serialized = Vec::new();
+    while let Some(line) = reader.next_line()? {
+        if selected.len() == request.limit {
+            truncated = true;
+            break;
+        }
+        transform(line.value.as_ref(), &mut transformed);
+        let item_bytes = serialized_query_row_len(line.ordinal, &transformed, &mut serialized)?;
         let separator = usize::from(!selected.is_empty());
-        if selected.len() == request.limit
-            || (!selected.is_empty()
-                && used_bytes
-                    .saturating_add(separator)
-                    .saturating_add(item_bytes)
-                    > request.maximum_bytes)
+        if !selected.is_empty()
+            && used_bytes
+                .saturating_add(separator)
+                .saturating_add(item_bytes)
+                > request.maximum_bytes
         {
             truncated = true;
             break;
@@ -1977,7 +2003,11 @@ where
         used_bytes = used_bytes
             .saturating_add(separator)
             .saturating_add(item_bytes);
-        selected.push(line);
+        selected.push(SelectedQueryLine {
+            end_offset: line.end_offset,
+            ordinal: line.ordinal,
+            value: std::mem::take(&mut transformed),
+        });
     }
     let next_cursor = if truncated {
         selected
@@ -2013,15 +2043,47 @@ where
     ))
 }
 
+#[derive(Serialize)]
+struct BorrowedQueryRow<'a> {
+    ordinal: u64,
+    value: &'a str,
+}
+
+fn serialized_query_row_len(
+    ordinal: u64,
+    value: &str,
+    buffer: &mut Vec<u8>,
+) -> Result<usize, StoreError> {
+    buffer.clear();
+    serde_json::to_writer(&mut *buffer, &BorrowedQueryRow { ordinal, value })?;
+    Ok(buffer.len())
+}
+
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    needle.is_empty()
+        || value
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 struct BoundedLineReader<R> {
     reader: R,
     offset: u64,
     ordinal: u64,
     limit: usize,
+    value: Vec<u8>,
 }
 
-struct BoundedLine {
+struct BoundedLine<'a> {
     start_offset: u64,
+    end_offset: u64,
+    ordinal: u64,
+    value: Cow<'a, str>,
+}
+
+struct SelectedQueryLine {
     end_offset: u64,
     ordinal: u64,
     value: String,
@@ -2038,13 +2100,14 @@ impl<R: BufRead> BoundedLineReader<R> {
             offset,
             ordinal,
             limit,
+            value: Vec::new(),
         }
     }
 
-    fn next_line(&mut self) -> std::io::Result<Option<BoundedLine>> {
+    fn next_line(&mut self) -> std::io::Result<Option<BoundedLine<'_>>> {
         let start_offset = self.offset;
         let ordinal = self.ordinal;
-        let mut value = Vec::new();
+        self.value.clear();
         let mut saw_bytes = false;
         loop {
             let (consumed, newline, reached_eof) = {
@@ -2053,13 +2116,13 @@ impl<R: BufRead> BoundedLineReader<R> {
                     (0, false, true)
                 } else if let Some(position) = available.iter().position(|byte| *byte == b'\n') {
                     let consumed = position + 1;
-                    let copy = position.min(self.limit.saturating_sub(value.len()));
-                    value.extend_from_slice(&available[..copy]);
+                    let copy = position.min(self.limit.saturating_sub(self.value.len()));
+                    self.value.extend_from_slice(&available[..copy]);
                     (consumed, true, false)
                 } else {
                     let consumed = available.len();
-                    let copy = consumed.min(self.limit.saturating_sub(value.len()));
-                    value.extend_from_slice(&available[..copy]);
+                    let copy = consumed.min(self.limit.saturating_sub(self.value.len()));
+                    self.value.extend_from_slice(&available[..copy]);
                     (consumed, false, false)
                 }
             };
@@ -2078,15 +2141,15 @@ impl<R: BufRead> BoundedLineReader<R> {
                 break;
             }
         }
-        if value.last() == Some(&b'\r') {
-            value.pop();
+        if self.value.last() == Some(&b'\r') {
+            self.value.pop();
         }
         self.ordinal = self.ordinal.saturating_add(1);
         Ok(Some(BoundedLine {
             start_offset,
             end_offset: self.offset,
             ordinal,
-            value: String::from_utf8_lossy(&value).into_owned(),
+            value: String::from_utf8_lossy(&self.value),
         }))
     }
 }
@@ -2377,6 +2440,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buffered_query_transform_precedes_ascii_insensitive_filtering() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        tokio::fs::write(&paths.stdout, b"first\nMiXeD needle\nthird\n")
+            .await
+            .unwrap();
+        let transformed = Arc::new(AtomicUsize::new(0));
+        let observed = transformed.clone();
+        let (page, total, filtered) = store
+            .page_query_rows_mapped_into(
+                id,
+                Some("mixed NEEDLE"),
+                PageRequest::default(),
+                move |value, output| {
+                    observed.fetch_add(1, AtomicOrdering::Relaxed);
+                    output.clear();
+                    output.push_str(value);
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!((total, filtered), (3, 1));
+        assert_eq!(page.items[0].value, "MiXeD needle");
+        assert_eq!(transformed.load(AtomicOrdering::Relaxed), 3);
+    }
+
+    #[tokio::test]
     async fn serialized_byte_packing_preserves_limit_filter_and_cursor_continuity() {
         let root = TempDir::new().unwrap();
         let store = Store::open(root.path()).await.unwrap();
@@ -2474,7 +2568,7 @@ mod tests {
             .unwrap();
         assert_eq!((total, filtered), (100, 100));
         assert_eq!(page.items.len(), 3);
-        assert_eq!(transformed.load(AtomicOrdering::Relaxed), 4);
+        assert_eq!(transformed.load(AtomicOrdering::Relaxed), 3);
     }
 
     #[tokio::test]

@@ -1107,11 +1107,13 @@ impl InvocationService {
                 let redactor = self.redactor.clone();
                 let (page, total, filtered) = self
                     .store
-                    .page_query_rows_mapped(
+                    .page_query_rows_mapped_into(
                         id,
                         request.filter.as_deref(),
                         page_request,
-                        move |value| redactor.redact_bounded(value, 4 * 1024),
+                        move |value, output| {
+                            redactor.redact_bounded_into(value, 4 * 1024, output);
+                        },
                     )
                     .await?;
                 (
@@ -1563,7 +1565,7 @@ impl InvocationService {
                     let redactor = self.redactor.clone();
                     let (page, total, _) = self
                         .store
-                        .page_query_rows_mapped(
+                        .page_query_rows_mapped_into(
                             queued.request.id,
                             None,
                             PageRequest {
@@ -1571,7 +1573,9 @@ impl InvocationService {
                                 limit: 3,
                                 max_bytes: None,
                             },
-                            move |value| redactor.redact_bounded(value, 4 * 1024),
+                            move |value, output| {
+                                redactor.redact_bounded_into(value, 4 * 1024, output);
+                            },
                         )
                         .await?;
                     (total, page.items)
