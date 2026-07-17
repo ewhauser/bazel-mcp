@@ -22,6 +22,9 @@ The default path is used only when the file already exists. Command-line
 `--allow-root` values are added to roots read from the file, and `--cache-root`
 overrides the configured cache directory.
 
+Unknown top-level settings and unknown keys in the `[starlark]` table are
+rejected so misspelled controls cannot silently fall back to defaults.
+
 Start with the repository's [example configuration](../examples/config.toml):
 
 ```sh

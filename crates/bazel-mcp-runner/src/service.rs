@@ -102,6 +102,58 @@ impl Default for RunnerConfig {
     }
 }
 
+impl RunnerConfig {
+    /// Validate the settings required to construct an invocation service.
+    ///
+    /// Keeping this check on the runner configuration lets configuration
+    /// frontends reject invalid settings without duplicating the runner's
+    /// invariants.
+    pub fn validate(&self) -> Result<(), RunnerError> {
+        if self.global_concurrency == 0 {
+            return Err(RunnerError::InvalidConfiguration(
+                "global concurrency must be greater than zero",
+            ));
+        }
+        if self.maximum_pending_invocations < self.global_concurrency {
+            return Err(RunnerError::InvalidConfiguration(
+                "maximum pending invocations must be at least global concurrency",
+            ));
+        }
+        if self.maximum_timeout.is_zero() {
+            return Err(RunnerError::InvalidConfiguration(
+                "maximum timeout must be greater than zero",
+            ));
+        }
+        if self.default_timeout > self.maximum_timeout {
+            return Err(RunnerError::InvalidConfiguration(
+                "default timeout exceeds maximum timeout",
+            ));
+        }
+        if self.version_check_timeout.is_zero() {
+            return Err(RunnerError::InvalidConfiguration(
+                "version check timeout must be greater than zero",
+            ));
+        }
+        if self.isolated_bazel_server_idle_timeout.is_zero() {
+            return Err(RunnerError::InvalidConfiguration(
+                "isolated Bazel server idle timeout must be greater than zero",
+            ));
+        }
+        if self.output_base_lock_root.as_os_str().is_empty() {
+            return Err(RunnerError::InvalidConfiguration(
+                "output-base lock root must not be empty",
+            ));
+        }
+        if !self.allow_unsupported_bazel_versions && self.supported_bazel_major_versions.is_empty()
+        {
+            return Err(RunnerError::InvalidConfiguration(
+                "supported Bazel major versions must not be empty",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunnerError {
     #[error(transparent)]
@@ -261,48 +313,7 @@ impl InvocationService {
         config: RunnerConfig,
         bes: Option<BesServer>,
     ) -> Result<Self, RunnerError> {
-        if config.global_concurrency == 0 {
-            return Err(RunnerError::InvalidConfiguration(
-                "global concurrency must be greater than zero",
-            ));
-        }
-        if config.maximum_pending_invocations < config.global_concurrency {
-            return Err(RunnerError::InvalidConfiguration(
-                "maximum pending invocations must be at least global concurrency",
-            ));
-        }
-        if config.maximum_timeout.is_zero() {
-            return Err(RunnerError::InvalidConfiguration(
-                "maximum timeout must be greater than zero",
-            ));
-        }
-        if config.default_timeout > config.maximum_timeout {
-            return Err(RunnerError::InvalidConfiguration(
-                "default timeout exceeds maximum timeout",
-            ));
-        }
-        if config.version_check_timeout.is_zero() {
-            return Err(RunnerError::InvalidConfiguration(
-                "version check timeout must be greater than zero",
-            ));
-        }
-        if config.isolated_bazel_server_idle_timeout.is_zero() {
-            return Err(RunnerError::InvalidConfiguration(
-                "isolated Bazel server idle timeout must be greater than zero",
-            ));
-        }
-        if config.output_base_lock_root.as_os_str().is_empty() {
-            return Err(RunnerError::InvalidConfiguration(
-                "output-base lock root must not be empty",
-            ));
-        }
-        if !config.allow_unsupported_bazel_versions
-            && config.supported_bazel_major_versions.is_empty()
-        {
-            return Err(RunnerError::InvalidConfiguration(
-                "supported Bazel major versions must not be empty",
-            ));
-        }
+        config.validate()?;
         let redactor = Redactor::new(&config.policy.redaction_patterns)?;
         let reducers = load_starlark_reducers(&config.starlark_reducers).map_err(|error| {
             RunnerError::ReducerConfiguration(redactor.redact_bounded(&error.to_string(), 8 * 1024))

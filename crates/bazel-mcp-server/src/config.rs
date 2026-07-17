@@ -1,11 +1,14 @@
 use std::{
     collections::BTreeSet,
     ffi::OsString,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::Context;
-use bazel_mcp_runner::{BepTransport, StarlarkLimits, StarlarkReducerConfig};
+use bazel_mcp_policy::PolicyConfig;
+use bazel_mcp_runner::{BepTransport, RunnerConfig, StarlarkLimits, StarlarkReducerConfig};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -29,8 +32,8 @@ pub enum McpExecutionPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct StarlarkConfig {
+#[serde(default, deny_unknown_fields)]
+pub struct RawStarlarkConfig {
     pub files: Vec<PathBuf>,
     pub max_source_bytes: usize,
     pub max_input_bytes: usize,
@@ -43,7 +46,7 @@ pub struct StarlarkConfig {
     pub timeout_ms: u64,
 }
 
-impl Default for StarlarkConfig {
+impl Default for RawStarlarkConfig {
     fn default() -> Self {
         let limits = StarlarkLimits::default();
         Self {
@@ -61,7 +64,7 @@ impl Default for StarlarkConfig {
     }
 }
 
-impl StarlarkConfig {
+impl RawStarlarkConfig {
     #[must_use]
     pub fn runner_config(&self) -> StarlarkReducerConfig {
         StarlarkReducerConfig {
@@ -141,8 +144,8 @@ pub struct Cli {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ServerConfig {
+#[serde(default, deny_unknown_fields)]
+pub struct RawServerConfig {
     pub allowed_roots: Vec<PathBuf>,
     pub cache_root: PathBuf,
     pub bazel_executable: Option<PathBuf>,
@@ -171,10 +174,10 @@ pub struct ServerConfig {
     pub task_ttl_seconds: u64,
     pub task_poll_interval_ms: u64,
     pub bep_transport: BepTransport,
-    pub starlark: StarlarkConfig,
+    pub starlark: RawStarlarkConfig,
 }
 
-impl Default for ServerConfig {
+impl Default for RawServerConfig {
     fn default() -> Self {
         let policy = bazel_mcp_policy::PolicyConfig::default();
         Self {
@@ -206,69 +209,81 @@ impl Default for ServerConfig {
             task_ttl_seconds: 24 * 60 * 60,
             task_poll_interval_ms: 2_000,
             bep_transport: BepTransport::Tail,
-            starlark: StarlarkConfig::default(),
+            starlark: RawStarlarkConfig::default(),
         }
     }
 }
 
-impl ServerConfig {
+#[derive(Clone, Debug)]
+struct ValidatedRunnerConfig {
+    default_timeout: Duration,
+    maximum_timeout: Duration,
+    cancellation_interrupt_grace: Duration,
+    cancellation_terminate_grace: Duration,
+    global_concurrency: NonZeroUsize,
+    output_user_root: Option<PathBuf>,
+    isolated_bazel_server_idle_timeout: Duration,
+    supported_bazel_major_versions: BTreeSet<u32>,
+    allow_unsupported_bazel_versions: bool,
+    version_check_timeout: Duration,
+    maximum_pending_invocations: NonZeroUsize,
+    output_base_lock_root: PathBuf,
+    bep_transport: BepTransport,
+    starlark_reducers: StarlarkReducerConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetentionConfig {
+    pub maximum_age: Duration,
+    pub maximum_storage_bytes: NonZeroU64,
+    pub cleanup_interval: Duration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpConfig {
+    pub result_encoding: ResultEncoding,
+    pub progress_initial: Duration,
+    pub progress_interval: Duration,
+    pub execution_policy: McpExecutionPolicy,
+    pub task_ttl: Duration,
+    pub task_poll_interval: Duration,
+}
+
+/// Configuration that has passed path normalization and all subsystem checks.
+#[derive(Clone, Debug)]
+pub struct ValidatedServerConfig {
+    cache_root: PathBuf,
+    policy: PolicyConfig,
+    runner: ValidatedRunnerConfig,
+    retention: RetentionConfig,
+    mcp: McpConfig,
+}
+
+impl ValidatedServerConfig {
     pub fn load(cli: &Cli) -> anyhow::Result<Self> {
         let config_path = cli.config.clone().or_else(default_config_path_if_present);
-        let mut config = if let Some(path) = &config_path {
+        let mut raw: RawServerConfig = if let Some(path) = &config_path {
             let source = std::fs::read_to_string(path)
                 .with_context(|| format!("read configuration {}", path.display()))?;
             toml::from_str(&source)
                 .with_context(|| format!("parse configuration {}", path.display()))?
         } else {
-            Self::default()
+            RawServerConfig::default()
         };
-        config
-            .allowed_roots
-            .extend(cli.allowed_roots.iter().cloned());
+        raw.allowed_roots.extend(cli.allowed_roots.iter().cloned());
         if let Some(cache_root) = &cli.cache_root {
-            config.cache_root = cache_root.clone();
+            raw.cache_root = cache_root.clone();
         }
-        if config.global_concurrency == 0 {
-            anyhow::bail!("global concurrency must be greater than zero");
-        }
-        if config.maximum_pending_invocations < config.global_concurrency {
-            anyhow::bail!("maximum pending invocations must be at least global concurrency");
-        }
-        if config.maximum_timeout_seconds == 0 {
-            anyhow::bail!("maximum timeout must be greater than zero");
-        }
-        if config.default_timeout_seconds > config.maximum_timeout_seconds {
-            anyhow::bail!("default timeout exceeds maximum timeout");
-        }
-        if config.maximum_storage_bytes == 0 {
-            anyhow::bail!("maximum storage bytes must be greater than zero");
-        }
-        if config.progress_initial_seconds == 0 || config.progress_interval_seconds == 0 {
-            anyhow::bail!("progress timing must be greater than zero");
-        }
-        if config.version_check_timeout_seconds == 0 {
-            anyhow::bail!("version check timeout must be greater than zero");
-        }
-        if config.retention_cleanup_interval_seconds == 0 {
-            anyhow::bail!("retention cleanup interval must be greater than zero");
-        }
-        if config.isolated_bazel_server_idle_seconds == 0 {
-            anyhow::bail!("isolated Bazel server idle timeout must be greater than zero");
-        }
-        if config.task_ttl_seconds == 0 {
-            anyhow::bail!("task TTL must be greater than zero");
-        }
-        if !(100..=60_000).contains(&config.task_poll_interval_ms) {
+        Self::try_from_raw(raw, config_path.as_deref())
+    }
+
+    fn try_from_raw(mut raw: RawServerConfig, config_path: Option<&Path>) -> anyhow::Result<Self> {
+        if !(100..=60_000).contains(&raw.task_poll_interval_ms) {
             anyhow::bail!("task poll interval must be between 100 and 60000 milliseconds");
         }
-        if !config.allow_unsupported_bazel_versions
-            && config.supported_bazel_major_versions.is_empty()
-        {
-            anyhow::bail!("supported Bazel major versions must not be empty");
-        }
-        config.starlark.canonicalize_files(config_path.as_deref())?;
-        config.cache_root = canonicalize_with_missing_tail(&config.cache_root)?;
-        config.allowed_roots = config
+        raw.starlark.canonicalize_files(config_path)?;
+        raw.cache_root = canonicalize_with_missing_tail(&raw.cache_root)?;
+        raw.allowed_roots = raw
             .allowed_roots
             .iter()
             .map(|root| {
@@ -276,27 +291,189 @@ impl ServerConfig {
                     .with_context(|| format!("canonicalize allowed root {}", root.display()))
             })
             .collect::<anyhow::Result<_>>()?;
-        if let Some(output_user_root) = &config.output_user_root {
-            config.output_user_root = Some(canonicalize_with_missing_tail(output_user_root)?);
+        if let Some(output_user_root) = &raw.output_user_root {
+            raw.output_user_root = Some(canonicalize_with_missing_tail(output_user_root)?);
         }
-        if let Some(executable) = &config.bazel_executable {
-            config.bazel_executable = Some(canonicalize_with_missing_tail(executable)?);
+        if let Some(executable) = &raw.bazel_executable {
+            raw.bazel_executable = Some(canonicalize_with_missing_tail(executable)?);
         }
-        for root in &config.allowed_roots {
-            let cache = &config.cache_root;
-            if cache.starts_with(root) {
+        for root in &raw.allowed_roots {
+            if raw.cache_root.starts_with(root) {
                 anyhow::bail!("cache root must not be inside an allowed Bazel workspace root");
             }
         }
+
+        let global_concurrency = NonZeroUsize::new(raw.global_concurrency)
+            .context("global concurrency must be greater than zero")?;
+        let maximum_pending_invocations = NonZeroUsize::new(raw.maximum_pending_invocations)
+            .context("maximum pending invocations must be greater than zero")?;
+        let maximum_storage_bytes = NonZeroU64::new(raw.maximum_storage_bytes)
+            .context("maximum storage bytes must be greater than zero")?;
+
+        let retention = RetentionConfig {
+            maximum_age: Duration::from_secs(raw.retention_days.saturating_mul(24 * 60 * 60)),
+            maximum_storage_bytes,
+            cleanup_interval: nonzero_duration(
+                raw.retention_cleanup_interval_seconds,
+                "retention cleanup interval must be greater than zero",
+            )?,
+        };
+        let mcp = McpConfig {
+            result_encoding: raw.result_encoding,
+            progress_initial: nonzero_duration(
+                raw.progress_initial_seconds,
+                "progress timing must be greater than zero",
+            )?,
+            progress_interval: nonzero_duration(
+                raw.progress_interval_seconds,
+                "progress timing must be greater than zero",
+            )?,
+            execution_policy: raw.mcp_execution_policy,
+            task_ttl: nonzero_duration(raw.task_ttl_seconds, "task TTL must be greater than zero")?,
+            task_poll_interval: Duration::from_millis(raw.task_poll_interval_ms),
+        };
+        let policy = PolicyConfig {
+            allowed_roots: raw.allowed_roots,
+            allowed_commands: raw.allowed_commands,
+            denied_commands: raw.denied_commands,
+            environment_allowlist: raw.environment_allowlist,
+            redaction_patterns: raw.redaction_patterns,
+            bazel_executable: raw.bazel_executable,
+        };
+        let runner = ValidatedRunnerConfig {
+            default_timeout: Duration::from_secs(raw.default_timeout_seconds),
+            maximum_timeout: Duration::from_secs(raw.maximum_timeout_seconds),
+            cancellation_interrupt_grace: Duration::from_secs(
+                raw.cancellation_interrupt_grace_seconds,
+            ),
+            cancellation_terminate_grace: Duration::from_secs(
+                raw.cancellation_terminate_grace_seconds,
+            ),
+            global_concurrency,
+            output_user_root: raw.output_user_root,
+            isolated_bazel_server_idle_timeout: Duration::from_secs(
+                raw.isolated_bazel_server_idle_seconds,
+            ),
+            supported_bazel_major_versions: raw.supported_bazel_major_versions,
+            allow_unsupported_bazel_versions: raw.allow_unsupported_bazel_versions,
+            version_check_timeout: Duration::from_secs(raw.version_check_timeout_seconds),
+            maximum_pending_invocations,
+            output_base_lock_root: RunnerConfig::default().output_base_lock_root,
+            bep_transport: raw.bep_transport,
+            starlark_reducers: raw.starlark.runner_config(),
+        };
+        let config = Self {
+            cache_root: raw.cache_root,
+            policy,
+            runner,
+            retention,
+            mcp,
+        };
+        RunnerConfig::from(&config)
+            .validate()
+            .context("validate runner configuration")?;
         Ok(config)
     }
 
     #[must_use]
     pub fn clamp_timeout(&self, requested: Option<u64>) -> u64 {
         requested
-            .unwrap_or(self.default_timeout_seconds)
-            .clamp(1, self.maximum_timeout_seconds)
+            .unwrap_or(self.runner.default_timeout.as_secs())
+            .clamp(1, self.runner.maximum_timeout.as_secs())
     }
+
+    #[must_use]
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    #[must_use]
+    pub fn shutdown_wait(&self) -> Duration {
+        self.runner
+            .cancellation_interrupt_grace
+            .saturating_add(self.runner.cancellation_terminate_grace)
+            .saturating_add(Duration::from_secs(5))
+    }
+}
+
+impl TryFrom<RawServerConfig> for ValidatedServerConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawServerConfig) -> Result<Self, Self::Error> {
+        Self::try_from_raw(raw, None)
+    }
+}
+
+impl From<&ValidatedServerConfig> for PolicyConfig {
+    fn from(config: &ValidatedServerConfig) -> Self {
+        config.policy.clone()
+    }
+}
+
+impl From<ValidatedServerConfig> for PolicyConfig {
+    fn from(config: ValidatedServerConfig) -> Self {
+        Self::from(&config)
+    }
+}
+
+impl From<&ValidatedServerConfig> for RunnerConfig {
+    fn from(config: &ValidatedServerConfig) -> Self {
+        let runner = &config.runner;
+        Self {
+            policy: PolicyConfig::from(config),
+            default_timeout: runner.default_timeout,
+            maximum_timeout: runner.maximum_timeout,
+            cancellation_interrupt_grace: runner.cancellation_interrupt_grace,
+            cancellation_terminate_grace: runner.cancellation_terminate_grace,
+            global_concurrency: runner.global_concurrency.get(),
+            output_user_root: runner.output_user_root.clone(),
+            isolated_bazel_server_idle_timeout: runner.isolated_bazel_server_idle_timeout,
+            supported_bazel_major_versions: runner.supported_bazel_major_versions.clone(),
+            allow_unsupported_bazel_versions: runner.allow_unsupported_bazel_versions,
+            version_check_timeout: runner.version_check_timeout,
+            maximum_pending_invocations: runner.maximum_pending_invocations.get(),
+            output_base_lock_root: runner.output_base_lock_root.clone(),
+            bep_transport: runner.bep_transport,
+            starlark_reducers: runner.starlark_reducers.clone(),
+        }
+    }
+}
+
+impl From<ValidatedServerConfig> for RunnerConfig {
+    fn from(config: ValidatedServerConfig) -> Self {
+        Self::from(&config)
+    }
+}
+
+impl From<&ValidatedServerConfig> for RetentionConfig {
+    fn from(config: &ValidatedServerConfig) -> Self {
+        config.retention.clone()
+    }
+}
+
+impl From<ValidatedServerConfig> for RetentionConfig {
+    fn from(config: ValidatedServerConfig) -> Self {
+        Self::from(&config)
+    }
+}
+
+impl From<&ValidatedServerConfig> for McpConfig {
+    fn from(config: &ValidatedServerConfig) -> Self {
+        config.mcp.clone()
+    }
+}
+
+impl From<ValidatedServerConfig> for McpConfig {
+    fn from(config: ValidatedServerConfig) -> Self {
+        Self::from(&config)
+    }
+}
+
+fn nonzero_duration(seconds: u64, message: &'static str) -> anyhow::Result<Duration> {
+    if seconds == 0 {
+        anyhow::bail!(message);
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
@@ -412,14 +589,14 @@ mod tests {
         fs::create_dir(&workspace).unwrap();
 
         let concurrency = write_config(root.path(), &workspace, "global_concurrency = 0\n");
-        assert!(ServerConfig::load(&cli(concurrency)).is_err());
+        assert!(ValidatedServerConfig::load(&cli(concurrency)).is_err());
 
         let timeout = write_config(
             root.path(),
             &workspace,
             "default_timeout_seconds = 0\nmaximum_timeout_seconds = 0\n",
         );
-        assert!(ServerConfig::load(&cli(timeout)).is_err());
+        assert!(ValidatedServerConfig::load(&cli(timeout)).is_err());
     }
 
     #[test]
@@ -432,9 +609,9 @@ mod tests {
         )
         .unwrap();
 
-        let config = ServerConfig::load(&cli(path)).unwrap();
+        let config = ValidatedServerConfig::load(&cli(path)).unwrap();
 
-        assert!(config.allowed_roots.is_empty());
+        assert!(config.policy.allowed_roots.is_empty());
     }
 
     #[test]
@@ -456,10 +633,16 @@ mod tests {
         )
         .unwrap();
 
-        let config = ServerConfig::load(&cli(path)).unwrap();
+        let config = ValidatedServerConfig::load(&cli(path)).unwrap();
 
-        assert_eq!(config.starlark.files, vec![reducer.canonicalize().unwrap()]);
-        assert_eq!(config.starlark.timeout_ms, 100);
+        assert_eq!(
+            config.runner.starlark_reducers.files,
+            vec![reducer.canonicalize().unwrap()]
+        );
+        assert_eq!(
+            config.runner.starlark_reducers.limits.timeout,
+            Duration::from_millis(100)
+        );
     }
 
     #[test]
@@ -475,7 +658,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(ServerConfig::load(&cli(path)).is_err());
+        assert!(ValidatedServerConfig::load(&cli(path)).is_err());
     }
 
     #[cfg(unix)]
@@ -495,7 +678,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = ServerConfig::load(&cli(path)).unwrap_err();
+        let error = ValidatedServerConfig::load(&cli(path)).unwrap_err();
         assert!(error.to_string().contains("cache root must not be inside"));
     }
 
@@ -512,7 +695,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(ServerConfig::load(&cli(path)).is_err());
+        assert!(ValidatedServerConfig::load(&cli(path)).is_err());
     }
 
     #[test]
@@ -532,8 +715,8 @@ mod tests {
                 &workspace,
                 &format!("result_encoding = {name:?}\n"),
             );
-            let config = ServerConfig::load(&cli(path)).unwrap();
-            assert_eq!(config.result_encoding, expected);
+            let config = ValidatedServerConfig::load(&cli(path)).unwrap();
+            assert_eq!(config.mcp.result_encoding, expected);
         }
     }
 
@@ -541,14 +724,14 @@ mod tests {
     fn toon_is_the_default_result_encoding() {
         assert_eq!(ResultEncoding::default(), ResultEncoding::Toon);
         assert_eq!(
-            ServerConfig::default().result_encoding,
+            RawServerConfig::default().result_encoding,
             ResultEncoding::Toon
         );
     }
 
     #[test]
     fn task_configuration_defaults_and_round_trips() {
-        let config = ServerConfig::default();
+        let config = RawServerConfig::default();
         assert_eq!(config.mcp_execution_policy, McpExecutionPolicy::Auto);
         assert_eq!(config.task_ttl_seconds, 86_400);
         assert_eq!(config.task_poll_interval_ms, 2_000);
@@ -567,7 +750,7 @@ mod tests {
 
     #[test]
     fn bep_transport_defaults_to_tail_and_accepts_fifo_and_bes() {
-        assert_eq!(ServerConfig::default().bep_transport, BepTransport::Tail);
+        assert_eq!(RawServerConfig::default().bep_transport, BepTransport::Tail);
         assert_eq!(
             serde_json::from_str::<BepTransport>("\"fifo\"").unwrap(),
             BepTransport::Fifo
@@ -591,7 +774,10 @@ mod tests {
             "task_poll_interval_ms = 60001\n",
         ] {
             let path = write_config(root.path(), &workspace, extra);
-            assert!(ServerConfig::load(&cli(path)).is_err(), "accepted {extra}");
+            assert!(
+                ValidatedServerConfig::load(&cli(path)).is_err(),
+                "accepted {extra}"
+            );
         }
 
         for (name, expected) in [
@@ -606,8 +792,73 @@ mod tests {
                     "mcp_execution_policy = {name:?}\ntask_ttl_seconds = 1\ntask_poll_interval_ms = 100\n"
                 ),
             );
-            let config = ServerConfig::load(&cli(path)).unwrap();
-            assert_eq!(config.mcp_execution_policy, expected);
+            let config = ValidatedServerConfig::load(&cli(path)).unwrap();
+            assert_eq!(config.mcp.execution_policy, expected);
         }
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_and_starlark_settings() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+
+        let top_level = write_config(root.path(), &workspace, "concurency = 4\n");
+        let error = ValidatedServerConfig::load(&cli(top_level)).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `concurency`"));
+
+        let starlark = write_config(
+            root.path(),
+            &workspace,
+            "[starlark]\nmax_tick_count = 100\n",
+        );
+        let error = ValidatedServerConfig::load(&cli(starlark)).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `max_tick_count`"));
+    }
+
+    #[test]
+    fn projects_validated_typed_subsystem_configuration() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let path = write_config(
+            root.path(),
+            &workspace,
+            concat!(
+                "global_concurrency = 3\n",
+                "maximum_pending_invocations = 5\n",
+                "default_timeout_seconds = 7\n",
+                "maximum_timeout_seconds = 9\n",
+                "retention_days = 2\n",
+                "maximum_storage_bytes = 123\n",
+                "retention_cleanup_interval_seconds = 11\n",
+                "progress_initial_seconds = 12\n",
+                "progress_interval_seconds = 13\n",
+                "task_ttl_seconds = 14\n",
+                "task_poll_interval_ms = 150\n",
+            ),
+        );
+
+        let config = ValidatedServerConfig::load(&cli(path)).unwrap();
+        let policy = PolicyConfig::from(&config);
+        let runner = RunnerConfig::from(&config);
+        let retention = RetentionConfig::from(&config);
+        let mcp = McpConfig::from(&config);
+
+        assert_eq!(
+            policy.allowed_roots,
+            vec![workspace.canonicalize().unwrap()]
+        );
+        assert_eq!(runner.global_concurrency, 3);
+        assert_eq!(runner.maximum_pending_invocations, 5);
+        assert_eq!(runner.default_timeout, Duration::from_secs(7));
+        assert_eq!(runner.maximum_timeout, Duration::from_secs(9));
+        assert_eq!(retention.maximum_age, Duration::from_secs(2 * 24 * 60 * 60));
+        assert_eq!(retention.maximum_storage_bytes.get(), 123);
+        assert_eq!(retention.cleanup_interval, Duration::from_secs(11));
+        assert_eq!(mcp.progress_initial, Duration::from_secs(12));
+        assert_eq!(mcp.progress_interval, Duration::from_secs(13));
+        assert_eq!(mcp.task_ttl, Duration::from_secs(14));
+        assert_eq!(mcp.task_poll_interval, Duration::from_millis(150));
     }
 }
