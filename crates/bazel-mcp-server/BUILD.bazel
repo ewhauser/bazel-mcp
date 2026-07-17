@@ -19,7 +19,7 @@ rust_library(
     rustc_env = {
         "CARGO_PKG_DESCRIPTION": "A token-efficient MCP server for Bazel invocations",
     },
-    version = "0.5.0",  # x-release-please-version
+    version = "0.5.1",  # x-release-please-version
 )
 
 rust_binary(
