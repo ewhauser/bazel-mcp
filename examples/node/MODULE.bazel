@@ -22,3 +22,20 @@ filegroup(
     sha256 = "10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3",
     urls = ["https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"],
 )
+
+http_archive(
+    name = "swc_wasm",
+    build_file_content = """
+exports_files([
+    "package/wasm.js",
+    "package/wasm_bg.wasm",
+])
+filegroup(
+    name = "wasm",
+    srcs = glob(["package/**"]),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "c4179b41b0945e44a1e668f1d6b67ca76b22ac7237f912ff558ec4095d2d0825",
+    urls = ["https://registry.npmjs.org/@swc/wasm/-/wasm-1.15.43.tgz"],
+)

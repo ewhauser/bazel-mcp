@@ -24,3 +24,17 @@ genrule(
         "@typescript//:typescript",
     ],
 )
+
+genrule(
+    name = "swc_syntax_failure",
+    srcs = ["swc_syntax_failure.ts"],
+    outs = ["swc_syntax_failure.js"],
+    cmd = "$(NODE_PATH) $(execpath swc_driver.js) $(execpath @swc_wasm//:package/wasm.js) $(execpath swc_syntax_failure.ts) > $@",
+    tags = ["manual", "reducer-fixture"],
+    toolchains = ["@nodejs_toolchains//:resolved_toolchain"],
+    tools = [
+        "swc_driver.js",
+        "@swc_wasm//:package/wasm.js",
+        "@swc_wasm//:wasm",
+    ],
+)

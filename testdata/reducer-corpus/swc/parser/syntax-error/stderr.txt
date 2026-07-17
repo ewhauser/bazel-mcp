@@ -1,0 +1,26 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+DEBUG: <RUNTIME_ROOT>/bazel/0ae6fbcfd3c5e0895110cbe066f8fbf7/external/aspect_tools_telemetry+/extension.bzl:160:14: Aspect Telemetry will begin collecting ruleset usage data on the next invocation, pursuant to the https://aspect.build/privacy-policy.
+
+See https://github.com/aspect-build/tools_telemetry for details and opt-out instructions.
+INFO: Analyzed target //cases:swc_syntax_failure (98 packages loaded, 5436 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:28:8: Executing genrule //cases:swc_syntax_failure failed: (Exit 1): bash failed: error executing Genrule command (from genrule rule target //cases:swc_syntax_failure) /bin/bash -c ... (remaining 1 argument skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+  x Expression expected
+   ,-[cases/swc_syntax_failure.ts:2:1]
+ 1 | export const invoice = {
+ 2 |   total: ,
+   :          ^
+ 3 | };
+   `----
+
+
+Caused by:
+    0: failed to process js file
+    1: Syntax Error
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 14.476s, Critical Path: 0.90s
+INFO: 2 processes: 2 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

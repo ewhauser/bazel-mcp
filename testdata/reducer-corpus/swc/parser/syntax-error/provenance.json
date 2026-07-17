@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "case": "swc/parser/syntax-error",
+  "workspace": "examples/node",
+  "command": "build",
+  "args": [
+    "//cases:swc_syntax_failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "@swc/wasm",
+  "tool_version": "1.15.43",
+  "rules": {
+    "aspect_rules_js": "3.2.3",
+    "rules_nodejs": "6.7.3"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}
