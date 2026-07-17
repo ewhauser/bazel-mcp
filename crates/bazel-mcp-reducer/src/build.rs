@@ -1167,7 +1167,7 @@ fn cpp_linker_diagnostic(message: String, location: Option<DiagnosticLocation>) 
 }
 
 fn compact_cpp_path(path: &str) -> String {
-    let path = path.trim_matches('"').replace('\\', "/");
+    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
     if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
         && let Some((_, relative)) = after_execroot.split_once('/')
     {
@@ -1389,6 +1389,7 @@ fn compact_javascript_path(path: &str) -> String {
         .strip_prefix("file://")
         .unwrap_or(path)
         .replace('\\', "/");
+    let path = strip_workspace_marker(path);
     for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
         if let Some((_, relative)) = path.rsplit_once(marker) {
             return relative.to_owned();
@@ -1441,7 +1442,7 @@ fn parse_protobuf_diagnostic(line: &str) -> Option<Diagnostic> {
 }
 
 fn compact_protobuf_path(path: &str) -> String {
-    let path = path.trim_matches('"').replace('\\', "/");
+    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
     if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
         && let Some((_, relative)) = after_execroot.split_once('/')
     {
@@ -1658,7 +1659,7 @@ fn parse_java_stack_frame(line: &str) -> Option<(DiagnosticLocation, bool)> {
 }
 
 fn compact_java_path(path: &str) -> String {
-    let path = path.trim_matches('"').replace('\\', "/");
+    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
     if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
         && let Some((_, relative)) = after_execroot.split_once('/')
     {
@@ -1840,7 +1841,7 @@ fn is_starlark_root_cause_message(message: &str) -> bool {
 }
 
 fn compact_starlark_path(path: &str) -> String {
-    let path = path.trim_matches('"').replace('\\', "/");
+    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
     if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
         && let Some((_, relative)) = after_execroot.split_once('/')
     {
@@ -1894,7 +1895,11 @@ fn parse_python_location(line: &str) -> Option<DiagnosticLocation> {
     let start = line.find(marker)? + marker.len();
     let remainder = &line[start..];
     let (path, remainder) = remainder.split_once("\", line ")?;
-    if path.starts_with('<') || path.ends_with("_stage2_bootstrap.py") {
+    let synthetic_path = path.starts_with('<')
+        && !path.starts_with("<RUNTIME_ROOT>/")
+        && !path.starts_with("<WORKSPACE>/")
+        && !path.starts_with("<workspace>/");
+    if synthetic_path || path.ends_with("_stage2_bootstrap.py") {
         return None;
     }
     let digits = remainder
@@ -1940,7 +1945,7 @@ fn python_exception_message(line: &str) -> Option<&str> {
 }
 
 fn compact_python_path(path: &str) -> String {
-    let path = path.trim_matches('"').replace('\\', "/");
+    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
     for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
         if let Some((_, relative)) = path.rsplit_once(marker) {
             return relative.to_owned();
@@ -2030,13 +2035,20 @@ fn strict_dependency_diagnostic(line: &str) -> Option<Diagnostic> {
 }
 
 fn compact_go_path(path: &str) -> String {
-    let path = path.trim_matches('"').replace('\\', "/");
+    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
     if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
         && let Some((_, relative)) = after_execroot.split_once('/')
     {
         return relative.to_owned();
     }
     path
+}
+
+fn strip_workspace_marker(path: String) -> String {
+    path.strip_prefix("<WORKSPACE>/")
+        .or_else(|| path.strip_prefix("<workspace>/"))
+        .unwrap_or(&path)
+        .to_owned()
 }
 
 fn is_actionable(line: &str) -> bool {
@@ -2764,6 +2776,16 @@ ERROR: Build did NOT complete successfully
     }
 
     #[test]
+    fn compacts_sanitized_workspace_markers_in_source_locations() {
+        let diagnostic = parse_starlark_inline_diagnostic(
+            "ERROR: <WORKSPACE>/pkg/defs.bzl:4:2: syntax error at ')': expected ]",
+        )
+        .unwrap();
+
+        assert_eq!(diagnostic.location.unwrap().path, "pkg/defs.bzl");
+    }
+
+    #[test]
     fn extracts_starlark_macro_failure_from_the_innermost_frame() {
         let summary = reduce_invocation(ReductionInput {
             events: &[],
@@ -2895,6 +2917,19 @@ AssertionError: 42 != 41
                 column: None,
             })
         );
+    }
+
+    #[test]
+    fn preserves_locations_after_recording_path_sanitization() {
+        let mut parser = PythonDiagnosticParser::default();
+        parser.observe_line(
+            "  File \"<RUNTIME_ROOT>/sandbox/execroot/_main/bazel-out/bin/test.runfiles/_main/pkg/test_invoice.py\", line 7",
+        );
+        let diagnostic = parser
+            .observe_line("ValueError: unsupported currency")
+            .unwrap();
+
+        assert_eq!(diagnostic.location.unwrap().path, "pkg/test_invoice.py");
     }
 
     #[test]
