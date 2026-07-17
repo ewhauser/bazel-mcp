@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
@@ -47,7 +46,7 @@ use crate::{
 #[cfg(test)]
 use crate::{query_paging::QUERY_LINE_LIMIT, record::InvocationSummaryHeader};
 
-const GENERATION_POLL_INTERVAL_US: u64 = 1_000;
+const CHANGE_POLL_INTERVAL_US: u64 = 1_000;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -81,8 +80,8 @@ pub(crate) struct StoreInner {
     pub(crate) index: RwLock<Index>,
     mutation_locks: Mutex<BTreeMap<InvocationId, Weak<Mutex<()>>>>,
     owner_leases: Mutex<BTreeMap<InvocationId, ProcessLock>>,
-    observed_generation: AtomicU64,
-    next_generation_check_us: AtomicU64,
+    change_state: Mutex<ChangeState>,
+    next_change_check_us: AtomicU64,
     manifest_commits: AtomicU64,
     manifest_bytes_written: AtomicU64,
     payload_recounts: AtomicU64,
@@ -141,17 +140,18 @@ impl Store {
         create_private_directory_all(&cache_root.join("trash")).await?;
         create_private_directory_all(&cache_root.join("owners")).await?;
         create_private_directory_all(&cache_root.join("mutations")).await?;
+        create_private_directory_all(&cache_root.join("changes")).await?;
 
         let _maintenance = ProcessLock::acquire(cache_root.join("MAINTENANCE")).await?;
-        let _metadata = ProcessLock::acquire(cache_root.join("LOCK")).await?;
+        let mut change_publisher = ChangePublisher::create(&cache_root).await?;
+        cleanup_stale_change_publishers(&cache_root)?;
         recover_trash(&cache_root).await?;
         let (mut index, startup_stats) = load_index(&cache_root, true).await?;
         let recovered = recover_interrupted(&cache_root, &mut index).await?;
-        let generation = if recovered == 0 {
-            read_generation(&cache_root)?
-        } else {
-            bump_generation(&cache_root)?
-        };
+        if recovered != 0 {
+            change_publisher.publish()?;
+        }
+        let observed_changes = read_changes(&cache_root)?;
 
         Ok(Self {
             cache_root,
@@ -159,8 +159,11 @@ impl Store {
                 index: RwLock::new(index),
                 mutation_locks: Mutex::new(BTreeMap::new()),
                 owner_leases: Mutex::new(BTreeMap::new()),
-                observed_generation: AtomicU64::new(generation),
-                next_generation_check_us: AtomicU64::new(0),
+                change_state: Mutex::new(ChangeState {
+                    publisher: change_publisher,
+                    observed: observed_changes,
+                }),
+                next_change_check_us: AtomicU64::new(0),
                 manifest_commits: AtomicU64::new(0),
                 manifest_bytes_written: AtomicU64::new(0),
                 payload_recounts: AtomicU64::new(0),
@@ -224,50 +227,41 @@ impl Store {
                     replace_index_entry(&mut index, id, entry);
                 }
             }
-            self.commit_generation().await?;
+            self.publish_change().await?;
             return Ok(recovered_count);
         }
         Ok(0)
     }
 
-    pub(crate) async fn commit_generation(&self) -> Result<u64, StoreError> {
-        let _metadata = ProcessLock::acquire(self.cache_root.join("LOCK")).await?;
-        let previous = read_generation(&self.cache_root)?;
-        let generation = write_generation(&self.cache_root, previous.saturating_add(1))?;
-        if self.inner.observed_generation.load(Ordering::Acquire) == previous {
-            self.inner
-                .observed_generation
-                .store(generation, Ordering::Release);
-        }
-        Ok(generation)
+    pub(crate) async fn publish_change(&self) -> Result<(), StoreError> {
+        let mut state = self.inner.change_state.lock().await;
+        let (publisher, change) = state.publisher.publish()?;
+        state.observed.insert(publisher, change);
+        Ok(())
     }
 
     pub(crate) async fn refresh_index_if_stale(&self) -> Result<(), StoreError> {
-        if !self.claim_generation_check() {
+        if !self.claim_change_check() {
             return Ok(());
         }
         self.refresh_index_if_changed().await
     }
 
     async fn refresh_index_if_changed(&self) -> Result<(), StoreError> {
-        let observed = self.inner.observed_generation.load(Ordering::Acquire);
-        if read_generation(&self.cache_root)? == observed {
-            return Ok(());
-        }
         self.refresh_index(false).await
     }
 
-    fn claim_generation_check(&self) -> bool {
+    fn claim_change_check(&self) -> bool {
         let now = monotonic_us();
-        let next = self.inner.next_generation_check_us.load(Ordering::Acquire);
+        let next = self.inner.next_change_check_us.load(Ordering::Acquire);
         if now < next {
             return false;
         }
         self.inner
-            .next_generation_check_us
+            .next_change_check_us
             .compare_exchange(
                 next,
-                now.saturating_add(GENERATION_POLL_INTERVAL_US),
+                now.saturating_add(CHANGE_POLL_INTERVAL_US),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -275,9 +269,9 @@ impl Store {
     }
 
     pub(crate) async fn refresh_index(&self, force: bool) -> Result<(), StoreError> {
-        let _metadata = ProcessLock::acquire(self.cache_root.join("LOCK")).await?;
-        let generation = read_generation(&self.cache_root)?;
-        if !force && generation == self.inner.observed_generation.load(Ordering::Acquire) {
+        let mut state = self.inner.change_state.lock().await;
+        let changes = read_changes(&self.cache_root)?;
+        if !force && changes == state.observed {
             return Ok(());
         }
         let (mut refreshed, _) = load_index(&self.cache_root, false).await?;
@@ -286,9 +280,7 @@ impl Store {
             merge_pending_telemetry(&previous, &mut refreshed);
         }
         *self.inner.index.write().await = refreshed;
-        self.inner
-            .observed_generation
-            .store(generation, Ordering::Release);
+        state.observed = changes;
         Ok(())
     }
 
@@ -367,7 +359,7 @@ impl Store {
                 payload_bytes: 0,
             };
             let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
-            self.commit_generation().await?;
+            self.publish_change().await?;
             Ok::<_, StoreError>((durable, retained_bytes))
         }
         .await;
@@ -439,7 +431,7 @@ impl Store {
             .await
         {
             Ok(retained_bytes) => {
-                self.commit_generation().await?;
+                self.publish_change().await?;
                 retained_bytes
             }
             Err(error) if error_is_not_found(&error) => {
@@ -514,7 +506,7 @@ impl Store {
         }
         write_details(&paths, &result).await?;
         let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
-        self.commit_generation().await?;
+        self.publish_change().await?;
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         mark_telemetry_flushed(&mut index, id, telemetry_generation);
@@ -639,7 +631,7 @@ impl Store {
         let (mut durable, _) = read_durable(&paths.manifest).await?;
         merge_telemetry(&metrics, &mut durable.invocation.metrics);
         let retained_bytes = self.persist_durable(&paths, &mut durable, false).await?;
-        self.commit_generation().await?;
+        self.publish_change().await?;
         let mut index = self.inner.index.write().await;
         let (previous, clean) = {
             let Some(entry) = index.entries.get_mut(&id) else {
@@ -691,7 +683,7 @@ impl Store {
         }
         let (mut durable, _) = read_durable(&paths.manifest).await?;
         let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
-        self.commit_generation().await?;
+        self.publish_change().await?;
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         Ok(())
@@ -887,7 +879,7 @@ impl Store {
         let retained_bytes = self
             .persist_durable(&paths, &mut durable, recount_payload)
             .await?;
-        self.commit_generation().await?;
+        self.publish_change().await?;
         let mut index = self.inner.index.write().await;
         replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
         mark_telemetry_flushed(&mut index, id, telemetry_generation);
@@ -1462,56 +1454,118 @@ pub(crate) fn mutation_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf
     cache_root.join("mutations").join(format!("{id}.lock"))
 }
 
-fn read_generation(cache_root: &Path) -> Result<u64, StoreError> {
-    let path = cache_root.join("GENERATION");
-    match std::fs::read_to_string(&path) {
-        Ok(value) => value.trim().parse::<u64>().map_err(|error| {
-            StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid cache generation in {}: {error}", path.display()),
-            ))
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error.into()),
+struct ChangeState {
+    publisher: ChangePublisher,
+    observed: BTreeMap<uuid::Uuid, uuid::Uuid>,
+}
+
+struct ChangePublisher {
+    id: uuid::Uuid,
+    marker: PathBuf,
+    _lease: ProcessLock,
+}
+
+impl ChangePublisher {
+    async fn create(cache_root: &Path) -> Result<Self, StoreError> {
+        let id = uuid::Uuid::now_v7();
+        let change = uuid::Uuid::now_v7();
+        let directory = cache_root.join("changes");
+        let lease = ProcessLock::acquire(directory.join(format!("{id}.lock"))).await?;
+        let marker = directory.join(format!("{id}.{change}"));
+        create_private_marker(&marker)?;
+        Ok(Self {
+            id,
+            marker,
+            _lease: lease,
+        })
+    }
+
+    fn publish(&mut self) -> Result<(uuid::Uuid, uuid::Uuid), StoreError> {
+        let change = uuid::Uuid::now_v7();
+        let next = self.marker.with_file_name(format!("{}.{change}", self.id));
+        std::fs::rename(&self.marker, &next)?;
+        self.marker = next;
+        Ok((self.id, change))
     }
 }
 
-fn bump_generation(cache_root: &Path) -> Result<u64, StoreError> {
-    let generation = read_generation(cache_root)?.saturating_add(1);
-    write_generation(cache_root, generation)
-}
-
-fn write_generation(cache_root: &Path, generation: u64) -> Result<u64, StoreError> {
-    let path = cache_root.join("GENERATION");
-    let previous = read_generation(cache_root)?;
-    if generation != previous.saturating_add(1) {
-        return Err(StoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "cache generation must advance from {previous} to {}, got {generation}",
-                previous.saturating_add(1)
-            ),
-        )));
-    }
-    let temporary = path.with_extension("tmp");
+fn create_private_marker(path: &Path) -> Result<(), StoreError> {
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.create_new(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&temporary)?;
-    file.write_all(generation.to_string().as_bytes())?;
-    drop(file);
-    std::fs::rename(temporary, path)?;
-    Ok(generation)
+    drop(options.open(path)?);
+    Ok(())
+}
+
+fn parse_change_marker(name: &std::ffi::OsStr) -> Option<(uuid::Uuid, uuid::Uuid)> {
+    let (publisher, change) = name.to_str()?.split_once('.')?;
+    Some((publisher.parse().ok()?, change.parse().ok()?))
+}
+
+fn read_changes(cache_root: &Path) -> Result<BTreeMap<uuid::Uuid, uuid::Uuid>, StoreError> {
+    let mut changes = BTreeMap::new();
+    for entry in std::fs::read_dir(cache_root.join("changes"))? {
+        let entry = entry?;
+        if let Some((publisher, change)) = parse_change_marker(&entry.file_name()) {
+            changes.insert(publisher, change);
+        }
+    }
+    Ok(changes)
+}
+
+fn cleanup_stale_change_publishers(cache_root: &Path) -> Result<(), StoreError> {
+    let directory = cache_root.join("changes");
+    let mut stale = Vec::new();
+    for entry in std::fs::read_dir(&directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("lock") {
+            continue;
+        }
+        let Some(publisher) = path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .and_then(|value| value.parse::<uuid::Uuid>().ok())
+        else {
+            continue;
+        };
+        if let Some(lease) = ProcessLock::try_acquire_blocking(&path)? {
+            drop(lease);
+            stale.push((publisher, path));
+        }
+    }
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let stale_ids = stale
+        .iter()
+        .map(|(publisher, _)| *publisher)
+        .collect::<std::collections::BTreeSet<_>>();
+    for entry in std::fs::read_dir(&directory)? {
+        let entry = entry?;
+        if let Some((publisher, _)) = parse_change_marker(&entry.file_name())
+            && stale_ids.contains(&publisher)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    for (_, lock) in stale {
+        let _ = std::fs::remove_file(lock);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::{
+        io::Write as _,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
 
     use bazel_mcp_types::{
         BazelCommand, CoverageSummary, InvocationRequest, TargetCounts, TestCounts, TestStatus,
@@ -1630,6 +1684,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_publisher_preserves_an_unseen_change_notification() {
+        let root = TempDir::new().unwrap();
+        let writer = Store::open(root.path()).await.unwrap();
+        let observer = Store::open(root.path()).await.unwrap();
+        let record = record(&root.path().join("worktree-a"));
+        let id = record.request.id;
+        writer.create_invocation(&record).await.unwrap();
+        let (marker, lease) = {
+            let state = writer.inner.change_state.lock().await;
+            (
+                state.publisher.marker.clone(),
+                root.path()
+                    .join("changes")
+                    .join(format!("{}.lock", state.publisher.id)),
+            )
+        };
+        drop(writer);
+
+        assert!(marker.exists());
+        assert!(lease.exists());
+        let _replacement = Store::open(root.path()).await.unwrap();
+        assert!(!marker.exists());
+        assert!(!lease.exists());
+        assert_eq!(observer.get_invocation(id).await.unwrap().request.id, id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_refresh_cannot_discard_concurrent_creations() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let refresher = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                for _ in 0..64 {
+                    store.refresh_index(true).await.unwrap();
+                }
+            })
+        };
+        let mut writers = Vec::new();
+        for ordinal in 0..64 {
+            let store = store.clone();
+            let workspace = root.path().join(format!("worktree-{ordinal}"));
+            writers.push(tokio::spawn(async move {
+                let record = record(&workspace);
+                let id = record.request.id;
+                store.create_invocation(&record).await.unwrap();
+                store
+                    .transition(id, InvocationState::Starting, None, None)
+                    .await
+                    .unwrap();
+                id
+            }));
+        }
+        let mut ids = Vec::new();
+        for writer in writers {
+            ids.push(writer.await.unwrap());
+        }
+        refresher.await.unwrap();
+        for id in ids {
+            assert_eq!(store.get_invocation(id).await.unwrap().request.id, id);
+        }
+    }
+
+    #[tokio::test]
     async fn startup_recovery_skips_invocations_owned_by_another_process() {
         let root = TempDir::new().unwrap();
         let first = Store::open(root.path()).await.unwrap();
@@ -1681,7 +1799,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maintenance_repairs_a_manifest_committed_before_generation_notification() {
+    async fn maintenance_repairs_a_manifest_committed_before_change_notification() {
         let root = TempDir::new().unwrap();
         let writer = Store::open(root.path()).await.unwrap();
         let observer = Store::open(root.path()).await.unwrap();
@@ -1689,10 +1807,10 @@ mod tests {
         let id = record.request.id;
         let paths = writer.create_invocation(&record).await.unwrap();
         observer.get_invocation(id).await.unwrap();
-        let generation = read_generation(root.path()).unwrap();
+        let changes = read_changes(root.path()).unwrap();
 
         // Simulate a process dying after its atomic manifest rename but before
-        // it can append the generation notification.
+        // it can publish the change notification.
         let (mut durable, _) = read_durable(&paths.manifest).await.unwrap();
         durable.invocation.state = InvocationState::Succeeded;
         durable.invocation.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms() - 1);
@@ -1700,7 +1818,7 @@ mod tests {
         durable.invocation.summary =
             Some(InvocationSummaryHeader::from(&InvocationSummary::default()));
         persist_durable(&paths, &mut durable, true).await.unwrap();
-        assert_eq!(read_generation(root.path()).unwrap(), generation);
+        assert_eq!(read_changes(root.path()).unwrap(), changes);
         drop(writer);
 
         assert_eq!(
@@ -2217,6 +2335,7 @@ mod tests {
             cache_root.join("trash"),
             cache_root.join("owners"),
             cache_root.join("mutations"),
+            cache_root.join("changes"),
             day.to_owned(),
             shard.to_owned(),
             paths.directory.clone(),
@@ -2228,10 +2347,13 @@ mod tests {
                 directory.display()
             );
         }
+        let change_state = store.inner.change_state.lock().await;
         for file in [
-            cache_root.join("LOCK"),
             cache_root.join("MAINTENANCE"),
-            cache_root.join("GENERATION"),
+            cache_root
+                .join("changes")
+                .join(format!("{}.lock", change_state.publisher.id)),
+            change_state.publisher.marker.clone(),
             owner_lock_path(&cache_root, record.request.id),
             mutation_lock_path(&cache_root, record.request.id),
             paths.manifest.clone(),

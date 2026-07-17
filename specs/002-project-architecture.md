@@ -319,12 +319,14 @@ crates/bazel-mcp-store/
 ```
 
 `Store` supports multiple server processes sharing one cache root. A process
-lock per invocation serializes its manifest and sidecar commits; the root lock
-only serializes generation advancement and index refresh. An owner lease
-identifies the process responsible for each nonterminal invocation. One
-maintenance lock elects recovery and global-retention work. Each process has a
-`RwLock`-protected compact index and refreshes it when the shared generation
-advances. Index locks are never held across Bazel execution, so independent
+lock per invocation serializes its manifest and sidecar commits. Each server
+owns one leased epoch marker and publishes a committed mutation by atomically
+renaming only that marker, so independent writers do not contend on root
+metadata. An owner lease identifies the process responsible for each
+nonterminal invocation. One maintenance lock elects recovery and
+global-retention work. Each process has a `RwLock`-protected compact index and
+refreshes it when the epoch-marker set changes. Index locks are never held
+across Bazel execution, so independent
 invocations and inspections can proceed concurrently. The index is rebuilt from
 versioned `manifest.json` files. UUIDv7 maps deterministically to a day bucket
 and bounded shard. Manifest and sidecar commits use write-private-temp plus

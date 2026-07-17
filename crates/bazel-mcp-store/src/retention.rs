@@ -19,7 +19,7 @@ use crate::{
 };
 
 const GC_LOW_WATERMARK_PERCENT: u64 = 80;
-const GC_GENERATION_BATCH_SIZE: usize = 64;
+const GC_NOTIFICATION_BATCH_SIZE: usize = 64;
 
 impl Store {
     pub async fn enforce_retention(
@@ -33,7 +33,7 @@ impl Store {
             return Ok(0);
         };
         // A forced scan also repairs the narrow crash window between an
-        // atomic manifest commit and its generation notification.
+        // atomic manifest commit and its change notification.
         self.refresh_index(true).await?;
         self.recover_orphaned_invocations().await?;
         let now_ms = bazel_mcp_types::unix_timestamp_ms();
@@ -143,7 +143,7 @@ impl Store {
         }
         if outcome.changed {
             *pending_notifications += 1;
-            if *pending_notifications >= GC_GENERATION_BATCH_SIZE {
+            if *pending_notifications >= GC_NOTIFICATION_BATCH_SIZE {
                 self.publish_retention_batch(pending_notifications, pending_lock_cleanup)
                     .await?;
             }
@@ -156,7 +156,7 @@ impl Store {
         pending_notifications: &mut usize,
         pending_lock_cleanup: &mut Vec<InvocationId>,
     ) -> Result<(), StoreError> {
-        let generation = self.commit_generation().await;
+        let change = self.publish_change().await;
         let ids = std::mem::take(pending_lock_cleanup);
         let cache_root = self.cache_root.clone();
         tokio::task::spawn_blocking(move || {
@@ -167,7 +167,7 @@ impl Store {
         })
         .await?;
         *pending_notifications = 0;
-        generation?;
+        change?;
         Ok(())
     }
 
