@@ -21,6 +21,6 @@ pub(crate) async fn set_private_file(path: &Path) -> Result<(), io::Error> {
 }
 
 #[cfg(not(unix))]
-async fn set_private_file(_path: &Path) -> Result<(), io::Error> {
+pub(crate) async fn set_private_file(_path: &Path) -> Result<(), io::Error> {
     Ok(())
 }

@@ -1,13 +1,15 @@
 //! Bazel process execution and terminal summary finalization.
 
 use std::{
-    io,
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     process::ExitStatus,
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::io;
 
 use bazel_mcp_policy::filtered_environment;
 use bazel_mcp_reducer::{
@@ -30,9 +32,12 @@ use crate::{
     output_base_lock::{NativeOutputBaseWaitObserver, OutputBaseWaitStatus},
     service::{
         BES_COMPLETION_GRACE, BepTransport, COMPLETE_BEP_LOG_LIMIT, FALLBACK_LOG_LIMIT,
-        InvocationService, RunnerConfig, RunnerError, bounded_text,
+        InvocationService, RunnerError, bounded_text,
     },
 };
+
+#[cfg(unix)]
+use crate::service::RunnerConfig;
 
 impl InvocationService {
     pub(crate) async fn execute(
