@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -193,7 +193,7 @@ impl LoadedStarlarkReducer {
             evaluator.set_print_handler(&no_print);
             evaluator.enable_static_typechecking(true);
             evaluator
-                .eval_module(ast, &globals)
+                .eval_module(ast, globals)
                 .map_err(|error| anyhow!(error))?;
             drop(evaluator);
             module.freeze().map_err(|error| anyhow!(error))
@@ -925,8 +925,9 @@ impl PrintHandler for NoPrint {
     }
 }
 
-fn reducer_globals() -> Globals {
-    GlobalsBuilder::standard().with(reducer_api).build()
+fn reducer_globals() -> &'static Globals {
+    static GLOBALS: OnceLock<Globals> = OnceLock::new();
+    GLOBALS.get_or_init(|| GlobalsBuilder::standard().with(reducer_api).build())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,6 +1149,11 @@ mod tests {
             input_truncated: false,
             baseline: InvocationSummary::default(),
         }
+    }
+
+    #[test]
+    fn caches_reducer_globals() {
+        assert!(std::ptr::eq(reducer_globals(), reducer_globals()));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::proto::{
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_STREAM_BYTES: usize = 128 * 1024 * 1024;
 pub const DEFAULT_MAX_STREAM_EVENTS: usize = 1_000_000;
+const MAX_RETAINED_PENDING_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum FrameError {
@@ -271,6 +272,7 @@ impl IncrementalStreamDecoder {
                     let consumed = prefix_bytes.saturating_add(frame_bytes);
                     let framed = std::mem::take(&mut self.pending);
                     decode(self, &framed[prefix_bytes..consumed], &framed[..consumed]);
+                    self.recycle_pending(framed);
                     if self.terminal_error.is_some() {
                         return;
                     }
@@ -294,6 +296,7 @@ impl IncrementalStreamDecoder {
                     let consumed = prefix_bytes.saturating_add(frame_bytes);
                     let framed = std::mem::take(&mut self.pending);
                     decode(self, &framed[prefix_bytes..consumed], &framed[..consumed]);
+                    self.recycle_pending(framed);
                 }
                 Ok(FrameState::NeedPrefix | FrameState::NeedPayload { .. }) => {}
                 Err(error) => self.terminal_error = Some(error),
@@ -316,6 +319,13 @@ impl IncrementalStreamDecoder {
             event_count: self.event_count,
             decoded_bytes: self.decoded_bytes,
             terminal_error: self.terminal_error,
+        }
+    }
+
+    fn recycle_pending(&mut self, mut framed: Vec<u8>) {
+        if framed.capacity() <= MAX_RETAINED_PENDING_BYTES {
+            framed.clear();
+            self.pending = framed;
         }
     }
 
@@ -779,6 +789,69 @@ mod tests {
             );
             assert_eq!(events.len(), 2, "split at byte {split}");
         }
+    }
+
+    #[test]
+    fn incremental_decoder_reuses_pending_frame_capacity() {
+        let event = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "retained".repeat(512),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let framed = encode_frame(&event);
+        let split = framed.len() / 2;
+        let mut decoder = IncrementalStreamDecoder::new(
+            DEFAULT_MAX_FRAME_BYTES,
+            DEFAULT_MAX_STREAM_BYTES,
+            DEFAULT_MAX_STREAM_EVENTS,
+        );
+        let mut events = 0;
+
+        decoder.push_borrowed(&framed[..split], |_| events += 1);
+        decoder.push_borrowed(&framed[split..], |_| events += 1);
+        let retained_capacity = decoder.pending.capacity();
+        assert!(decoder.pending.is_empty());
+        assert!(retained_capacity >= framed.len());
+
+        decoder.push_borrowed(&framed[..split], |_| events += 1);
+        assert_eq!(decoder.pending.capacity(), retained_capacity);
+        decoder.push_borrowed(&framed[split..], |_| events += 1);
+
+        let outcome = decoder.finish();
+        assert_eq!(events, 2);
+        assert_eq!(outcome.event_count, 2);
+        assert!(outcome.terminal_error.is_none());
+    }
+
+    #[test]
+    fn incremental_decoder_drops_oversized_pending_capacity() {
+        let event = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "x".repeat(MAX_RETAINED_PENDING_BYTES * 2),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let framed = encode_frame(&event);
+        let split = framed.len() / 2;
+        let mut decoder = IncrementalStreamDecoder::new(
+            DEFAULT_MAX_FRAME_BYTES,
+            DEFAULT_MAX_STREAM_BYTES,
+            DEFAULT_MAX_STREAM_EVENTS,
+        );
+
+        decoder.push_borrowed(&framed[..split], |_| {});
+        decoder.push_borrowed(&framed[split..], |_| {});
+
+        assert!(decoder.pending.is_empty());
+        assert_eq!(decoder.pending.capacity(), 0);
+        assert!(decoder.finish().terminal_error.is_none());
     }
 
     #[test]
