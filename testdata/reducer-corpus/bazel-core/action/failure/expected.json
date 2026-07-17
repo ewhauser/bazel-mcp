@@ -28,15 +28,6 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
         "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:16: Running reducer fixture //cases:action_failure failed: (Exit 1): bash failed: error executing ReducerFixtureFailure command (from fixture_failure rule target //cases:action_failure) /bin/bash -c 'echo '\\''ERROR: BAZEL_MCP_ACTION_ROOT_CAUSE'\\'' >&2; exit 1'",
         "location": null,
         "target": null,

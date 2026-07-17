@@ -34,6 +34,9 @@ pub(super) fn reduce_lines(
         .count();
 
     for (line, count) in candidates {
+        if is_bazel_status_line(&line) {
+            continue;
+        }
         if context.swc_consumed_lines.contains(line.trim())
             || (context.has_swc_diagnostics && javascript::is_swc_action_wrapper(&line))
         {
@@ -132,6 +135,11 @@ fn is_actionable(line: &str) -> bool {
         || (lower.contains("assertion") && lower.contains(" failed"))
         || lower.starts_with("test result: failed")
         || (line.starts_with("test ") && line.ends_with(" ... FAILED"))
+}
+
+fn is_bazel_status_line(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower.starts_with("info:") || lower == "error: build did not complete successfully"
 }
 
 fn category_from_text(line: &str) -> DiagnosticCategory {

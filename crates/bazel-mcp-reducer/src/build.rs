@@ -1034,12 +1034,13 @@ mod tests {
         let summary = reduce_invocation(ReductionInput {
             events: &[],
             stdout: b"",
-            stderr: b"ERROR: Build did NOT complete successfully\nconfig/config.go:12:40: cannot use 42 (untyped int constant) as string value in variable declaration\n",
+            stderr: b"INFO: Analyzed target //config:config (12 packages loaded, 34 targets configured)\nERROR: Build did NOT complete successfully\nconfig/config.go:12:40: cannot use 42 (untyped int constant) as string value in variable declaration\n",
             exit_code: Some(1),
             elapsed_ms: 1,
             budget: Budget::result_default(),
         });
 
+        assert_eq!(summary.diagnostics.len(), 1);
         let diagnostic = &summary.diagnostics[0];
         assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
         assert_eq!(
