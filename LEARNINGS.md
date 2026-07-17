@@ -154,6 +154,13 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   output bytes without materializing JSON, decode the typed patch in place,
   and extend the nested-schema contract test when reducer context fields
   evolve. Thread: `019f6db7-4010-7191-8796-1c83ff2a7f42`.
+- Streaming a 3.8 MB BEP fixture copied 3,793,500 payload bytes into retained
+  frame allocations even though `BepAccumulator` immediately reduced each
+  event to bounded owned fields; current-main DHAT measured 5.19 MB in 23,455
+  allocations for the complete decode. Expose a lifetime-bounded borrowed
+  frame visitor, keep raw-byte durability ahead of reduction, and retain the
+  owned decoder only for callers that intentionally keep events. Thread:
+  `019f6db7-4010-7191-8796-1c83ff2a7f42`.
 - Recorded BEP strings used fixed-length uppercase workspace markers while
   service locations used lowercase markers, complicating live/replay parity and
   leaking padding into visible messages; normalize both marker forms before

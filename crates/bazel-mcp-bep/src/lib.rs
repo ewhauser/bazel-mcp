@@ -26,9 +26,9 @@ pub mod view {
 }
 
 pub use framing::{
-    BepEvent, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, DEFAULT_MAX_STREAM_EVENTS,
-    FrameError, IncrementalStreamControl, IncrementalStreamDecoder, PartialStream, StreamOutcome,
-    decode_event, decode_event_id, decode_stream, decode_stream_partial,
-    decode_stream_partial_bounded, encode_event_id, encode_frame, read_frame,
-    visit_stream_partial_bounded,
+    BepEvent, BorrowedBepEvent, DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES,
+    DEFAULT_MAX_STREAM_EVENTS, FrameError, IncrementalStreamControl, IncrementalStreamDecoder,
+    PartialStream, StreamOutcome, decode_event, decode_event_id, decode_stream,
+    decode_stream_partial, decode_stream_partial_bounded, encode_event_id, encode_frame,
+    read_frame, visit_stream_partial_borrowed_bounded, visit_stream_partial_bounded,
 };

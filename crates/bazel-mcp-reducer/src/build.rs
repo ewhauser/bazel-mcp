@@ -1,5 +1,5 @@
 use bazel_mcp_bep::{
-    BepEvent, decode_event_id,
+    BepEvent, BorrowedBepEvent, decode_event_id,
     view::{BuildEventIdView, FileView, NamedSetOfFilesView, build_event, build_event_id, file},
 };
 use bazel_mcp_types::{
@@ -80,7 +80,14 @@ impl BepAccumulator {
     }
 
     pub fn observe(&mut self, event: BepEvent) {
-        let event = event.view();
+        self.observe_view(event.view());
+    }
+
+    pub fn observe_borrowed(&mut self, event: BorrowedBepEvent<'_>) {
+        self.observe_view(event.view());
+    }
+
+    fn observe_view(&mut self, event: &bazel_mcp_bep::view::BuildEventView<'_>) {
         let id = decode_event_id(event.id).ok();
         let ordinal = self.next_event_ordinal;
         self.next_event_ordinal = self.next_event_ordinal.saturating_add(1);
