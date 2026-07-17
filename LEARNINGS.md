@@ -25,6 +25,13 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   lock, preserve Bazel's native wait-and-takeover behavior, and expose only a
   bounded owner label plus the combined wait duration. Thread:
   `019f6db5-c3bf-77c1-9524-4fed404237c0`.
+- A live Bazel 9.2 contention run waited behind an uncoordinated client and
+  successfully restarted for the next workspace, but emitted no lock-wait text
+  before takeover; the stderr observer therefore sent no wait phase and
+  recorded zero wait milliseconds, leaving the delay opaque to the agent.
+  Observe sanitized owner changes in the known explicit output-base lock file
+  instead of relying only on Bazel stderr markers. Thread:
+  `019f6db5-c3bf-77c1-9524-4fed404237c0`.
 - Listing full durable invocation records exhausted 8 KiB and destructive byte
   shrinking erased IDs and states; keep ledger rows compact and direct users to
   per-invocation views for canonical arguments and detailed diagnostics.
