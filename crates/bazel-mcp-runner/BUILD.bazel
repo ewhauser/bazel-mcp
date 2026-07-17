@@ -23,6 +23,9 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":bazel_mcp_runner",
+    compile_data = [
+        "//crates/bazel-mcp-reducer:capture_fixture",
+    ],
     size = "small",
     deps = all_crate_deps(
         cargo_only = True,
@@ -33,6 +36,7 @@ rust_test(
 rust_test(
     name = "process_test",
     srcs = ["tests/process.rs"],
+    compile_data = ["//crates/bazel-mcp-reducer:capture_fixture"],
     size = "small",
     deps = [
         ":bazel_mcp_runner",

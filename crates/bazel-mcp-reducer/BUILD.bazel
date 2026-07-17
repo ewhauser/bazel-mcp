@@ -16,9 +16,21 @@ rust_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "capture_fixture",
+    srcs = ["tests/fixtures/bazel-9/test-outcomes.bep"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "swc_fixtures",
+    srcs = glob(["tests/fixtures/swc/**"]),
+)
+
 rust_test(
     name = "unit_test",
     crate = ":bazel_mcp_reducer",
+    compile_data = [":swc_fixtures"],
     size = "small",
     deps = all_crate_deps(
         cargo_only = True,

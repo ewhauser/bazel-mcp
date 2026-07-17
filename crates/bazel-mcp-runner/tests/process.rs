@@ -25,6 +25,9 @@ use bazel_mcp_types::{
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
+const TEST_OUTCOMES_BEP: &[u8] =
+    include_bytes!("../../bazel-mcp-reducer/tests/fixtures/bazel-9/test-outcomes.bep");
+
 fn failed_test_bep(log_uri: &str, xml_uri: &str) -> Vec<u8> {
     let output = |name: &str, uri: &str| File {
         name: name.to_owned(),
@@ -2006,8 +2009,8 @@ async fn fifo_transport_spools_private_evidence_and_cleans_up_the_pipe() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir(&workspace).await.unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bazel-mcp-reducer/tests/fixtures/bazel-9/test-outcomes.bep");
+    let fixture = root.path().join("test-outcomes.bep");
+    std::fs::write(&fixture, TEST_OUTCOMES_BEP).unwrap();
     let script = format!(
         "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do [ \"$arg\" = info ] && is_info=1; done\nif [ \"${{is_info:-0}}\" = 1 ]; then echo '{}'; exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\ncp '{}' \"$bep_path\"\n",
         std::process::id(),
@@ -2040,8 +2043,8 @@ async fn fifo_transport_falls_back_to_file_tail_when_pid_probe_fails() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir(&workspace).await.unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bazel-mcp-reducer/tests/fixtures/bazel-9/test-outcomes.bep");
+    let fixture = root.path().join("test-outcomes.bep");
+    std::fs::write(&fixture, TEST_OUTCOMES_BEP).unwrap();
     let script = format!(
         "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do [ \"$arg\" = info ] && exit 1; done\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\n[ -f \"$bep_path\" ] || exit 42\ncp '{}' \"$bep_path\"\n",
         fixture.display(),
