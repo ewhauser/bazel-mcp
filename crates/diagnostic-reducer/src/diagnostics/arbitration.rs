@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, Severity};
+use crate::{Diagnostic, DiagnosticClass, Severity};
 
 use crate::deduplicate_lines;
 
@@ -22,6 +22,7 @@ pub(super) fn reduce_lines(
     input: &str,
     context: &mut TextDiagnosticContext<'_>,
     registry: &[LineDiagnosticReducer],
+    include_fallbacks: bool,
 ) {
     let candidates = deduplicate_lines(input);
     let has_strict_dependency_block = candidates.iter().any(|(line, _)| {
@@ -34,9 +35,6 @@ pub(super) fn reduce_lines(
         .count();
 
     for (line, count) in candidates {
-        if is_bazel_status_line(&line) {
-            continue;
-        }
         if context.swc_consumed_lines.contains(line.trim())
             || (context.has_swc_diagnostics && javascript::is_swc_action_wrapper(&line))
         {
@@ -59,6 +57,9 @@ pub(super) fn reduce_lines(
         if parsed || claimed_language_line(&line, context) {
             continue;
         }
+        if !include_fallbacks {
+            continue;
+        }
         if has_strict_dependency_block
             && strict_dependency_count == 0
             && line
@@ -67,11 +68,11 @@ pub(super) fn reduce_lines(
         {
             context.diagnostics.push(Diagnostic {
                 severity: Severity::Error,
-                category: DiagnosticCategory::Compilation,
+                class: DiagnosticClass::Compiler,
+                code: None,
+                provenance: None,
                 message: line,
                 location: None,
-                target: None,
-                action: None,
                 repetition_count: count,
             });
             continue;
@@ -85,11 +86,11 @@ pub(super) fn reduce_lines(
             } else {
                 Severity::Error
             },
-            category: category_from_text(&line),
+            class: category_from_text(&line),
+            code: code_from_text(&line).map(str::to_owned),
+            provenance: None,
             message: line,
             location: None,
-            target: None,
-            action: None,
             repetition_count: count,
         });
     }
@@ -137,30 +138,31 @@ fn is_actionable(line: &str) -> bool {
         || (line.starts_with("test ") && line.ends_with(" ... FAILED"))
 }
 
-fn is_bazel_status_line(line: &str) -> bool {
-    let lower = line.trim().to_ascii_lowercase();
-    lower.starts_with("info:") || lower == "error: build did not complete successfully"
-}
-
-fn category_from_text(line: &str) -> DiagnosticCategory {
+fn category_from_text(line: &str) -> DiagnosticClass {
     let lower = line.to_ascii_lowercase();
-    if lower.contains("no such package") || lower.contains("no such target") {
-        DiagnosticCategory::Loading
-    } else if lower.contains("visibility") {
-        DiagnosticCategory::Visibility
-    } else if lower.contains("analysis") {
-        DiagnosticCategory::Analysis
-    } else if lower.contains("test") || lower.contains("panicked at") || lower.contains("assertion")
-    {
-        DiagnosticCategory::Test
+    if lower.contains("test") || lower.contains("panicked at") || lower.contains("assertion") {
+        DiagnosticClass::Test
     } else if lower.contains("error:")
         || lower.contains("error[")
         || lower.contains("undefined reference")
     {
-        DiagnosticCategory::Compilation
+        DiagnosticClass::Compiler
     } else if lower.contains("root_cause") {
-        DiagnosticCategory::Test
+        DiagnosticClass::Test
     } else {
-        DiagnosticCategory::Unknown
+        DiagnosticClass::Tool
+    }
+}
+
+fn code_from_text(line: &str) -> Option<&'static str> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("no such package") || lower.contains("no such target") {
+        Some("tool.loading")
+    } else if lower.contains("visibility") {
+        Some("tool.visibility")
+    } else if lower.contains("analysis") {
+        Some("tool.analysis")
+    } else {
+        None
     }
 }

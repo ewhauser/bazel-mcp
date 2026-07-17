@@ -1,0 +1,17 @@
+[package]
+name = "diagnostic-reducer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Deterministic, source-agnostic reduction of compiler and test diagnostics"
+publish = false
+
+[features]
+test-support = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

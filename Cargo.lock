@@ -306,6 +306,7 @@ dependencies = [
  "anyhow",
  "bazel-mcp-bep",
  "bazel-mcp-types",
+ "diagnostic-reducer",
  "quick-xml",
  "regex",
  "serde",
@@ -325,6 +326,7 @@ dependencies = [
  "bazel-mcp-store",
  "bazel-mcp-types",
  "clap",
+ "diagnostic-reducer",
  "regex",
  "schemars",
  "serde",
@@ -946,6 +948,14 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "unicode-xid",
+]
+
+[[package]]
+name = "diagnostic-reducer"
+version = "0.6.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

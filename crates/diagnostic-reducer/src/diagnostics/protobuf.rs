@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{split_u32_prefix, strip_workspace_marker};
 
@@ -27,15 +27,15 @@ pub(crate) fn parse_diagnostic(line: &str) -> Option<Diagnostic> {
     }
     Some(Diagnostic {
         severity,
-        category: DiagnosticCategory::Compilation,
+        class: DiagnosticClass::Compiler,
+        code: None,
+        provenance: None,
         message: message.to_owned(),
-        location: Some(DiagnosticLocation {
+        location: Some(Location {
             path: compact_path(path),
             line: Some(line_number),
             column,
         }),
-        target: None,
-        action: None,
         repetition_count: 1,
     })
 }

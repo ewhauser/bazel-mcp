@@ -9,7 +9,6 @@ mod query;
 mod starlark;
 mod test;
 mod test_evidence;
-mod text;
 
 pub use budget::{Budget, Budgeted};
 pub use build::{
@@ -17,10 +16,9 @@ pub use build::{
     finalize_diagnostics, reduce_artifacts, reduce_invocation,
 };
 pub use coverage::{CoverageError, parse_lcov, parse_lcov_reader};
-pub use diagnostics::{
-    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
-    parse_go_diagnostic,
-};
+pub use diagnostic_reducer::{TestFailureAccumulator, TestFailureEvidence};
+pub use diagnostic_reducer::{deduplicate_lines, normalize_terminal_text};
+pub use diagnostics::map_diagnostic as map_text_diagnostic;
 pub use extension::{
     CustomReducer, ReducerApplyReport, ReducerContext, ReducerError, ReducerEvent,
     ReducerEventKind, ReducerFailure, ReducerMode, ReducerPatch, ReducerPipeline, ReducerSelector,
@@ -29,6 +27,5 @@ pub use query::reduce_query;
 pub use starlark::{
     REDUCER_API_VERSION, StarlarkLimits, StarlarkReducerConfig, load_starlark_reducers,
 };
-pub use test::{TestFailureAccumulator, TestFailureEvidence, TestXmlError, parse_test_xml};
+pub use test::{TestXmlError, parse_test_xml};
 pub use test_evidence::{TestEvidenceInput, TestEvidenceReducer, TestEvidenceResult};
-pub use text::{deduplicate_lines, normalize_terminal_text};

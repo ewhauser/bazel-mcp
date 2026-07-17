@@ -1,4 +1,4 @@
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::strip_workspace_marker;
 
@@ -9,7 +9,7 @@ use super::common::strip_workspace_marker;
 /// traceback semantics, where the innermost frame is printed last.
 #[derive(Debug, Default)]
 pub struct PythonDiagnosticParser {
-    location: Option<DiagnosticLocation>,
+    location: Option<Location>,
 }
 
 impl PythonDiagnosticParser {
@@ -32,17 +32,17 @@ impl PythonDiagnosticParser {
             } else {
                 Severity::Error
             },
-            category: DiagnosticCategory::Compilation,
+            class: DiagnosticClass::Compiler,
+            code: None,
+            provenance: None,
             message: message.to_owned(),
             location: self.location.take(),
-            target: None,
-            action: None,
             repetition_count: 1,
         })
     }
 }
 
-pub(super) fn parse_location(line: &str) -> Option<DiagnosticLocation> {
+pub(super) fn parse_location(line: &str) -> Option<Location> {
     let marker = "File \"";
     let start = line.find(marker)? + marker.len();
     let remainder = &line[start..];
@@ -62,7 +62,7 @@ pub(super) fn parse_location(line: &str) -> Option<DiagnosticLocation> {
         return None;
     }
     let line_number = remainder[..digits].parse::<u32>().ok()?;
-    Some(DiagnosticLocation {
+    Some(Location {
         path: compact_path(path),
         line: Some(line_number),
         column: None,

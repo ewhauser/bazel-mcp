@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
 use super::common::{split_u32_prefix, strip_workspace_marker};
 
@@ -82,15 +82,15 @@ pub(super) fn parse_compiler_diagnostic(line: &str) -> Option<Diagnostic> {
     }
     Some(Diagnostic {
         severity,
-        category: DiagnosticCategory::Compilation,
+        class: DiagnosticClass::Compiler,
+        code: None,
+        provenance: None,
         message: message.to_owned(),
-        location: Some(DiagnosticLocation {
+        location: Some(Location {
             path: compact_path(path),
             line: Some(line_number),
             column,
         }),
-        target: None,
-        action: None,
         repetition_count: 1,
     })
 }
@@ -113,11 +113,11 @@ impl JavaTestDiagnosticParser {
             let previous = self.take_confirmed();
             self.pending = Some(Diagnostic {
                 severity: Severity::Error,
-                category: DiagnosticCategory::Test,
+                class: DiagnosticClass::Test,
+                code: None,
+                provenance: None,
                 message: message.to_owned(),
                 location: None,
-                target: None,
-                action: None,
                 repetition_count: 1,
             });
             self.pending_is_explicit = explicitly_java;
@@ -194,7 +194,7 @@ fn parse_exception_line(line: &str) -> Option<(&str, bool)> {
         .then_some((line, explicitly_java))
 }
 
-fn parse_stack_frame(line: &str) -> Option<(DiagnosticLocation, bool)> {
+fn parse_stack_frame(line: &str) -> Option<(Location, bool)> {
     let frame = line.trim().strip_prefix("at ")?;
     let (callable, source) = frame.split_once('(')?;
     let source = source.strip_suffix(')')?;
@@ -224,7 +224,7 @@ fn parse_stack_frame(line: &str) -> Option<(DiagnosticLocation, bool)> {
     .iter()
     .any(|prefix| callable.starts_with(prefix));
     Some((
-        DiagnosticLocation {
+        Location {
             path,
             line: Some(line_number),
             column: None,

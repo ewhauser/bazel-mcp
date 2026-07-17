@@ -1,11 +1,14 @@
 //! Streaming, deterministic reduction of normalized failed-test evidence.
 
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, Severity, TestCase, TestStatus};
-
-use crate::{
-    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
-    TestFailureAccumulator, TestFailureEvidence, parse_go_diagnostic,
+use bazel_mcp_types::{
+    Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity, TestCase, TestStatus,
 };
+use diagnostic_reducer::{
+    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
+    parse_go_diagnostic,
+};
+
+use crate::{TestFailureAccumulator, TestFailureEvidence, diagnostics::map_diagnostic};
 
 const MAX_FAILURES: usize = 20;
 const MAX_MESSAGE_BYTES: usize = 1_000;
@@ -55,20 +58,24 @@ impl TestEvidenceReducer {
         self.failures.observe_line(line);
         let javascript_diagnostic = self.javascript.observe_line(line);
         let java_diagnostic = self.java.observe_line(line);
-        let candidate = if let Some(mut diagnostic) = parse_go_diagnostic(line) {
+        let candidate = if let Some(diagnostic) = parse_go_diagnostic(line) {
+            let mut diagnostic = map_diagnostic(diagnostic);
             diagnostic.category = DiagnosticCategory::Test;
             diagnostic.target = Some(label.to_owned());
             diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
             Some((0, diagnostic))
-        } else if let Some(mut diagnostic) = javascript_diagnostic {
+        } else if let Some(diagnostic) = javascript_diagnostic {
+            let mut diagnostic = map_diagnostic(diagnostic);
             diagnostic.target = Some(label.to_owned());
             diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
             Some((0, diagnostic))
-        } else if let Some(mut diagnostic) = java_diagnostic {
+        } else if let Some(diagnostic) = java_diagnostic {
+            let mut diagnostic = map_diagnostic(diagnostic);
             diagnostic.target = Some(label.to_owned());
             diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
             Some((0, diagnostic))
-        } else if let Some(mut diagnostic) = self.python.observe_line(line) {
+        } else if let Some(diagnostic) = self.python.observe_line(line) {
+            let mut diagnostic = map_diagnostic(diagnostic);
             diagnostic.category = DiagnosticCategory::Test;
             diagnostic.target = Some(label.to_owned());
             diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
@@ -108,10 +115,11 @@ impl TestEvidenceReducer {
     /// failures, matching the runner's durable snapshot semantics.
     pub fn finish_log(&mut self, complete: bool) {
         if complete {
-            for mut diagnostic in [self.javascript.finish(), self.java.finish()]
+            for diagnostic in [self.javascript.finish(), self.java.finish()]
                 .into_iter()
                 .flatten()
             {
+                let mut diagnostic = map_diagnostic(diagnostic);
                 diagnostic.target = Some(self.label.clone());
                 diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
                 if self.fallback.as_ref().is_none_or(|(priority, current)| {
@@ -173,7 +181,11 @@ impl TestEvidenceReducer {
                 severity: Severity::Error,
                 category: DiagnosticCategory::Test,
                 message: failure.message,
-                location: failure.location,
+                location: failure.location.map(|location| DiagnosticLocation {
+                    path: location.path,
+                    line: location.line,
+                    column: location.column,
+                }),
                 target: Some(self.label.clone()),
                 action: None,
                 repetition_count: 1,
