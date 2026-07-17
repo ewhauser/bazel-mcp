@@ -649,27 +649,45 @@ fn diagnostic_priority(diagnostic: &Diagnostic) -> (Severity, u8, u8) {
         DiagnosticCategory::Unknown => 4,
         DiagnosticCategory::Action => 5,
     };
-    let lower = diagnostic.message.to_ascii_lowercase();
-    let rust_failure =
-        lower.contains("panicked at") || (lower.contains("assertion") && lower.contains(" failed"));
+    let message = diagnostic.message.as_str();
+    let rust_failure = contains_ignore_ascii_case(message, "panicked at")
+        || (contains_ignore_ascii_case(message, "assertion")
+            && contains_ignore_ascii_case(message, " failed"));
     let evidence_quality = if diagnostic.location.is_some()
-        || (lower.contains("root_cause") && !lower.contains("error executing"))
+        || (contains_ignore_ascii_case(message, "root_cause")
+            && !contains_ignore_ascii_case(message, "error executing"))
     {
         0
     } else if diagnostic.category == DiagnosticCategory::Test && rust_failure {
         1
-    } else if lower.starts_with("test failed:")
-        || lower.starts_with("test timed out:")
-        || lower.starts_with("test was incomplete:")
-        || lower.starts_with("test result was unavailable:")
+    } else if starts_with_ignore_ascii_case(message, "test failed:")
+        || starts_with_ignore_ascii_case(message, "test timed out:")
+        || starts_with_ignore_ascii_case(message, "test was incomplete:")
+        || starts_with_ignore_ascii_case(message, "test result was unavailable:")
     {
         3
-    } else if lower.contains("error executing") {
+    } else if contains_ignore_ascii_case(message, "error executing") {
         2
     } else {
         1
     };
     (diagnostic.severity, category, evidence_quality)
+}
+
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    needle.is_empty()
+        || value
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 fn test_outcome_diagnostic(label: &str, status: TestStatus) -> Option<Diagnostic> {
@@ -1057,8 +1075,10 @@ fn cpp_path_end(line: &str, delimiter: char) -> Option<usize> {
     EXTENSIONS
         .iter()
         .filter_map(|extension| {
-            let marker = format!("{extension}{delimiter}");
-            line.rfind(&marker).map(|index| index + extension.len())
+            line.rmatch_indices(extension).find_map(|(index, _)| {
+                let path_end = index + extension.len();
+                line[path_end..].starts_with(delimiter).then_some(path_end)
+            })
         })
         .max()
 }
@@ -2665,6 +2685,36 @@ ERROR: Build did NOT complete successfully
                 column: Some(7),
             })
         );
+    }
+
+    #[test]
+    fn allocation_free_ascii_matching_preserves_case_insensitive_ranking() {
+        assert!(contains_ignore_ascii_case(
+            "FANOUT_ROOT_CAUSE",
+            "root_cause"
+        ));
+        assert!(contains_ignore_ascii_case(
+            "ERROR EXECUTING CppCompile",
+            "error executing"
+        ));
+        assert!(starts_with_ignore_ascii_case(
+            "TEST FAILED: //pkg:test",
+            "test failed:"
+        ));
+        assert!(!starts_with_ignore_ascii_case(
+            "xTEST FAILED: //pkg:test",
+            "test failed:"
+        ));
+    }
+
+    #[test]
+    fn finds_cpp_path_extensions_without_formatted_markers() {
+        assert_eq!(cpp_path_end("generated.cc.tmp.cc:9: error", ':'), Some(19));
+        assert_eq!(
+            cpp_path_end(r"C:\workspace\source.cpp(12,7): error", '('),
+            Some(23)
+        );
+        assert_eq!(cpp_path_end("source.cc.tmp:9: error", ':'), None);
     }
 
     #[test]

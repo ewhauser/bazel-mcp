@@ -1464,15 +1464,18 @@ impl InvocationService {
             let stdout = capture::read_bounded_tail(&paths.stdout, log_limit).await?;
             let stderr = capture::read_bounded_tail(&paths.stderr, log_limit).await?;
             let exit_code = status.as_ref().and_then(ExitStatus::code);
-            self.persist_failure_evidence(
-                paths,
-                &queued.request.workspace,
-                &queued.request.command,
-                exit_code != Some(0),
-                &stdout,
-                &stderr,
-            )
-            .await?;
+            let failed = exit_code != Some(0);
+            if should_persist_failure_evidence(&queued.request.command, failed) {
+                self.persist_failure_evidence(
+                    paths,
+                    &queued.request.workspace,
+                    &queued.request.command,
+                    failed,
+                    &stdout,
+                    &stderr,
+                )
+                .await?;
+            }
             let reduced = catch_unwind(AssertUnwindSafe(|| {
                 bep.finish(
                     &stdout,
@@ -2513,6 +2516,10 @@ fn page_evidence_records(
     Ok((items, truncated, next_cursor))
 }
 
+fn should_persist_failure_evidence(command: &BazelCommand, failed: bool) -> bool {
+    failed || command.class() != CommandClass::Query
+}
+
 fn failure_evidence_records(
     command: &BazelCommand,
     failed: bool,
@@ -3035,6 +3042,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn skips_eager_failure_evidence_only_for_successful_queries() {
+        for command in [
+            BazelCommand::Query,
+            BazelCommand::Cquery,
+            BazelCommand::Aquery,
+        ] {
+            assert!(!should_persist_failure_evidence(&command, false));
+            assert!(should_persist_failure_evidence(&command, true));
+        }
+        assert!(should_persist_failure_evidence(&BazelCommand::Build, false));
+        assert!(should_persist_failure_evidence(
+            &BazelCommand::Version,
+            false
+        ));
+    }
 
     #[tokio::test]
     async fn workspace_lock_registry_discards_inactive_output_bases() {
