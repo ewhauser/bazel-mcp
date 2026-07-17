@@ -6,6 +6,7 @@ mod java;
 mod javascript;
 mod protobuf;
 mod python;
+mod rust;
 mod starlark;
 mod typescript;
 
@@ -68,6 +69,10 @@ const TEXT_DIAGNOSTIC_REDUCERS: &[TextDiagnosticReducer] = &[
     TextDiagnosticReducer {
         name: "java-compiler",
         reduce: reduce_java_compiler,
+    },
+    TextDiagnosticReducer {
+        name: "rust-compiler",
+        reduce: reduce_rust_compiler,
     },
     TextDiagnosticReducer {
         name: "javascript-test",
@@ -141,6 +146,10 @@ fn reduce_java_compiler(input: &str, context: &mut TextDiagnosticContext<'_>) {
     java::reduce_compiler(input, context.diagnostics);
 }
 
+fn reduce_rust_compiler(input: &str, context: &mut TextDiagnosticContext<'_>) {
+    rust::reduce(input, context.diagnostics);
+}
+
 fn reduce_javascript_tests(input: &str, context: &mut TextDiagnosticContext<'_>) {
     javascript::reduce_tests(
         input,
@@ -194,6 +203,7 @@ mod tests {
                 "javascript-swc",
                 "cpp-linker",
                 "java-compiler",
+                "rust-compiler",
                 "javascript-test",
                 "java-test",
                 "starlark",

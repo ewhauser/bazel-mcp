@@ -1,4 +1,11 @@
-load("@rules_rust//rust:defs.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+rust_binary(
+    name = "type_mismatch",
+    srcs = ["type_mismatch.rs"],
+    edition = "2021",
+    tags = ["manual", "reducer-fixture"],
+)
 
 rust_test(
     name = "assertion_failure",

@@ -1,0 +1,25 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:type_mismatch (102 packages loaded, 1225 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:3:12: Compiling Rust bin type_mismatch (1 file) failed: (Exit 1): process_wrapper failed: error executing Rustc command (from rust_binary rule target //cases:type_mismatch) bazel-out/darwin_arm64-opt-exec/bin/external/rules_rust+/util/process_wrapper/process_wrapper --subst 'pwd=${pwd}' --subst 'exec_root=${exec_root}' --subst 'output_base=${output_base}' -- ... (remaining 2 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+error[E0308]: mismatched types
+ --> cases/type_mismatch.rs:2:28
+  |
+2 |     let invoice_id: &str = &Some("INV-42".to_owned());
+  |                     ----   ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&str`, found `&Option<String>`
+  |                     |
+  |                     expected due to this
+  |
+  = note: expected reference `&str`
+             found reference `&Option<String>`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0308`.
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 33.408s, Critical Path: 2.83s
+INFO: 170 processes: 168 internal, 2 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.
