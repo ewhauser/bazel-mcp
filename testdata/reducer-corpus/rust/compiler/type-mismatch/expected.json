@@ -1,0 +1,85 @@
+{
+  "event_count": 81,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: E0308: mismatched types; expected `&str`, found `&Option<String>`",
+    "targets": [
+      {
+        "label": "//cases:type_mismatch",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "E0308: mismatched types; expected `&str`, found `&Option<String>`",
+        "location": {
+          "path": "cases/type_mismatch.rs",
+          "line": 2,
+          "column": 28
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "error: aborting due to 1 previous error",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:12: Compiling Rust bin type_mismatch (1 file) failed: (Exit 1): process_wrapper failed: error executing Rustc command (from rust_binary rule target //cases:type_mismatch) bazel-out/darwin_arm64-opt-exec/bin/external/rules_rust+/util/process_wrapper/process_wrapper --subst 'pwd=${pwd}' --subst 'exec_root=${exec_root}' --subst 'output_base=${output_base}' -- ... (remaining 2 arguments skipped)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "Rustc action failed with exit code 1",
+        "location": null,
+        "target": "//cases:type_mismatch",
+        "action": "Rustc",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

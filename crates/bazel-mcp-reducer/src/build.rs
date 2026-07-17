@@ -1058,6 +1058,42 @@ mod tests {
     }
 
     #[test]
+    fn ranks_structured_rust_compiler_error_ahead_of_terminal_summary() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"error[E0308]: mismatched types
+ --> cases/type_mismatch.rs:2:28
+  |
+2 |     let invoice_id: &str = &Some("INV-42".to_owned());
+  |                     ----   ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&str`, found `&Option<String>`
+error: aborting due to 1 previous error
+ERROR: Build did NOT complete successfully
+"#,
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(
+            summary.headline,
+            "Bazel failed: E0308: mismatched types; expected `&str`, found `&Option<String>`"
+        );
+        assert_eq!(
+            summary.diagnostics[0].category,
+            DiagnosticCategory::Compilation
+        );
+        assert_eq!(
+            summary.diagnostics[0].location,
+            Some(DiagnosticLocation {
+                path: "cases/type_mismatch.rs".to_owned(),
+                line: Some(2),
+                column: Some(28),
+            })
+        );
+    }
+
+    #[test]
     fn reduces_rules_go_strict_dependency_blocks_to_the_offending_import() {
         let stderr = br#"ERROR: GoCompilePkg config/config.a failed
 compilepkg: missing strict dependencies:
