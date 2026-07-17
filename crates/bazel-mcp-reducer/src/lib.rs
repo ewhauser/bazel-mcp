@@ -3,6 +3,7 @@
 mod budget;
 mod build;
 mod coverage;
+mod diagnostics;
 mod extension;
 mod query;
 mod starlark;
@@ -12,11 +13,14 @@ mod text;
 
 pub use budget::{Budget, Budgeted};
 pub use build::{
-    BepAccumulator, JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser,
-    PythonDiagnosticParser, ReductionInput, StreamReductionOutput, extract_canonical_arguments,
-    finalize_diagnostics, parse_go_diagnostic, reduce_artifacts, reduce_invocation,
+    BepAccumulator, ReductionInput, StreamReductionOutput, extract_canonical_arguments,
+    finalize_diagnostics, reduce_artifacts, reduce_invocation,
 };
 pub use coverage::{CoverageError, parse_lcov, parse_lcov_reader};
+pub use diagnostics::{
+    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
+    parse_go_diagnostic,
+};
 pub use extension::{
     CustomReducer, ReducerApplyReport, ReducerContext, ReducerError, ReducerEvent,
     ReducerEventKind, ReducerFailure, ReducerMode, ReducerPatch, ReducerPipeline, ReducerSelector,

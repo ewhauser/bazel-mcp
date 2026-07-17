@@ -1741,20 +1741,30 @@ mod tests {
                     );
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                let page = store
-                    .list_invocations(
-                        None,
-                        None,
-                        None,
-                        PageRequest {
-                            cursor: None,
-                            limit: 10,
-                            max_bytes: None,
-                        },
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(page.items.len(), 2);
+                loop {
+                    let page = store
+                        .list_invocations(
+                            None,
+                            None,
+                            None,
+                            PageRequest {
+                                cursor: None,
+                                limit: 10,
+                                max_bytes: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    if page.items.len() == 2 {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for peer invocation; observed {} record(s)",
+                        page.items.len()
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
             });
     }
 
