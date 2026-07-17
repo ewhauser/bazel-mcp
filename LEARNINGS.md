@@ -179,3 +179,9 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   creation, perform each atomic publication in one blocking operation, and
   preserve startup cleanup of interrupted temporary files. Thread:
   `019f6e39-5686-7362-83fb-bdfa398e7cf5`.
+- Starting a second stdio server against the default cache root failed before
+  MCP initialization with only `open invocation store`, forcing one retry with
+  isolated cache and output roots plus a cold Bazel build. Surface the causal
+  store path and underlying error, and recover from or clearly identify an
+  incompatible or corrupt shared root so agents can avoid the extra tool call.
+  Thread: `019f6e76-0ae9-7622-97ec-49f233a3ee8c`.
