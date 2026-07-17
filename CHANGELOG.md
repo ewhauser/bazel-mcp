@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/ewhauser/bazel-mcp/compare/v0.5.1...v0.6.0) (2026-07-17)
+
+
+### Features
+
+* **reducer:** add Go test failure reducer ([9aaf67e](https://github.com/ewhauser/bazel-mcp/commit/9aaf67e81fff150ebc6ee5c8a0d853c436fcd801))
+* **reducer:** add Go test failure reducer ([fbcef42](https://github.com/ewhauser/bazel-mcp/commit/fbcef428953825f62a24074b15e866a667fcec61))
+
+
+### Bug Fixes
+
+* **reducer:** omit Bazel status lines from diagnostics ([613da0c](https://github.com/ewhauser/bazel-mcp/commit/613da0cf97e76863c8c18170ba93e4e5d3a33083))
+* **reducer:** omit Bazel status lines from diagnostics ([9a7e0ea](https://github.com/ewhauser/bazel-mcp/commit/9a7e0eacb5f13b625955a4e5b5170deb38501a45))
+
 ## [0.5.1](https://github.com/ewhauser/bazel-mcp/compare/v0.5.0...v0.5.1) (2026-07-17)
 
 
