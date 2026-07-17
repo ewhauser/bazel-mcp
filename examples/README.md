@@ -9,6 +9,23 @@ Each workspace pins its own Bzlmod dependencies. Successful targets demonstrate
 normal use; targets tagged `manual` and `reducer-fixture` intentionally fail and
 are invoked explicitly by the `reducer-cases` harness through `bazel.run`.
 
+Do not include the intentionally failing packages in a wildcard `//...` test:
+
+- `bazel-core`: `//cases` and `//consumer`
+- `cpp`: `//cases`
+- `go`: `//cases`
+- `jvm`: `//cases`
+- `node`: `//cases`
+- `protobuf`: `//cases`
+- `python`: `//cases`
+- `rust`: `//cases`
+- `starlark`: `//cases/analysis`, `//cases/loading`, `//cases/macro`, and
+  `//cases/syntax`
+
+These packages are expected to fail. The repository CI test target is
+`//crates/...`, which covers the intended Rust tests without traversing these
+standalone reducer workspaces.
+
 ```bash
 cargo build -p bazel-mcp-server --bin bazel-mcp
 cargo run -p bazel-mcp-reducer-cases -- list

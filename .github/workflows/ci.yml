@@ -43,6 +43,7 @@ jobs:
             bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - run: go install github.com/bazelbuild/bazelisk@v1.26.0
       - run: PATH="$HOME/go/bin:$PATH" bazelisk test --config=ci //tools:preset.update_test
+      - run: PATH="$HOME/go/bin:$PATH" bazelisk test --config=ci //crates/...
       - run: PATH="$HOME/go/bin:$PATH" make build BAZEL_BUILD_FLAGS=--config=ci
   cargo-test-linux:
     runs-on: ubuntu-latest
