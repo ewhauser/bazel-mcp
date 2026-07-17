@@ -1,51 +1,5 @@
 # Changelog
 
-## [1.0.0](https://github.com/ewhauser/bazel-mcp/compare/v0.3.0...v1.0.0) (2026-07-16)
-
-
-### ⚠ BREAKING CHANGES
-
-* **bazel:** drop Bazel 7 support
-
-### Features
-
-* **bazel:** drop Bazel 7 support ([845ff78](https://github.com/ewhauser/bazel-mcp/commit/845ff78e243b1a78f094fb1a7f9f9153b8785874))
-* **bes:** add loopback build event service ([03cc670](https://github.com/ewhauser/bazel-mcp/commit/03cc67042ec2d0e55e39612a523feec861ea365a))
-* **reducer:** add extensible Starlark reducers ([6879851](https://github.com/ewhauser/bazel-mcp/commit/68798514b0ad6f16c49d2f716b82f85f4bc343b0))
-* **reducer:** add extensible Starlark reducers ([334e899](https://github.com/ewhauser/bazel-mcp/commit/334e8998892d1688760922024775903d991c12cc))
-* **release:** publish Windows binaries ([a672534](https://github.com/ewhauser/bazel-mcp/commit/a672534437c2719bb25f3b54498698b117eb9d17))
-
-
-### Bug Fixes
-
-* **ci:** accept Starlark dependencies and publish docs ([9d9c8b9](https://github.com/ewhauser/bazel-mcp/commit/9d9c8b9f3f1265490eca39dea4cba18f35a966f3))
-* **ci:** isolate remote cache smoke test ([70f2795](https://github.com/ewhauser/bazel-mcp/commit/70f2795affa7f706a20a0a91fe5b3816d5c22bae))
-* **docs:** repair wide landing layout ([9d3f59c](https://github.com/ewhauser/bazel-mcp/commit/9d3f59ccbe07246510b9f48a8fccd226f88ed24b))
-* **docs:** repair wide landing layout ([0a6cc2e](https://github.com/ewhauser/bazel-mcp/commit/0a6cc2ef085dba4f427fdbe9a08d971e6ddd4a3f))
-* **reducer:** preserve Go failure diagnostics ([323c972](https://github.com/ewhauser/bazel-mcp/commit/323c972df442d4527cc61f6e93dd4d2c0f58a10b))
-* **reducer:** preserve Go failure diagnostics ([f9fb822](https://github.com/ewhauser/bazel-mcp/commit/f9fb8228b41b7d3464f1648b294f6543b3d92741))
-* **reducer:** preserve Python traceback diagnostics ([1442817](https://github.com/ewhauser/bazel-mcp/commit/1442817bef3da1e9c5e5a870335aaadbd87233ce))
-* **reducer:** preserve Python traceback diagnostics ([f030f80](https://github.com/ewhauser/bazel-mcp/commit/f030f8019da42c31bf44c15571224191226ddc49))
-* **reducer:** surface C++ root causes ([b3cb7dd](https://github.com/ewhauser/bazel-mcp/commit/b3cb7dd956a2d8c0800698eee73cc0a8a0e62db1))
-* **reducer:** surface C++ root causes ([55e75a2](https://github.com/ewhauser/bazel-mcp/commit/55e75a29cfc2b0bc26205748bf5884e196ec5ede))
-* **reducer:** surface Java root causes ([88a615d](https://github.com/ewhauser/bazel-mcp/commit/88a615d60b65ecda070a3fb9c9c04ac554df524b))
-* **reducer:** surface Java root causes ([e349286](https://github.com/ewhauser/bazel-mcp/commit/e3492869a0bf522f7078af40c35962649afe58e9))
-* **reducer:** surface protobuf diagnostics ([aff28a0](https://github.com/ewhauser/bazel-mcp/commit/aff28a074a65233ffd8af94f25042100d0381982))
-* **reducer:** surface protobuf diagnostics ([c076157](https://github.com/ewhauser/bazel-mcp/commit/c076157f4a7ba9ef5fc9b2b59e49b0ed12fe99e0))
-* **reducer:** surface Starlark root causes ([ca14985](https://github.com/ewhauser/bazel-mcp/commit/ca1498532a428efc394e2ab1d5056e3a15123f05))
-* **reducer:** surface Starlark root causes ([8e52df4](https://github.com/ewhauser/bazel-mcp/commit/8e52df429f4ac1682233e4b6ff6b4c4e51eaf834))
-* **reducer:** surface TypeScript and JavaScript diagnostics ([109e183](https://github.com/ewhauser/bazel-mcp/commit/109e18318375acdd7cf0a11978099d34b458ceb2))
-* **reducer:** surface TypeScript and JavaScript diagnostics ([842c658](https://github.com/ewhauser/bazel-mcp/commit/842c658bbde08be46d931e96f0b234f1e4874536))
-* **runner:** surface Rust test failure evidence ([53533b0](https://github.com/ewhauser/bazel-mcp/commit/53533b0ee961c543ac071694a9b1e10120e288df))
-* **runner:** surface Rust test failure evidence ([22fcbc2](https://github.com/ewhauser/bazel-mcp/commit/22fcbc2893f861e6ef52040768f4c9336030788a))
-
-
-### Performance Improvements
-
-* **runner:** add opt-in POSIX BEP FIFO ([a3661c7](https://github.com/ewhauser/bazel-mcp/commit/a3661c76aca38f482cc67256f326b5ce57dccfd1))
-* **runner:** reduce BEP incrementally ([3a846d2](https://github.com/ewhauser/bazel-mcp/commit/3a846d2c59e6b774316ee7449d6b7139ead3c5b7))
-* **runner:** reduce BEP incrementally with opt-in POSIX FIFO ([206a983](https://github.com/ewhauser/bazel-mcp/commit/206a9837bf152a997580f87f89bf4cdc5b1d85ba))
-
 ## [0.3.0](https://github.com/ewhauser/bazel-mcp/compare/v0.2.0...v0.3.0) (2026-07-16)
 
 

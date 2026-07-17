@@ -232,7 +232,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bazel-mcp-benchmark"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bazel-mcp-bep",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-bep"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-policy"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "bazel-mcp-types",
  "regex",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-reducer"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bazel-mcp-bep",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-runner"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bazel-mcp-bep",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-server"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bazel-mcp-policy",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-store"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bazel-mcp-types",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-types"
-version = "1.0.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",
