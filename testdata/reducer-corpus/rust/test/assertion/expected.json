@@ -1,0 +1,127 @@
+{
+  "event_count": 82,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: Rust test invoice_total_includes_service_fee failed at cases/assertion_failure.rs:4:5: assertion `left == right` failed: invoice total should include the service fee; left: 41; right: 42",
+    "targets": [
+      {
+        "label": "//cases:assertion_failure",
+        "success": true
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 1,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Rust test invoice_total_includes_service_fee failed at cases/assertion_failure.rs:4:5: assertion `left == right` failed: invoice total should include the service fee; left: 41; right: 42",
+        "location": {
+          "path": "cases/assertion_failure.rs",
+          "line": 4,
+          "column": 5
+        },
+        "target": "//cases:assertion_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test failed: //cases:assertion_failure",
+        "location": null,
+        "target": "//cases:assertion_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "test invoice_total_includes_service_fee ... FAILED",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "thread 'invoice_total_includes_service_fee' <PID> panicked at cases/assertion_failure.rs:4:5:",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "assertion `left == right` failed: invoice total should include the service fee",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [
+      {
+        "label": "//cases:assertion_failure",
+        "status": "failed",
+        "duration_ms": null,
+        "attempts": 1,
+        "shard": null,
+        "cases": [],
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
+      }
+    ],
+    "test_counts": {
+      "passed": 0,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": "test_log"
+  },
+  "artifacts": [
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/8d775ccd4e01f081f9159ede7668cbca/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/assertion_failure/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/8d775ccd4e01f081f9159ede7668cbca/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/assertion_failure/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/cases/assertion_failure",
+      "kind": "file",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/8d775ccd4e01f081f9159ede7668cbca/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/assertion_failure",
+      "size_bytes": 1004944,
+      "locally_available": true
+    }
+  ]
+}

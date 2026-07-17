@@ -1,0 +1,7 @@
+==================== Test output for //cases:test_failure:
+--- FAIL: TestInvoiceTotal (0.00s)
+    invoice_test.go:9: invoice total mismatch: got 41, want 42
+FAIL
+================================================================================
+
+Executed 1 out of 1 test: 1 fails locally.

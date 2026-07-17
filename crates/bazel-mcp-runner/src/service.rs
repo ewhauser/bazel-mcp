@@ -1726,6 +1726,8 @@ impl InvocationService {
                 let path = path
                     .strip_prefix("<workspace>/")
                     .or_else(|| path.strip_prefix("<workspace>\\"))
+                    .or_else(|| path.strip_prefix("<WORKSPACE>/"))
+                    .or_else(|| path.strip_prefix("<WORKSPACE>\\"))
                     .unwrap_or(&path);
                 location.path = self.redactor.redact_bounded(path, 1_000);
             }

@@ -316,6 +316,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bazel-mcp-reducer-cases"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "bazel-mcp-bep",
+ "bazel-mcp-reducer",
+ "bazel-mcp-store",
+ "bazel-mcp-types",
+ "clap",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "bazel-mcp-runner"
 version = "0.4.0"
 dependencies = [

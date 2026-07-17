@@ -1,0 +1,24 @@
+module(name = "bazel_mcp_reducer_node_examples")
+
+bazel_dep(name = "aspect_rules_js", version = "3.2.3")
+bazel_dep(name = "rules_nodejs", version = "6.7.3")
+
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "24.12.0")
+use_repo(node, "nodejs_toolchains")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "typescript",
+    build_file_content = """
+exports_files(["package/lib/tsc.js"])
+filegroup(
+    name = "typescript",
+    srcs = glob(["package/lib/**"]),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3",
+    urls = ["https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"],
+)

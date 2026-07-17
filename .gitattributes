@@ -2,5 +2,5 @@
 *.md text eol=lf
 *.toml text eol=lf
 *.proto text eol=lf
+testdata/reducer-corpus/** text eol=lf
 *.bep binary
-

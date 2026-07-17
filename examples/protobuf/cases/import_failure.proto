@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+import "cases/does_not_exist.proto";
+
+message Invoice {
+  MissingDependency dependency = 1;
+}

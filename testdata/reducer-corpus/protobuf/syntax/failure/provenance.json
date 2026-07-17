@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case": "protobuf/syntax/failure",
+  "workspace": "examples/protobuf",
+  "command": "build",
+  "args": [
+    "//cases:syntax_failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "protoc",
+  "tool_version": "35.1",
+  "rules": {
+    "protobuf": "35.1"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}

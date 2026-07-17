@@ -1,0 +1,44 @@
+schema_version = 1
+id = "python/syntax/failure"
+workspace = "examples/python"
+command = "test"
+args = ["//cases:syntax_failure"]
+tags = ["python", "syntax", "test-log", "fast"]
+platforms = ["linux", "macos", "windows"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+test_target = "//cases:syntax_failure"
+
+[evidence]
+test_logs = ["test.log"]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 3
+headline_contains = "SyntaxError"
+inspect_hint = "test_log"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "test"
+message_contains = "SyntaxError"
+path = "cases/syntax_failure.py"
+line = 2
+target = "//cases:syntax_failure"
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "CPython"
+tool_version = "3.12.13"
+
+[provenance.rules]
+rules_python = "2.2.0"

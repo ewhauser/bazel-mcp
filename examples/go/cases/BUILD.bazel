@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "compile_failure",
+    srcs = ["compile_failure.go"],
+    importpath = "example.invalid/invoice/compile_failure",
+    tags = ["manual", "reducer-fixture"],
+)
+
+go_test(
+    name = "test_failure",
+    srcs = [
+        "invoice.go",
+        "invoice_test.go",
+    ],
+    tags = ["manual", "reducer-fixture"],
+)

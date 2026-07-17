@@ -1,0 +1,15 @@
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+
+java_library(
+    name = "compile_failure",
+    srcs = ["MissingSymbol.java"],
+    tags = ["manual", "reducer-fixture"],
+)
+
+java_test(
+    name = "runtime_assertion",
+    srcs = ["RuntimeAssertion.java"],
+    main_class = "invoice.RuntimeAssertion",
+    tags = ["manual", "reducer-fixture"],
+    use_testrunner = False,
+)

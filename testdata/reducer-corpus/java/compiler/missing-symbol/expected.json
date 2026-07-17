@@ -1,0 +1,76 @@
+{
+  "event_count": 73,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: cannot find symbol: variable MissingInvoiceCalculator",
+    "targets": [
+      {
+        "label": "//cases:compile_failure",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "cannot find symbol: variable MissingInvoiceCalculator",
+        "location": {
+          "path": "cases/MissingSymbol.java",
+          "line": 5,
+          "column": null
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:13: Building cases/libcompile_failure.jar (1 source file) failed: (Exit 1): java failed: error executing Javac command (from java_library rule target //cases:compile_failure) external/rules_java++toolchains+remotejdk25_macos_aarch64/bin/java '--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED' '--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED' ... (remaining 19 arguments skipped)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "Javac action failed with exit code 1",
+        "location": null,
+        "target": "//cases:compile_failure",
+        "action": "Javac",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

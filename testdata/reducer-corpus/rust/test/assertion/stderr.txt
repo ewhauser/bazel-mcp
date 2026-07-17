@@ -1,0 +1,10 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:assertion_failure (105 packages loaded, 1246 targets configured).
+FAIL: //cases:assertion_failure (Exit 101) (see <RUNTIME_ROOT>/bazel/8d775ccd4e01f081f9159ede7668cbca/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/assertion_failure/test.log)
+INFO: From Testing //cases:assertion_failure:
+INFO: Found 1 test target...
+INFO: Elapsed time: 30.439s, Critical Path: 3.09s
+INFO: 172 processes: 168 internal, 5 darwin-sandbox.
+INFO: Build completed, 1 test FAILED, 172 total actions
+INFO: Build Event Protocol files produced successfully.

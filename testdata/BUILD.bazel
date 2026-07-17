@@ -1,0 +1,11 @@
+filegroup(
+    name = "reducer_corpus",
+    srcs = glob(["reducer-corpus/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "reducer_corpus_marker",
+    srcs = ["reducer-corpus/README.md"],
+    visibility = ["//visibility:public"],
+)

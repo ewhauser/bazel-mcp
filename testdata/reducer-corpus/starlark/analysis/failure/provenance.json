@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "case": "starlark/analysis/failure",
+  "workspace": "examples/starlark",
+  "command": "build",
+  "args": [
+    "//cases/analysis:failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Bazel Starlark evaluator",
+  "tool_version": "9.2.0",
+  "rules": {},
+  "origin_repository": null,
+  "origin_commit": null
+}

@@ -1,0 +1,26 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+
+js_test(
+    name = "syntax_failure",
+    entry_point = "syntax_failure.js",
+    tags = ["manual", "reducer-fixture"],
+)
+
+js_test(
+    name = "runtime_failure",
+    entry_point = "runtime_failure.js",
+    tags = ["manual", "reducer-fixture"],
+)
+
+genrule(
+    name = "typescript_failure",
+    srcs = ["type_failure.ts"],
+    outs = ["type_failure.js"],
+    cmd = "$(NODE_PATH) $(execpath @typescript//:package/lib/tsc.js) --pretty false --strict --noEmit $(execpath type_failure.ts)",
+    tags = ["manual", "reducer-fixture"],
+    toolchains = ["@nodejs_toolchains//:resolved_toolchain"],
+    tools = [
+        "@typescript//:package/lib/tsc.js",
+        "@typescript//:typescript",
+    ],
+)

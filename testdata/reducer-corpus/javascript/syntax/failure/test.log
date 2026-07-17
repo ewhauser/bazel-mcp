@@ -1,0 +1,21 @@
+
+===== //cases:syntax_failure :: test.log =====
+exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //cases:syntax_failure
+-----------------------------------------------------------------------------
+<RUNTIME_ROOT>/bazel/feb5f1499fa827d25b9c36ce25bc0fad/sandbox/darwin-sandbox/2/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/syntax_failure_/syntax_failure.runfiles/_main/cases/syntax_failure.js:2
+  return invoice.lines.reduce((total, line) => total + line.amount, 0;
+                                                                    ^
+
+SyntaxError: missing ) after argument list
+    at wrapSafe (node:internal/modules/cjs/loader:1692:18)
+    at Module._compile (node:internal/modules/cjs/loader:1735:20)
+    at Object..js (node:internal/modules/cjs/loader:1893:10)
+    at Module.load (node:internal/modules/cjs/loader:1481:32)
+    at Module._load (node:internal/modules/cjs/loader:1300:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:245:24)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47
+
+Node.js v24.12.0

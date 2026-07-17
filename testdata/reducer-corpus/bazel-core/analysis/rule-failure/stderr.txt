@@ -1,0 +1,13 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+ERROR: <WORKSPACE>/cases/BUILD.bazel:3:17: in analysis_failure rule //cases:analysis_failure:
+Traceback (most recent call last):
+	File "<WORKSPACE>/cases/failure_rules.bzl", line 21, column 9, in _analysis_failure_impl
+		fail("BAZEL_MCP_ANALYSIS_ROOT_CAUSE for %s" % ctx.label)
+Error in fail: BAZEL_MCP_ANALYSIS_ROOT_CAUSE for @@//cases:analysis_failure
+ERROR: <WORKSPACE>/cases/BUILD.bazel:3:17: Analysis of target '//cases:analysis_failure' (config: 2d89340) failed
+ERROR: Analysis of target '//cases:analysis_failure' failed; build aborted
+INFO: Elapsed time: 5.968s, Critical Path: 0.01s
+INFO: 1 process: 1 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

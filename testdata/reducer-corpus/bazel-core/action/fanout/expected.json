@@ -1,0 +1,94 @@
+{
+  "event_count": 31,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE",
+    "targets": [
+      {
+        "label": "//cases:fanout_one",
+        "success": false
+      },
+      {
+        "label": "//cases:fanout_two",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 2,
+      "succeeded": 0,
+      "failed": 2
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_TWO",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:12:16: Running reducer fixture //cases:fanout_one failed: (Exit 1): bash failed: error executing ReducerFixtureFailure command (from fixture_failure rule target //cases:fanout_one) /bin/bash -c 'echo '\\''ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE'\\'' >&2; exit 1'",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:21:16: Running reducer fixture //cases:fanout_two failed: (Exit 1): bash failed: error executing ReducerFixtureFailure command (from fixture_failure rule target //cases:fanout_two) /bin/bash -c 'echo '\\''ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_TWO'\\'' >&2; exit 1'",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "ReducerFixtureFailure action failed with exit code 1",
+        "location": null,
+        "target": null,
+        "action": "ReducerFixtureFailure",
+        "repetition_count": 2
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

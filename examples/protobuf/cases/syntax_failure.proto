@@ -1,0 +1,5 @@
+syntax = "proto3";
+
+message Invoice {
+  string currency = 1
+}

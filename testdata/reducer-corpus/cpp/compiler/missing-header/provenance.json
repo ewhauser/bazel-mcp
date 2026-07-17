@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case": "cpp/compiler/missing-header",
+  "workspace": "examples/cpp",
+  "command": "build",
+  "args": [
+    "//cases:missing_header"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "C++ compiler",
+  "tool_version": "platform-default",
+  "rules": {
+    "rules_cc": "0.2.22"
+  },
+  "origin_repository": "https://github.com/google/googletest",
+  "origin_commit": "a25f43576effe4ebe887412a603cddfa8fc3ba64"
+}

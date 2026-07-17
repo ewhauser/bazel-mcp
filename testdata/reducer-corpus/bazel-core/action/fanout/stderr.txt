@@ -1,0 +1,17 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed 2 targets (5 packages loaded, 8 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:12:16: Running reducer fixture //cases:fanout_one failed: (Exit 1): bash failed: error executing ReducerFixtureFailure command (from fixture_failure rule target //cases:fanout_one) /bin/bash -c 'echo '\''ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE
+ERROR: <WORKSPACE>/cases/BUILD.bazel:21:16: Running reducer fixture //cases:fanout_two failed: (Exit 1): bash failed: error executing ReducerFixtureFailure command (from fixture_failure rule target //cases:fanout_two) /bin/bash -c 'echo '\''ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_TWO'\'' >&2; exit 1'
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_TWO
+INFO: Found 2 targets...
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 6.354s, Critical Path: 0.17s
+INFO: 3 processes: 3 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

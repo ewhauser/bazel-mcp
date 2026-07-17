@@ -1,0 +1,5 @@
+filegroup(
+    name = "success",
+    srcs = ["README.md"],
+    visibility = ["//visibility:public"],
+)

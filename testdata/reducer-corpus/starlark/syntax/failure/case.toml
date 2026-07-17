@@ -1,0 +1,39 @@
+schema_version = 1
+id = "starlark/syntax/failure"
+workspace = "examples/starlark"
+command = "build"
+args = ["//cases/syntax:failure"]
+tags = ["starlark", "syntax", "fast"]
+platforms = ["any"]
+timeout_seconds = 180
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "syntax error"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "loading"
+message_contains = "syntax error"
+path = "cases/syntax/defs.bzl"
+line = 1
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "Bazel Starlark parser"
+tool_version = "9.2.0"
+
+[provenance.rules]

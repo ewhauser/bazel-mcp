@@ -1,0 +1,15 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+ERROR: Traceback (most recent call last):
+	File "<WORKSPACE>/cases/macro/BUILD.bazel", line 3, column 13, in <toplevel>
+		broken_macro(name = "failure")
+	File "<WORKSPACE>/cases/macro/defs.bzl", line 2, column 9, in broken_macro
+		fail("invoice macro requires a currency for %s" % name)
+Error in fail: invoice macro requires a currency for failure
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//cases/macro:failure': no such target '//cases/macro:failure': target 'failure' not declared in package 'cases/macro' defined by <WORKSPACE>/cases/macro/BUILD.bazel
+ERROR: no such target '//cases/macro:failure': target 'failure' not declared in package 'cases/macro' defined by <WORKSPACE>/cases/macro/BUILD.bazel
+INFO: Elapsed time: 5.322s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

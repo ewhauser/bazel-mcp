@@ -1,0 +1,1 @@
+cases/type_failure.ts(5,28): error TS2322: Type 'string' is not assignable to type 'number'.

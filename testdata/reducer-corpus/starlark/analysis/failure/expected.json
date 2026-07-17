@@ -1,0 +1,98 @@
+{
+  "event_count": 26,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: Error in fail: invoice rule rejected missing tax region for @@//cases/analysis:failure",
+    "targets": [],
+    "target_counts": {
+      "requested": 0,
+      "succeeded": 0,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "Error in fail: invoice rule rejected missing tax region for @@//cases/analysis:failure",
+        "location": {
+          "path": "cases/analysis/defs.bzl",
+          "line": 2,
+          "column": 9
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "in invoice_rule rule //cases/analysis:failure: \nTraceback (most recent call last):\n\tFile \"<WORKSPACE>______________________________________________________/cases/analysis/defs.bzl\", line 2, column 9, in _invoice_impl\n\t\tfail(\"invoice rule rejected missing tax region for %s\" % ctx.label)\nError in fail: invoice rule rejected missing tax region for @@//cases/analysis:failure",
+        "location": null,
+        "target": "//cases/analysis:failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "ERROR: <WORKSPACE>/cases/analysis/BUILD.bazel:3:13: in invoice_rule rule //cases/analysis:failure:",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "ERROR: <WORKSPACE>/cases/analysis/BUILD.bazel:3:13: Analysis of target '//cases/analysis:failure' (config: 2d89340) failed",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "ERROR: Analysis of target '//cases/analysis:failure' failed; build aborted",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

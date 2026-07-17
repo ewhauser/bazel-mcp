@@ -1,0 +1,12 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:test_failure (106 packages loaded, 9970 targets configured).
+INFO: From GoLink cases/test_failure_/test_failure:
+ld: warning: ignoring duplicate libraries: '-lm'
+FAIL: //cases:test_failure (Exit 1) (see <RUNTIME_ROOT>/bazel/6c5345c092650180744a439250ce7615/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/test_failure/test.log)
+INFO: From Testing //cases:test_failure:
+INFO: Found 1 test target...
+INFO: Elapsed time: 33.641s, Critical Path: 13.99s
+INFO: 21 processes: 10 internal, 11 darwin-sandbox.
+INFO: Build completed, 1 test FAILED, 21 total actions
+INFO: Build Event Protocol files produced successfully.

@@ -1,0 +1,19 @@
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+
+proto_library(
+    name = "syntax_failure",
+    srcs = ["syntax_failure.proto"],
+    tags = ["manual", "reducer-fixture"],
+)
+
+proto_library(
+    name = "import_failure",
+    srcs = ["import_failure.proto"],
+    tags = ["manual", "reducer-fixture"],
+)
+
+proto_library(
+    name = "type_failure",
+    srcs = ["type_failure.proto"],
+    tags = ["manual", "reducer-fixture"],
+)

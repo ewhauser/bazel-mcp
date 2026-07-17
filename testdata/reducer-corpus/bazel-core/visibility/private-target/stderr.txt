@@ -1,0 +1,12 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+ERROR: <WORKSPACE>/consumer/BUILD.bazel:1:10: in filegroup rule //consumer:visibility_failure: Visibility error:
+target '//private:secret' is not visible from
+target '//consumer:visibility_failure'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+ERROR: <WORKSPACE>/consumer/BUILD.bazel:1:10: Analysis of target '//consumer:visibility_failure' (config: 2d89340) failed
+ERROR: Analysis of target '//consumer:visibility_failure' failed; build aborted
+INFO: Elapsed time: 5.935s, Critical Path: 0.01s
+INFO: 1 process: 1 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

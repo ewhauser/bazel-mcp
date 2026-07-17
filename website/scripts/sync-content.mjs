@@ -33,6 +33,12 @@ const documents = [
     description: 'Native Rust and Starlark custom reducer latency comparison and methodology.',
   },
   {
+    source: 'docs/reducer-integration-testing.md',
+    destination: 'reducer-integration-testing.md',
+    title: 'Reducer integration testing',
+    description: 'Add, record, replay, and maintain manifest-driven reducer integration cases.',
+  },
+  {
     source: 'docs/benchmarks.md',
     destination: 'benchmarks.md',
     title: 'Token benchmark',
@@ -99,6 +105,7 @@ for (const document of documents) {
   body = body.replace(/^# .+\r?\n(?:\r?\n)?/, '');
   body = body
     .replaceAll('../CONTRIBUTING.md', './contributing.md')
+    .replaceAll('docs/reducer-integration-testing.md', './reducer-integration-testing.md')
     .replace(
       /\.\.\/examples\/config\.toml/g,
       'https://github.com/ewhauser/bazel-mcp/blob/main/examples/config.toml',

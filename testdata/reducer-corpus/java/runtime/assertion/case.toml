@@ -1,0 +1,44 @@
+schema_version = 1
+id = "java/runtime/assertion"
+workspace = "examples/jvm"
+command = "test"
+args = ["--java_runtime_version=remotejdk_21", "--tool_java_runtime_version=remotejdk_21", "//cases:runtime_assertion"]
+tags = ["java", "runtime", "test-log", "fast"]
+platforms = ["linux", "macos", "windows"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+test_target = "//cases:runtime_assertion"
+
+[evidence]
+test_logs = ["test.log"]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 3
+headline_contains = "invoice total mismatch"
+inspect_hint = "test_log"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "test"
+message_contains = "AssertionError: invoice total mismatch: expected 42 but was 41"
+path = "invoice/RuntimeAssertion.java"
+line = 5
+target = "//cases:runtime_assertion"
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "JVM"
+tool_version = "remotejdk_21"
+
+[provenance.rules]
+rules_java = "9.7.0"

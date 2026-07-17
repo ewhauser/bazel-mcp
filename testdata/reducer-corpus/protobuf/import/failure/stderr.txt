@@ -1,0 +1,14 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:import_failure (96 packages loaded, 1408 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:9:14: Generating Descriptor Set proto_library //cases:import_failure failed: (Exit 1): protoc failed: error executing GenProtoDescriptorSet command (from proto_library rule target //cases:import_failure) external/protobuf++protoc+prebuilt_protoc.osx_aarch_64/bin/protoc '--descriptor_set_out=bazel-out/darwin_arm64-fastbuild/bin/cases/import_failure-descriptor-set.proto.bin' -I. ... (remaining 8 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+cases/does_not_exist.proto: File not found.
+cases/import_failure.proto:3:1: Import "cases/does_not_exist.proto" was not found or had errors.
+cases/import_failure.proto:6:3: "MissingDependency" is not defined.
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 11.434s, Critical Path: 0.23s
+INFO: 3 processes: 2 internal, 1 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

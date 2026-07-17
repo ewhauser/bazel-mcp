@@ -96,6 +96,10 @@ export default defineConfig({
           label: 'Project',
           items: [
             { label: 'Architecture', slug: 'project/architecture' },
+            {
+              label: 'Reducer integration testing',
+              slug: 'reference/generated/reducer-integration-testing',
+            },
             { label: 'Security', slug: 'reference/generated/security' },
             { label: 'Contributing', slug: 'reference/generated/contributing' },
             { label: 'Changelog', slug: 'reference/generated/changelog' },

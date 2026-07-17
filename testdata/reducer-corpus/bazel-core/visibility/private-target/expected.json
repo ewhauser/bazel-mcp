@@ -1,0 +1,85 @@
+{
+  "event_count": 26,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: in filegroup rule //consumer:visibility_failure: Visibility error:\ntarget '//private:secret' is not visible from\ntarget '//consumer:visibility_failure'\nRecommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility",
+    "targets": [],
+    "target_counts": {
+      "requested": 0,
+      "succeeded": 0,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "in filegroup rule //consumer:visibility_failure: Visibility error:\ntarget '//private:secret' is not visible from\ntarget '//consumer:visibility_failure'\nRecommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility",
+        "location": null,
+        "target": "//consumer:visibility_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "analysis",
+        "message": "",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "visibility",
+        "message": "ERROR: <WORKSPACE>/consumer/BUILD.bazel:1:10: in filegroup rule //consumer:visibility_failure: Visibility error:",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "visibility",
+        "message": "ERROR: <WORKSPACE>/consumer/BUILD.bazel:1:10: Analysis of target '//consumer:visibility_failure' (config: 2d89340) failed",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "visibility",
+        "message": "ERROR: Analysis of target '//consumer:visibility_failure' failed; build aborted",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

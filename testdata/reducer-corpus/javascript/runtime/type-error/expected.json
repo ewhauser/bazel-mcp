@@ -1,0 +1,100 @@
+{
+  "event_count": 104,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: TypeError: Cannot read properties of undefined (reading 'lines')",
+    "targets": [
+      {
+        "label": "//cases:runtime_failure",
+        "success": true
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 1,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "TypeError: Cannot read properties of undefined (reading 'lines')",
+        "location": {
+          "path": "cases/runtime_failure.js",
+          "line": 2,
+          "column": 18
+        },
+        "target": "//cases:runtime_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "TypeError: Cannot read properties of undefined (reading 'lines')",
+        "location": null,
+        "target": "//cases:runtime_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test failed: //cases:runtime_failure",
+        "location": null,
+        "target": "//cases:runtime_failure",
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [
+      {
+        "label": "//cases:runtime_failure",
+        "status": "failed",
+        "duration_ms": null,
+        "attempts": 1,
+        "shard": null,
+        "cases": [],
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
+      }
+    ],
+    "test_counts": {
+      "passed": 0,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": "test_log"
+  },
+  "artifacts": [
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/feb5f1499fa827d25b9c36ce25bc0fad/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/runtime_failure/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/feb5f1499fa827d25b9c36ce25bc0fad/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/runtime_failure/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/cases/runtime_failure_/runtime_failure",
+      "kind": "file",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/feb5f1499fa827d25b9c36ce25bc0fad/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/runtime_failure_/runtime_failure",
+      "size_bytes": 24797,
+      "locally_available": true
+    }
+  ]
+}

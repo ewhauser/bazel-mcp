@@ -1,0 +1,76 @@
+{
+  "event_count": 77,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: Expected \";\".",
+    "targets": [
+      {
+        "label": "//cases:syntax_failure",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "Expected \";\".",
+        "location": {
+          "path": "cases/syntax_failure.proto",
+          "line": 5,
+          "column": 1
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:14: Generating Descriptor Set proto_library //cases:syntax_failure failed: (Exit 1): protoc failed: error executing GenProtoDescriptorSet command (from proto_library rule target //cases:syntax_failure) external/protobuf++protoc+prebuilt_protoc.osx_aarch_64/bin/protoc '--descriptor_set_out=bazel-out/darwin_arm64-fastbuild/bin/cases/syntax_failure-descriptor-set.proto.bin' -I. ... (remaining 8 arguments skipped)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "GenProtoDescriptorSet action failed with exit code 1",
+        "location": null,
+        "target": "//cases:syntax_failure",
+        "action": "GenProtoDescriptorSet",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

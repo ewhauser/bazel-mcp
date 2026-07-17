@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case": "cpp/link/undefined-reference-macos",
+  "workspace": "examples/cpp",
+  "command": "build",
+  "args": [
+    "//cases:undefined_reference"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Apple ld",
+  "tool_version": "platform-default",
+  "rules": {
+    "rules_cc": "0.2.22"
+  },
+  "origin_repository": "https://github.com/google/googletest",
+  "origin_commit": "a25f43576effe4ebe887412a603cddfa8fc3ba64"
+}

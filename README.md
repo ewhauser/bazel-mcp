@@ -516,8 +516,10 @@ make check
 ```
 
 Runner, BEP, policy, or reducer changes should also run
-`make test-bazel-matrix`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening
-a pull request.
+`make test-bazel-matrix`. Reducer changes should additionally run
+`make test-reducer-corpus` and follow the
+[integration case workflow](docs/reducer-integration-testing.md). Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 Use `make bench-reducers` to compare the same diagnostic reducer implemented in
 native Rust and Starlark. See the

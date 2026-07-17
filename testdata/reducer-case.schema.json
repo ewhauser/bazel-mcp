@@ -1,0 +1,464 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CaseManifest",
+  "type": "object",
+  "properties": {
+    "args": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "bazel_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "command": {
+      "type": "string"
+    },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvidenceSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "expect": {
+      "$ref": "#/$defs/CaseExpectation"
+    },
+    "id": {
+      "type": "string"
+    },
+    "issue": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "default": null,
+      "minimum": 0
+    },
+    "platforms": {
+      "type": "array",
+      "default": [
+        "any"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "provenance": {
+      "$ref": "#/$defs/ProvenanceSpec"
+    },
+    "replay": {
+      "$ref": "#/$defs/ReplaySpec",
+      "default": {
+        "max_bytes": 65536,
+        "max_items": 100
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "startup_args": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "tags": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "test_target": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "default": 300,
+      "minimum": 0
+    },
+    "workspace": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "workspace",
+    "command",
+    "expect",
+    "provenance"
+  ],
+  "$defs": {
+    "AbsentExpectation": {
+      "type": "object",
+      "properties": {
+        "artifact_uri_contains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "message_contains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "path_contains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "raw_contains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "target_contains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArtifactExpectation": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "locally_available": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "name_contains": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "name_equals": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "uri_contains": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "CaseExpectation": {
+      "type": "object",
+      "properties": {
+        "absent": {
+          "$ref": "#/$defs/AbsentExpectation",
+          "default": {
+            "artifact_uri_contains": [],
+            "message_contains": [],
+            "path_contains": [],
+            "raw_contains": [],
+            "target_contains": []
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ArtifactExpectation"
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DiagnosticExpectation"
+          }
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "headline_contains": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "headline_equals": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "inspect_hint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_diagnostics": {
+          "type": "integer",
+          "format": "uint",
+          "default": 20,
+          "minimum": 0
+        },
+        "max_visible_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "default": 8192,
+          "minimum": 0
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ]
+    },
+    "DiagnosticExpectation": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "column": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "message_contains": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "message_equals": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "message_prefix": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rank": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "repetition_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "severity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvidenceSpec": {
+      "type": "object",
+      "properties": {
+        "bep": {
+          "type": "string",
+          "default": "events.bep"
+        },
+        "exit": {
+          "type": "string",
+          "default": "exit.code"
+        },
+        "expected": {
+          "type": "string",
+          "default": "expected.json"
+        },
+        "provenance": {
+          "type": "string",
+          "default": "provenance.json"
+        },
+        "stderr": {
+          "type": "string",
+          "default": "stderr.txt"
+        },
+        "stdout": {
+          "type": "string",
+          "default": "stdout.txt"
+        },
+        "test_logs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProvenanceSpec": {
+      "type": "object",
+      "properties": {
+        "origin_commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "origin_repository": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "tool": {
+          "type": "string"
+        },
+        "tool_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "tool_version"
+      ]
+    },
+    "ReplaySpec": {
+      "type": "object",
+      "properties": {
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "default": 65536,
+          "minimum": 0
+        },
+        "max_items": {
+          "type": "integer",
+          "format": "uint",
+          "default": 100,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

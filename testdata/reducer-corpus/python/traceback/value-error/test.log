@@ -1,0 +1,20 @@
+
+===== //cases:traceback_failure :: test.log =====
+exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //cases:traceback_failure
+-----------------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/sandbox/darwin-sandbox/2/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/traceback_failure.runfiles/_main/cases/_traceback_failure_stage2_bootstrap.py", line 588, in <module>
+    main()
+  File "<RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/sandbox/darwin-sandbox/2/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/traceback_failure.runfiles/_main/cases/_traceback_failure_stage2_bootstrap.py", line 582, in main
+    _run_py_path(main_filename, args=sys.argv[1:])
+  File "<RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/sandbox/darwin-sandbox/2/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/traceback_failure.runfiles/_main/cases/_traceback_failure_stage2_bootstrap.py", line 339, in _run_py_path
+    runpy.run_path(main_filename, run_name="__main__")
+  File "<frozen runpy>", line 287, in run_path
+  File "<frozen runpy>", line 98, in _run_module_code
+  File "<frozen runpy>", line 88, in _run_code
+  File "<RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/sandbox/darwin-sandbox/2/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/traceback_failure.runfiles/_main/cases/traceback_failure.py", line 5, in <module>
+    validate_currency("USD")
+  File "<RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/sandbox/darwin-sandbox/2/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/traceback_failure.runfiles/_main/cases/traceback_failure.py", line 3, in validate_currency
+    raise ValueError(f"invoice currency {currency} is unsupported")
+ValueError: invoice currency USD is unsupported

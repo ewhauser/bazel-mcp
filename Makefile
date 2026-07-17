@@ -6,7 +6,9 @@
 	bench-agentic-control-smoke bench-agentic-toon publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
 	fuzz-run harden-release check-release-security \
-	mcp-conformance test-claude-code test-claude-code-live generate-sbom
+	mcp-conformance test-claude-code test-claude-code-live generate-sbom \
+	reducer-cases-list test-reducer-corpus test-reducer-live record-reducer-case \
+	record-reducer-replay accept-reducer-case generate-reducer-case-schema check-reducer-case-schema
 
 ARGS ?= --help
 BAZEL ?= bazelisk
@@ -28,6 +30,9 @@ AGENTIC_PRESENTATION_SAMPLES ?= 5
 AGENTIC_ARGS ?=
 BENCHMARK_RUN ?= $(shell cat .cache/benchmarks/$(OSS_PROJECT)/LATEST)
 BENCHMARK_ARTIFACT_DIR ?= .cache/published-benchmarks/$(OSS_PROJECT)/$(BENCHMARK_RUN)
+REDUCER_CASE ?=
+REDUCER_CASE_ARGS ?= --tag live-smoke
+REDUCER_CASE_SCHEMA ?= testdata/reducer-case.schema.json
 
 setup-hooks:
 	git config core.hooksPath .githooks
@@ -43,6 +48,39 @@ test-unit:
 
 test-integration:
 	cargo test --workspace --all-features --tests
+
+reducer-cases-list:
+	cargo run -p bazel-mcp-reducer-cases -- list
+
+test-reducer-corpus:
+	cargo test -p bazel-mcp-reducer-cases --test corpus
+
+test-reducer-live:
+	cargo build -p bazel-mcp-server --bin bazel-mcp
+	cargo run -p bazel-mcp-reducer-cases -- verify --live $(REDUCER_CASE_ARGS)
+
+record-reducer-case:
+	@test -n "$(REDUCER_CASE)" || { echo "set REDUCER_CASE=<case-id>" >&2; exit 2; }
+	cargo build -p bazel-mcp-server --bin bazel-mcp
+	cargo run -p bazel-mcp-reducer-cases -- record --case "$(REDUCER_CASE)"
+
+record-reducer-replay:
+	@test -n "$(REDUCER_CASE)" || { echo "set REDUCER_CASE=<case-id>" >&2; exit 2; }
+	cargo run -p bazel-mcp-reducer-cases -- record --case "$(REDUCER_CASE)" --replay-only
+
+accept-reducer-case:
+	@test -n "$(REDUCER_CASE)" || { echo "set REDUCER_CASE=<case-id>" >&2; exit 2; }
+	@test "$$BAZEL_MCP_ACCEPT_REDUCER_CASES" = 1 || { echo "set BAZEL_MCP_ACCEPT_REDUCER_CASES=1" >&2; exit 2; }
+	cargo run -p bazel-mcp-reducer-cases -- accept --case "$(REDUCER_CASE)" --yes
+
+generate-reducer-case-schema:
+	cargo run -q -p bazel-mcp-reducer-cases -- schema > $(REDUCER_CASE_SCHEMA)
+
+check-reducer-case-schema:
+	@tmp=$$(mktemp); \
+	cargo run -q -p bazel-mcp-reducer-cases -- schema > "$$tmp"; \
+	diff -u $(REDUCER_CASE_SCHEMA) "$$tmp"; \
+	rm -f "$$tmp"
 
 test-bazel-matrix:
 	$(NIX_DEVELOP) ./scripts/test-bazel-matrix.sh
@@ -141,8 +179,8 @@ publish-token-benchmark:
 		$(BENCHMARK_ARTIFACT_DIR) --replace
 
 generate-bep-goldens:
-	./scripts/fixtures/generate-bep-goldens.sh
-	UPDATE_GOLDENS=1 cargo test -p bazel-mcp-reducer --test golden
+	@test -n "$(REDUCER_CASE)" || { echo "set REDUCER_CASE=<case-id>" >&2; exit 2; }
+	./scripts/fixtures/generate-bep-goldens.sh "$(REDUCER_CASE)"
 
 fuzz-setup:
 	./scripts/fuzz-init.sh

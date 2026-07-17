@@ -1,0 +1,11 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+ERROR: <WORKSPACE>/cases/syntax/defs.bzl:1:17: syntax error at ':': expected )
+ERROR: <WORKSPACE>/cases/syntax/defs.bzl:3:1: expected an indented block
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//cases/syntax:failure': error loading package 'cases/syntax': compilation of module 'cases/syntax/defs.bzl' failed
+ERROR: error loading package 'cases/syntax': compilation of module 'cases/syntax/defs.bzl' failed
+INFO: Elapsed time: 5.263s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

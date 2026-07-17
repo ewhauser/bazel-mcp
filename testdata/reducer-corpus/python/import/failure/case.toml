@@ -1,0 +1,44 @@
+schema_version = 1
+id = "python/import/failure"
+workspace = "examples/python"
+command = "test"
+args = ["//cases:import_failure"]
+tags = ["python", "import", "test-log", "fast"]
+platforms = ["linux", "macos", "windows"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+test_target = "//cases:import_failure"
+
+[evidence]
+test_logs = ["test.log"]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 3
+headline_contains = "invoice_currency"
+inspect_hint = "test_log"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "test"
+message_contains = "No module named 'invoice_currency'"
+path = "cases/import_failure.py"
+line = 1
+target = "//cases:import_failure"
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "CPython"
+tool_version = "3.12.13"
+
+[provenance.rules]
+rules_python = "2.2.0"

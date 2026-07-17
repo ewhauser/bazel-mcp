@@ -1,0 +1,33 @@
+load(":failure_rules.bzl", "analysis_failure", "fixture_failure")
+
+analysis_failure(
+    name = "analysis_failure",
+    tags = ["manual", "reducer-fixture"],
+)
+
+fixture_failure(
+    name = "action_failure",
+    message = "ERROR: BAZEL_MCP_ACTION_ROOT_CAUSE",
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+)
+
+fixture_failure(
+    name = "fanout_one",
+    message = "ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE",
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+)
+
+fixture_failure(
+    name = "fanout_two",
+    message = "ERROR: BAZEL_MCP_FANOUT_ROOT_CAUSE_TWO",
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+)

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "case": "bazel-core/action/fanout",
+  "workspace": "examples/bazel-core",
+  "command": "build",
+  "args": [
+    "--keep_going",
+    "//cases:fanout_one",
+    "//cases:fanout_two"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Bazel",
+  "tool_version": "9.2.0",
+  "rules": {
+    "bazel": "9.2.0"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}

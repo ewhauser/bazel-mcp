@@ -1,0 +1,19 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "syntax_failure",
+    srcs = ["syntax_failure.py"],
+    tags = ["manual", "reducer-fixture"],
+)
+
+py_test(
+    name = "import_failure",
+    srcs = ["import_failure.py"],
+    tags = ["manual", "reducer-fixture"],
+)
+
+py_test(
+    name = "traceback_failure",
+    srcs = ["traceback_failure.py"],
+    tags = ["manual", "reducer-fixture"],
+)

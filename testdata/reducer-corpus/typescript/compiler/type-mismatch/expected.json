@@ -1,0 +1,76 @@
+{
+  "event_count": 103,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: TS2322: Type 'string' is not assignable to type 'number'.",
+    "targets": [
+      {
+        "label": "//cases:typescript_failure",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "TS2322: Type 'string' is not assignable to type 'number'.",
+        "location": {
+          "path": "cases/type_failure.ts",
+          "line": 5,
+          "column": 28
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:15:8: Executing genrule //cases:typescript_failure failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //cases:typescript_failure) /bin/bash -c ... (remaining 1 argument skipped)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "Genrule action failed with exit code 1",
+        "location": null,
+        "target": "//cases:typescript_failure",
+        "action": "Genrule",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

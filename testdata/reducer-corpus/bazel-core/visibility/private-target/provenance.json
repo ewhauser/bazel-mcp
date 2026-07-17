@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case": "bazel-core/visibility/private-target",
+  "workspace": "examples/bazel-core",
+  "command": "build",
+  "args": [
+    "//consumer:visibility_failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Bazel",
+  "tool_version": "9.2.0",
+  "rules": {
+    "bazel": "9.2.0"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}
