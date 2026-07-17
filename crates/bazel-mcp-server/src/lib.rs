@@ -4,92 +4,52 @@ mod config;
 mod handler;
 
 pub use bazel_mcp_runner::BepTransport;
-pub use config::{Cli, McpExecutionPolicy, ResultEncoding, ServerConfig, StarlarkConfig};
+pub use config::{
+    Cli, McpConfig, McpExecutionPolicy, RawServerConfig, RawStarlarkConfig, ResultEncoding,
+    RetentionConfig, ValidatedServerConfig,
+};
 pub use handler::BazelMcpServer;
 
 use anyhow::Context;
-use bazel_mcp_policy::PolicyConfig;
 use bazel_mcp_runner::{InvocationService, RunnerConfig};
 use bazel_mcp_store::Store;
 use rmcp::RoleServer;
 
-pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
-    let store = Store::open(&config.cache_root).await.with_context(|| {
+pub async fn serve(config: ValidatedServerConfig) -> anyhow::Result<()> {
+    let store = Store::open(config.cache_root()).await.with_context(|| {
         format!(
             "open shared invocation store at {}",
-            config.cache_root.display()
+            config.cache_root().display()
         )
     })?;
+    let retention = RetentionConfig::from(&config);
     store
-        .enforce_retention(
-            std::time::Duration::from_secs(config.retention_days.saturating_mul(24 * 60 * 60)),
-            config.maximum_storage_bytes,
-        )
+        .enforce_retention(retention.maximum_age, retention.maximum_storage_bytes.get())
         .await
         .context("enforce invocation retention")?;
-    let policy = PolicyConfig {
-        allowed_roots: config.allowed_roots.clone(),
-        allowed_commands: config.allowed_commands.clone(),
-        denied_commands: config.denied_commands.clone(),
-        environment_allowlist: config.environment_allowlist.clone(),
-        redaction_patterns: config.redaction_patterns.clone(),
-        bazel_executable: config.bazel_executable.clone(),
-    };
-    let runner = InvocationService::start(
-        store.clone(),
-        RunnerConfig {
-            policy,
-            default_timeout: std::time::Duration::from_secs(config.default_timeout_seconds),
-            maximum_timeout: std::time::Duration::from_secs(config.maximum_timeout_seconds),
-            cancellation_interrupt_grace: std::time::Duration::from_secs(
-                config.cancellation_interrupt_grace_seconds,
-            ),
-            cancellation_terminate_grace: std::time::Duration::from_secs(
-                config.cancellation_terminate_grace_seconds,
-            ),
-            global_concurrency: config.global_concurrency,
-            output_user_root: config.output_user_root.clone(),
-            isolated_bazel_server_idle_timeout: std::time::Duration::from_secs(
-                config.isolated_bazel_server_idle_seconds,
-            ),
-            supported_bazel_major_versions: config.supported_bazel_major_versions.clone(),
-            allow_unsupported_bazel_versions: config.allow_unsupported_bazel_versions,
-            version_check_timeout: std::time::Duration::from_secs(
-                config.version_check_timeout_seconds,
-            ),
-            maximum_pending_invocations: config.maximum_pending_invocations,
-            output_base_lock_root: RunnerConfig::default().output_base_lock_root,
-            bep_transport: config.bep_transport,
-            starlark_reducers: config.starlark.runner_config(),
-        },
-    )
-    .await?;
+    let runner = InvocationService::start(store.clone(), RunnerConfig::from(&config)).await?;
     let shutdown_runner = runner.clone();
-    let server = BazelMcpServer::new(runner, config.result_encoding)
-        .with_progress_timing(
-            std::time::Duration::from_secs(config.progress_initial_seconds),
-            std::time::Duration::from_secs(config.progress_interval_seconds),
-        )
+    let mcp = McpConfig::from(&config);
+    let server = BazelMcpServer::new(runner, mcp.result_encoding)
+        .with_progress_timing(mcp.progress_initial, mcp.progress_interval)
         .with_task_execution(
-            config.mcp_execution_policy,
-            std::time::Duration::from_secs(config.task_ttl_seconds),
-            config.task_poll_interval_ms,
+            mcp.execution_policy,
+            mcp.task_ttl,
+            u64::try_from(mcp.task_poll_interval.as_millis()).unwrap_or(u64::MAX),
         );
     tracing::info!(
-        policy = ?config.mcp_execution_policy,
-        task_ttl_seconds = config.task_ttl_seconds,
-        task_poll_interval_ms = config.task_poll_interval_ms,
+        policy = ?mcp.execution_policy,
+        task_ttl_seconds = mcp.task_ttl.as_secs(),
+        task_poll_interval_ms = mcp.task_poll_interval.as_millis(),
         legacy_protocol = "2025-11-25",
         extension_protocol = "2026-06-30",
         "configured negotiated MCP task execution"
     );
     let shutdown_store = store.clone();
     let cleanup_store = store;
-    let cleanup_age =
-        std::time::Duration::from_secs(config.retention_days.saturating_mul(24 * 60 * 60));
-    let cleanup_bytes = config.maximum_storage_bytes;
-    let cleanup_interval =
-        std::time::Duration::from_secs(config.retention_cleanup_interval_seconds);
+    let cleanup_age = retention.maximum_age;
+    let cleanup_bytes = retention.maximum_storage_bytes.get();
+    let cleanup_interval = retention.cleanup_interval;
     let cleanup_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(cleanup_interval);
         interval.tick().await;
@@ -115,10 +75,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
         None,
     );
     let service_cancellation = running.cancellation_token();
-    let shutdown_wait = config
-        .cancellation_interrupt_grace_seconds
-        .saturating_add(config.cancellation_terminate_grace_seconds)
-        .saturating_add(5);
+    let shutdown_wait = config.shutdown_wait();
     let waiting = running.waiting();
     tokio::pin!(waiting);
     let result = tokio::select! {
@@ -130,8 +87,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
                 "received shutdown signal; cancelling active Bazel invocations"
             );
             service_cancellation.cancel();
-            let deadline = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(shutdown_wait);
+            let deadline = tokio::time::Instant::now() + shutdown_wait;
             while shutdown_runner.active_invocation_count().await > 0
                 && tokio::time::Instant::now() < deadline
             {

@@ -1,7 +1,7 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use bazel_mcp_server::{Cli, ServerConfig};
+use bazel_mcp_server::{Cli, ValidatedServerConfig};
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -28,7 +28,7 @@ fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> std::process::ExitCode {
-    match ServerConfig::load(&cli) {
+    match ValidatedServerConfig::load(&cli) {
         Ok(config) => match bazel_mcp_server::serve(config).await {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
