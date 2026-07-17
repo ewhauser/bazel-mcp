@@ -16,6 +16,7 @@ rust_library(
 rust_test(
     name = "unit_test",
     crate = ":bazel_mcp_store",
+    compile_data = glob(["tests/fixtures/**"]),
     size = "small",
     deps = all_crate_deps(
         cargo_only = True,

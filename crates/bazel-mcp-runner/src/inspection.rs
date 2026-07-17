@@ -8,10 +8,10 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bazel_mcp_reducer::normalize_terminal_text;
-use bazel_mcp_store::{InvocationPaths, StoreError};
+use bazel_mcp_store::{InvocationHeader, InvocationPaths, StoreError};
 use bazel_mcp_types::{
-    ArtifactKind, BazelCommand, CommandClass, InvocationId, InvocationRecord, InvocationState,
-    PageRequest, Termination,
+    ArtifactKind, BazelCommand, CommandClass, InvocationId, InvocationState, PageRequest,
+    Termination,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -663,7 +663,7 @@ fn failure_evidence_priority(line: &str) -> Option<u8> {
     }
 }
 
-fn invocation_ledger_row(record: &InvocationRecord) -> serde_json::Value {
+fn invocation_ledger_row(record: &InvocationHeader) -> serde_json::Value {
     let arguments = record
         .request
         .arguments

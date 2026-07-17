@@ -404,9 +404,14 @@ impl InvocationService {
         cancellation: CancellationToken,
     ) -> Result<InvocationRecord, RunnerError> {
         loop {
-            let record = self.store.get_invocation(id).await?;
-            if record.state.is_terminal() {
-                return Ok(record);
+            if self
+                .store
+                .get_invocation_header(id)
+                .await?
+                .state
+                .is_terminal()
+            {
+                return Ok(self.store.get_invocation(id).await?);
             }
             tokio::select! {
                 () = cancellation.cancelled() => return Err(RunnerError::WaitCancelled(id)),
@@ -626,7 +631,7 @@ impl InvocationService {
                 tracing::warn!(invocation_id = %id, %message);
                 if self
                     .store
-                    .get_invocation(id)
+                    .get_invocation_header(id)
                     .await
                     .is_ok_and(|record| !record.state.is_terminal())
                 {
@@ -647,11 +652,11 @@ impl InvocationService {
                         )
                         .await;
                 }
-                if let Ok(record) = self.store.get_invocation(id).await
+                if let Ok(record) = self.store.get_invocation_header(id).await
                     && record.state.is_terminal()
                     && record.summary.is_some()
                 {
-                    return Ok(record);
+                    return Ok(record.into_record());
                 }
                 return Err(error.into());
             }
@@ -739,7 +744,7 @@ impl InvocationService {
         }
         if self
             .store
-            .get_invocation(id)
+            .get_invocation_header(id)
             .await
             .is_ok_and(|record| !record.state.is_terminal())
         {
@@ -831,7 +836,7 @@ impl InvocationService {
         id: InvocationId,
         reason: Option<&str>,
     ) -> Result<CancelResult, RunnerError> {
-        let record = self.store.get_invocation(id).await?;
+        let record = self.store.get_invocation_header(id).await?;
         if record.state.is_terminal() {
             return Ok(CancelResult {
                 invocation_id: id,
@@ -875,7 +880,7 @@ impl InvocationService {
                 Err(error) => return Err(error.into()),
             }
         }
-        let current_state = self.store.get_invocation(id).await?.state;
+        let current_state = self.store.get_invocation_header(id).await?.state;
         Ok(CancelResult {
             invocation_id: id,
             prior_state: record.state,
@@ -906,14 +911,14 @@ impl InvocationService {
     }
 
     pub async fn invocation_state(&self, id: InvocationId) -> Result<InvocationState, RunnerError> {
-        Ok(self.store.get_invocation(id).await?.state)
+        Ok(self.store.get_invocation_header(id).await?.state)
     }
 
     pub async fn invocation_progress(
         &self,
         id: InvocationId,
     ) -> Result<InvocationProgress, RunnerError> {
-        let state = self.store.get_invocation(id).await?.state;
+        let state = self.store.get_invocation_header(id).await?.state;
         let wait = self.scheduler.output_base_wait(id).await;
         let wait = wait.map(|status| status.snapshot()).unwrap_or_else(|| {
             crate::output_base_lock::OutputBaseWaitSnapshot {

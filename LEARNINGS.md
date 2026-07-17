@@ -166,3 +166,9 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   leaking padding into visible messages; normalize both marker forms before
   projecting diagnostics and artifact URIs. Thread:
   `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Filtering `bazel.inspect test_log` to a failing test name retained the panic
+  header but dropped the adjacent `Result` error value because that continuation
+  line did not repeat the filter text. Diagnosing the failure required one extra
+  targeted test rerun; return a small bounded context window around matching
+  test-log lines so the causal message stays visible without another tool call.
+  Thread: `019f6df4-be14-75b2-8e2b-654b60a669c3`.

@@ -282,7 +282,7 @@ impl InvocationService {
             );
             if self
                 .store
-                .get_invocation(queued.request.id)
+                .get_invocation_header(queued.request.id)
                 .await
                 .is_ok_and(|record| !record.state.is_terminal())
             {
@@ -303,11 +303,11 @@ impl InvocationService {
                     )
                     .await;
             }
-            if let Ok(record) = self.store.get_invocation(queued.request.id).await
+            if let Ok(record) = self.store.get_invocation_header(queued.request.id).await
                 && record.state.is_terminal()
                 && record.summary.is_some()
             {
-                return Ok(record);
+                return Ok(record.into_record());
             }
             return Err(error.into());
         }
@@ -616,7 +616,7 @@ impl InvocationService {
             );
             if self
                 .store
-                .get_invocation(queued.request.id)
+                .get_invocation_header(queued.request.id)
                 .await
                 .is_ok_and(|record| !record.state.is_terminal())
             {
@@ -643,11 +643,11 @@ impl InvocationService {
                     )
                     .await;
             }
-            if let Ok(record) = self.store.get_invocation(queued.request.id).await
+            if let Ok(record) = self.store.get_invocation_header(queued.request.id).await
                 && record.state.is_terminal()
                 && record.summary.is_some()
             {
-                return Ok(record);
+                return Ok(record.into_record());
             }
         }
         postprocess
