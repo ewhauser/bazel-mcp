@@ -84,7 +84,7 @@ async fn wait_for_path(path: &Path) {
 
 async fn wait_for_invocation(service: &InvocationService, id: bazel_mcp_types::InvocationId) {
     for _ in 0..500 {
-        if service.store().get_invocation(id).await.is_ok() {
+        if service.test_support().get_invocation(id).await.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -407,7 +407,7 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
     assert!(secret_filter.items.as_array().unwrap().is_empty());
 
     service
-        .store()
+        .test_support()
         .replace_artifacts(
             id,
             &[Artifact {
@@ -470,7 +470,7 @@ async fn preserves_raw_bep_before_redacting_every_persisted_and_visible_projecti
     assert_eq!(record.state, InvocationState::Failed);
     assert!(!serde_json::to_string(&record).unwrap().contains(secret));
 
-    let paths = service.store().paths_for(&record);
+    let paths = service.test_support().paths_for(&record);
     let retained = std::fs::read(&paths.bep).unwrap();
     assert_eq!(retained, raw_bep);
     assert!(
@@ -786,7 +786,7 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
             .any(|item| item.as_str().unwrap().contains("got 1, want 2"))
     );
 
-    let failed_paths = service.store().paths_for(&failed);
+    let failed_paths = service.test_support().paths_for(&failed);
     let retained_before = tokio::fs::read(&failed_paths.test_logs_raw).await.unwrap();
     assert!(String::from_utf8_lossy(&retained_before).contains("got 1, want 2"));
     tokio::fs::remove_file(&flag_marker).await.unwrap();
@@ -1315,7 +1315,13 @@ async fn deferred_submission_commits_before_completion_and_survives_wait_cancell
             .await
             .is_err()
     );
-    assert!(service.store().get_invocation(rejected_id).await.is_err());
+    assert!(
+        service
+            .test_support()
+            .get_invocation(rejected_id)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -2027,7 +2033,7 @@ async fn fifo_transport_spools_private_evidence_and_cleans_up_the_pipe() {
         .await
         .unwrap();
     assert_eq!(record.state, InvocationState::Succeeded);
-    let paths = service.store().paths_for(&record);
+    let paths = service.test_support().paths_for(&record);
     assert_eq!(
         std::fs::read(&paths.bep).unwrap(),
         std::fs::read(fixture).unwrap()
@@ -2061,7 +2067,7 @@ async fn fifo_transport_falls_back_to_file_tail_when_pid_probe_fails() {
         .unwrap();
     assert_eq!(record.state, InvocationState::Succeeded);
     assert_eq!(
-        std::fs::read(service.store().paths_for(&record).bep).unwrap(),
+        std::fs::read(service.test_support().paths_for(&record).bep).unwrap(),
         std::fs::read(fixture).unwrap()
     );
 }
@@ -2174,17 +2180,17 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
     let request = InvocationRequest::new(workspace, BazelCommand::Test, vec!["//...".into()]);
     let id = request.id;
     service
-        .store()
+        .test_support()
         .create_invocation(&InvocationRecord::queued(request))
         .await
         .unwrap();
     service
-        .store()
+        .test_support()
         .transition(id, InvocationState::Starting, None, None)
         .await
         .unwrap();
     service
-        .store()
+        .test_support()
         .transition(id, InvocationState::Running, None, None)
         .await
         .unwrap();
@@ -2222,7 +2228,7 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
         ..InvocationSummary::default()
     };
     service
-        .store()
+        .test_support()
         .transition(
             id,
             InvocationState::Failed,
@@ -2314,7 +2320,7 @@ async fn evidence_file_failures_become_terminal_instead_of_stranding_starting_ro
     });
     loop {
         if service
-            .store()
+            .test_support()
             .get_invocation(blocker_id)
             .await
             .is_ok_and(|record| record.state == InvocationState::Running)
@@ -2332,8 +2338,8 @@ async fn evidence_file_failures_become_terminal_instead_of_stranding_starting_ro
         async move { service.run(request).await }
     });
     let paths = loop {
-        if let Ok(record) = service.store().get_invocation(id).await {
-            break service.store().paths_for(&record);
+        if let Ok(record) = service.test_support().get_invocation(id).await {
+            break service.test_support().paths_for(&record);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
