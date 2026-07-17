@@ -407,10 +407,10 @@ impl ReductionSubscriber {
         }
     }
 
-    fn observe(&mut self, event: bazel_mcp_bep::BepEvent) {
+    fn observe(&mut self, event: bazel_mcp_bep::BorrowedBepEvent<'_>) {
         self.decoded_bytes = self.decoded_bytes.saturating_add(event.frame_bytes().len());
         self.event_count = self.event_count.saturating_add(1);
-        self.accumulator.observe(event);
+        self.accumulator.observe_borrowed(event);
     }
 
     fn outcome(&self) -> StreamOutcome {
@@ -561,7 +561,7 @@ impl CapturePipeline {
         let pending_raw = &mut self.pending_raw;
         let extension_limits = self.extension_limits;
         let mut pipeline_error = None;
-        self.decoder.push_framed(input, |event, framed| {
+        self.decoder.push_framed_borrowed(input, |event, framed| {
             if pipeline_error.is_some() {
                 return IncrementalStreamControl::Continue;
             }

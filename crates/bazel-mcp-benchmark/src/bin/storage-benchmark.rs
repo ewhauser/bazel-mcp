@@ -12,7 +12,7 @@ use std::{
 use anyhow::Context;
 use bazel_mcp_bep::{
     DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, DEFAULT_MAX_STREAM_EVENTS,
-    IncrementalStreamDecoder, visit_stream_partial_bounded,
+    IncrementalStreamDecoder, visit_stream_partial_borrowed_bounded,
 };
 use bazel_mcp_reducer::BepAccumulator;
 use bazel_mcp_store::{InvocationCompletion, Store};
@@ -459,7 +459,7 @@ fn tail_complete_bep_frames(
         if read > 0 {
             hasher.update(&buffer[..read]);
             tailed_bytes = tailed_bytes.saturating_add(read as u64);
-            decoder.push(&buffer[..read], |event| accumulator.observe(event));
+            decoder.push_borrowed(&buffer[..read], |event| accumulator.observe_borrowed(event));
             observed_bytes.store(tailed_bytes, Ordering::Release);
             continue;
         }
@@ -503,12 +503,12 @@ fn hash_bep_file(path: PathBuf) -> anyhow::Result<(u64, [u8; 32])> {
 fn decode_bep(bytes: &[u8]) -> anyhow::Result<(usize, f64)> {
     let mut accumulator = BepAccumulator::default();
     let started = Instant::now();
-    let outcome = visit_stream_partial_bounded(
+    let outcome = visit_stream_partial_borrowed_bounded(
         std::io::Cursor::new(bytes),
         DEFAULT_MAX_FRAME_BYTES,
         DEFAULT_MAX_STREAM_BYTES,
         DEFAULT_MAX_STREAM_EVENTS,
-        |event| accumulator.observe(event),
+        |event| accumulator.observe_borrowed(event),
     );
     let elapsed_ms = millis(started.elapsed());
     anyhow::ensure!(

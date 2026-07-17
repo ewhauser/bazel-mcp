@@ -69,6 +69,36 @@ impl BepEvent {
     }
 }
 
+/// A decoded BEP event that borrows its protobuf frame.
+///
+/// Borrowed events are valid only for the duration of the visitor call that
+/// receives them. Consumers that retain an event beyond that call should use
+/// [`BepEvent`] instead.
+#[derive(Clone, Debug)]
+pub struct BorrowedBepEvent<'a> {
+    inner: BuildEventView<'a>,
+    frame: &'a [u8],
+}
+
+impl<'a> BorrowedBepEvent<'a> {
+    fn decode(frame: &'a [u8]) -> Result<Self, buffa::DecodeError> {
+        Ok(Self {
+            inner: BuildEventView::decode_view(frame)?,
+            frame,
+        })
+    }
+
+    #[must_use]
+    pub fn view(&self) -> &BuildEventView<'_> {
+        &self.inner
+    }
+
+    #[must_use]
+    pub fn frame_bytes(&self) -> &'a [u8] {
+        self.frame
+    }
+}
+
 #[derive(Debug)]
 pub struct PartialStream {
     pub events: Vec<BepEvent>,
@@ -145,9 +175,44 @@ impl IncrementalStreamDecoder {
     /// [`IncrementalStreamControl::ResetAfterFrame`] resets stream byte/event
     /// accounting after that frame, which lets retry-aware transports retain
     /// only the next attempt even when two writers' bytes arrive in one read.
-    pub fn push_framed<F>(&mut self, mut input: &[u8], mut visitor: F)
+    pub fn push_framed<F>(&mut self, input: &[u8], mut visitor: F)
     where
         F: FnMut(BepEvent, &[u8]) -> IncrementalStreamControl,
+    {
+        self.push_frames(input, |decoder, frame, framed| {
+            decoder.decode_owned_frame(frame, framed, &mut visitor);
+        });
+    }
+
+    /// Consume a stream chunk and visit every complete event as a borrowed
+    /// view into the caller's chunk or the decoder's one pending frame.
+    ///
+    /// The higher-ranked visitor prevents the borrowed event from escaping the
+    /// callback, so the decoder can safely reuse its input storage afterward.
+    pub fn push_borrowed<F>(&mut self, input: &[u8], mut visitor: F)
+    where
+        F: for<'frame> FnMut(BorrowedBepEvent<'frame>),
+    {
+        self.push_framed_borrowed(input, |event, _frame| {
+            visitor(event);
+            IncrementalStreamControl::Continue
+        });
+    }
+
+    /// Consume a stream chunk while exposing a borrowed event and its exact
+    /// original length-delimited frame.
+    pub fn push_framed_borrowed<F>(&mut self, input: &[u8], mut visitor: F)
+    where
+        F: for<'frame> FnMut(BorrowedBepEvent<'frame>, &'frame [u8]) -> IncrementalStreamControl,
+    {
+        self.push_frames(input, |decoder, frame, framed| {
+            decoder.decode_borrowed_frame(frame, framed, &mut visitor);
+        });
+    }
+
+    fn push_frames<F>(&mut self, mut input: &[u8], mut decode: F)
+    where
+        F: for<'frame> FnMut(&mut Self, &'frame [u8], &'frame [u8]),
     {
         if self.terminal_error.is_some() {
             return;
@@ -161,11 +226,7 @@ impl IncrementalStreamDecoder {
                         frame_bytes,
                     }) => {
                         let consumed = prefix_bytes.saturating_add(frame_bytes);
-                        self.decode_frame(
-                            &input[prefix_bytes..consumed],
-                            &input[..consumed],
-                            &mut visitor,
-                        );
+                        decode(self, &input[prefix_bytes..consumed], &input[..consumed]);
                         if self.terminal_error.is_some() {
                             return;
                         }
@@ -209,11 +270,7 @@ impl IncrementalStreamDecoder {
                 }) => {
                     let consumed = prefix_bytes.saturating_add(frame_bytes);
                     let framed = std::mem::take(&mut self.pending);
-                    self.decode_frame(
-                        &framed[prefix_bytes..consumed],
-                        &framed[..consumed],
-                        &mut visitor,
-                    );
+                    decode(self, &framed[prefix_bytes..consumed], &framed[..consumed]);
                     if self.terminal_error.is_some() {
                         return;
                     }
@@ -236,11 +293,7 @@ impl IncrementalStreamDecoder {
                 }) => {
                     let consumed = prefix_bytes.saturating_add(frame_bytes);
                     let framed = std::mem::take(&mut self.pending);
-                    self.decode_frame(
-                        &framed[prefix_bytes..consumed],
-                        &framed[..consumed],
-                        &mut visitor,
-                    );
+                    decode(self, &framed[prefix_bytes..consumed], &framed[..consumed]);
                 }
                 Ok(FrameState::NeedPrefix | FrameState::NeedPayload { .. }) => {}
                 Err(error) => self.terminal_error = Some(error),
@@ -266,11 +319,35 @@ impl IncrementalStreamDecoder {
         }
     }
 
-    fn decode_frame<F>(&mut self, frame: &[u8], framed: &[u8], visitor: &mut F)
+    fn decode_owned_frame<F>(&mut self, frame: &[u8], framed: &[u8], visitor: &mut F)
     where
         F: FnMut(BepEvent, &[u8]) -> IncrementalStreamControl,
     {
-        let next_bytes = self.decoded_bytes.saturating_add(frame.len());
+        self.visit_decoded_frame(frame.len(), || {
+            let event = BepEvent::decode_slice(frame)?;
+            Ok(visitor(event, framed))
+        });
+    }
+
+    fn decode_borrowed_frame<'frame, F>(
+        &mut self,
+        frame: &'frame [u8],
+        framed: &'frame [u8],
+        visitor: &mut F,
+    ) where
+        F: for<'a> FnMut(BorrowedBepEvent<'a>, &'a [u8]) -> IncrementalStreamControl,
+    {
+        self.visit_decoded_frame(frame.len(), || {
+            let event = BorrowedBepEvent::decode(frame)?;
+            Ok(visitor(event, framed))
+        });
+    }
+
+    fn visit_decoded_frame<F>(&mut self, frame_bytes: usize, decode: F)
+    where
+        F: FnOnce() -> Result<IncrementalStreamControl, buffa::DecodeError>,
+    {
+        let next_bytes = self.decoded_bytes.saturating_add(frame_bytes);
         if next_bytes > self.max_stream_bytes {
             self.terminal_error = Some(FrameError::StreamTooLarge {
                 actual: next_bytes,
@@ -286,8 +363,8 @@ impl IncrementalStreamDecoder {
             return;
         }
         self.decoded_bytes = next_bytes;
-        match BepEvent::decode_slice(frame) {
-            Ok(event) => match visitor(event, framed) {
+        match decode() {
+            Ok(control) => match control {
                 IncrementalStreamControl::Continue => {
                     self.event_count = self.event_count.saturating_add(1);
                 }
@@ -449,6 +526,43 @@ where
             Ok(0) => break,
             Ok(read) => {
                 decoder.push(&buffer[..read], &mut visitor);
+                if decoder.is_terminal() {
+                    break;
+                }
+            }
+            Err(error) => {
+                decoder.fail(FrameError::Io(error));
+                break;
+            }
+        }
+    }
+    decoder.finish()
+}
+
+/// Decode a length-delimited BEP stream one frame at a time while borrowing
+/// each decoded event from the reusable read buffer.
+///
+/// The visitor must reduce or copy any state it needs before returning. This
+/// avoids allocating a retained frame for consumers such as
+/// `BepAccumulator` that already keep only bounded, reducer-relevant fields.
+pub fn visit_stream_partial_borrowed_bounded<R, F>(
+    mut reader: R,
+    max_frame_bytes: usize,
+    max_stream_bytes: usize,
+    max_events: usize,
+    mut visitor: F,
+) -> StreamOutcome
+where
+    R: Read,
+    F: for<'frame> FnMut(BorrowedBepEvent<'frame>),
+{
+    let mut decoder = IncrementalStreamDecoder::new(max_frame_bytes, max_stream_bytes, max_events);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                decoder.push_borrowed(&buffer[..read], &mut visitor);
                 if decoder.is_terminal() {
                     break;
                 }
@@ -668,6 +782,62 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_incremental_decoder_handles_every_chunk_boundary() {
+        let first = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "borrowed".repeat(32),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let second = BuildEvent::default();
+        let mut framed = encode_frame(&first);
+        framed.extend_from_slice(&encode_frame(&second));
+
+        for split in 0..=framed.len() {
+            let mut decoder = IncrementalStreamDecoder::new(
+                DEFAULT_MAX_FRAME_BYTES,
+                DEFAULT_MAX_STREAM_BYTES,
+                DEFAULT_MAX_STREAM_EVENTS,
+            );
+            let mut payloads = Vec::new();
+            for chunk in [&framed[..split], &framed[split..]] {
+                decoder.push_borrowed(chunk, |event| {
+                    let stdout = match event.view().payload.as_ref() {
+                        Some(crate::view::build_event::Payload::Progress(progress)) => {
+                            Some(progress.stdout.to_owned())
+                        }
+                        _ => None,
+                    };
+                    payloads.push((event.frame_bytes().len(), stdout));
+                });
+            }
+            let outcome = decoder.finish();
+            assert_eq!(outcome.event_count, 2, "split at byte {split}");
+            assert_eq!(
+                outcome.decoded_bytes,
+                first.encoded_len() as usize + second.encoded_len() as usize,
+                "split at byte {split}"
+            );
+            assert!(
+                outcome.terminal_error.is_none(),
+                "split at byte {split}: {:?}",
+                outcome.terminal_error
+            );
+            assert_eq!(
+                payloads,
+                [
+                    (first.encoded_len() as usize, Some("borrowed".repeat(32))),
+                    (second.encoded_len() as usize, None),
+                ],
+                "split at byte {split}"
+            );
+        }
+    }
+
+    #[test]
     fn framed_incremental_decoder_preserves_bytes_and_resets_between_attempts() {
         let first = BuildEvent {
             payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
@@ -713,6 +883,67 @@ mod tests {
             }
             let outcome = decoder.finish();
             assert_eq!(frames, [first_frame.clone(), second_frame.clone()]);
+            assert_eq!(outcome.event_count, 1, "split at byte {split}");
+            assert_eq!(
+                outcome.decoded_bytes,
+                second.encoded_len() as usize,
+                "split at byte {split}"
+            );
+            assert!(outcome.terminal_error.is_none(), "split at byte {split}");
+        }
+    }
+
+    #[test]
+    fn borrowed_framed_decoder_preserves_bytes_and_resets_between_attempts() {
+        let first = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "abandoned".into(),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let second = BuildEvent {
+            payload: Some(crate::proto::build_event::Payload::Progress(Box::new(
+                crate::proto::Progress {
+                    stdout: "retained".into(),
+                    stderr: String::new(),
+                },
+            ))),
+            ..Default::default()
+        };
+        let first_frame = encode_frame(&first);
+        let second_frame = encode_frame(&second);
+        let mut input = first_frame.clone();
+        input.extend_from_slice(&second_frame);
+
+        for split in 0..=input.len() {
+            let mut decoder = IncrementalStreamDecoder::new(
+                DEFAULT_MAX_FRAME_BYTES,
+                DEFAULT_MAX_STREAM_BYTES,
+                DEFAULT_MAX_STREAM_EVENTS,
+            );
+            let mut frames = Vec::new();
+            for chunk in [&input[..split], &input[split..]] {
+                decoder.push_framed_borrowed(chunk, |event, framed| {
+                    frames.push((event.frame_bytes().to_vec(), framed.to_vec()));
+                    if frames.len() == 1 {
+                        IncrementalStreamControl::ResetAfterFrame
+                    } else {
+                        IncrementalStreamControl::Continue
+                    }
+                });
+            }
+            let outcome = decoder.finish();
+            assert_eq!(
+                frames,
+                [
+                    (first.encode_to_vec(), first_frame.clone()),
+                    (second.encode_to_vec(), second_frame.clone()),
+                ],
+                "split at byte {split}"
+            );
             assert_eq!(outcome.event_count, 1, "split at byte {split}");
             assert_eq!(
                 outcome.decoded_bytes,
@@ -799,6 +1030,13 @@ mod tests {
             1,
             |_| {},
         );
+        let borrowed_reader_outcome = visit_stream_partial_borrowed_bounded(
+            input.as_slice(),
+            DEFAULT_MAX_FRAME_BYTES,
+            DEFAULT_MAX_STREAM_BYTES,
+            1,
+            |_| {},
+        );
         let mut incremental =
             IncrementalStreamDecoder::new(DEFAULT_MAX_FRAME_BYTES, DEFAULT_MAX_STREAM_BYTES, 1);
         incremental.push(&input[..1], |_| {});
@@ -807,11 +1045,29 @@ mod tests {
 
         assert_eq!(incremental_outcome.event_count, reader_outcome.event_count);
         assert_eq!(
+            borrowed_reader_outcome.event_count,
+            reader_outcome.event_count
+        );
+        assert_eq!(
             incremental_outcome.decoded_bytes,
             reader_outcome.decoded_bytes
         );
         assert_eq!(
+            borrowed_reader_outcome.decoded_bytes,
+            reader_outcome.decoded_bytes
+        );
+        assert_eq!(
             incremental_outcome
+                .terminal_error
+                .as_ref()
+                .map(ToString::to_string),
+            reader_outcome
+                .terminal_error
+                .as_ref()
+                .map(ToString::to_string)
+        );
+        assert_eq!(
+            borrowed_reader_outcome
                 .terminal_error
                 .as_ref()
                 .map(ToString::to_string),
