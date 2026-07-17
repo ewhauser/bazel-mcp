@@ -1,6 +1,6 @@
 use std::{cmp::Reverse, collections::BTreeSet, sync::Arc};
 
-use bazel_mcp_types::{Diagnostic, InvocationSummary};
+use bazel_mcp_types::{Diagnostic, InspectHint, InvocationSummary};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -261,7 +261,7 @@ impl ReducerPipeline {
         }
         if !report.applied.is_empty() && context.input_truncated {
             summary.truncated = true;
-            summary.inspect_hint = Some("log".to_owned());
+            summary.inspect_hint = Some(InspectHint::Log);
         }
         report
     }

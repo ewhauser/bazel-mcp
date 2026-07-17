@@ -2,6 +2,9 @@
 
 mod config;
 mod handler;
+mod protocol;
+mod result;
+mod tasks;
 
 pub use bazel_mcp_runner::BepTransport;
 pub use config::{

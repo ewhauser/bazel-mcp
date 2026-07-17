@@ -56,55 +56,66 @@ impl Store {
         page: PageRequest,
     ) -> Result<Page<DeferredResultView>, StoreError> {
         self.refresh_index_if_stale().await?;
-        let limit = page.limit.clamp(1, 200) as usize;
+        let item_limit = page.item_limit.clamp(1, 200) as usize;
+        let scan_limit = page.scan_limit.clamp(page.item_limit.max(1), 20_000) as usize;
         let cursor = page
             .cursor
             .as_deref()
             .map(|value| DeferredCursor::decode_for(value, retrieval.as_str()))
             .transpose()?;
         let index = self.inner.index.read().await;
-        let mut items: Vec<_> = index
-            .deferred_by_created
-            .iter()
-            .rev()
-            .filter_map(|(_, id)| {
-                let entry = index.entries.get(id)?;
-                let deferred = entry.deferred.as_ref()?;
-                (deferred.retrieval == retrieval
-                    && !deferred.is_expired(now_ms, entry.record.state.is_terminal())
-                    && cursor.as_ref().is_none_or(|cursor| {
-                        deferred.created_at_ms < cursor.created_at_ms
-                            || (deferred.created_at_ms == cursor.created_at_ms
-                                && deferred.invocation_id.to_string() < cursor.id)
-                    }))
-                .then(|| DeferredResultView {
+        let mut items = Vec::with_capacity(item_limit);
+        let mut item_cursors = Vec::with_capacity(item_limit);
+        let mut continuation = None;
+        let mut scanned = 0_usize;
+        let mut truncated = false;
+        for (_, id) in index.deferred_by_created.iter().rev() {
+            let Some(entry) = index.entries.get(id) else {
+                continue;
+            };
+            let Some(deferred) = entry.deferred.as_ref() else {
+                continue;
+            };
+            if !cursor.as_ref().is_none_or(|cursor| {
+                deferred.created_at_ms < cursor.created_at_ms
+                    || (deferred.created_at_ms == cursor.created_at_ms
+                        && deferred.invocation_id.to_string() < cursor.id)
+            }) {
+                continue;
+            }
+            if scanned == scan_limit {
+                truncated = true;
+                break;
+            }
+            let matches = deferred.retrieval == retrieval
+                && !deferred.is_expired(now_ms, entry.record.state.is_terminal());
+            if matches && items.len() == item_limit {
+                truncated = true;
+                break;
+            }
+            scanned = scanned.saturating_add(1);
+            let cursor = DeferredCursor::new(
+                retrieval.as_str(),
+                deferred.created_at_ms,
+                deferred.invocation_id.to_string(),
+            )
+            .encode()?;
+            continuation = Some(cursor.clone());
+            if matches {
+                items.push(DeferredResultView {
                     deferred: deferred.clone(),
                     invocation: entry.record.clone().into_record(),
-                })
-            })
-            .take(limit + 1)
-            .collect();
-        let truncated = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = if truncated {
-            items
-                .last()
-                .map(|view| {
-                    DeferredCursor::new(
-                        retrieval.as_str(),
-                        view.deferred.created_at_ms,
-                        view.deferred.invocation_id.to_string(),
-                    )
-                    .encode()
-                })
-                .transpose()?
-        } else {
-            None
-        };
+                });
+                item_cursors.push(cursor);
+            }
+        }
         Ok(Page {
             items,
-            next_cursor,
+            total_count: None,
+            filtered_count: None,
+            next_cursor: if truncated { continuation } else { None },
             truncated,
+            item_cursors,
         })
     }
 

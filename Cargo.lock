@@ -405,6 +405,7 @@ name = "bazel-mcp-types"
 version = "0.5.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror",
  "uuid",
 ]

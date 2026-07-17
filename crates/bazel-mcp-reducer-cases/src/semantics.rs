@@ -41,7 +41,10 @@ pub fn observe_replay(output: &ReplayOutput, exit_code: i32, raw_text: String) -
         },
         exit_code: Some(exit_code),
         headline: output.summary.headline.clone(),
-        inspect_hint: output.summary.inspect_hint.clone(),
+        inspect_hint: output
+            .summary
+            .inspect_hint
+            .map(|hint| hint.as_str().to_owned()),
         diagnostics: output.summary.diagnostics.clone(),
         artifacts: output.artifacts.clone(),
         visible_bytes,

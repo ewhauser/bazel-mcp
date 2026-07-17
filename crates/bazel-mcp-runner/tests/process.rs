@@ -19,8 +19,8 @@ use bazel_mcp_runner::{
 use bazel_mcp_store::Store;
 use bazel_mcp_types::{
     Artifact, ArtifactKind, BazelCommand, DeferredRetrieval, Diagnostic, DiagnosticCategory,
-    InvocationRecord, InvocationRequest, InvocationState, InvocationSummary, ResultDisposition,
-    Severity, Termination, TestCase, TestResult, TestStatus,
+    InspectHint, InspectPayload, InvocationRecord, InvocationRequest, InvocationState,
+    InvocationSummary, ResultDisposition, Severity, Termination, TestCase, TestResult, TestStatus,
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -386,8 +386,8 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
                 view,
                 cursor: None,
                 filter: None,
-                limit: 20,
-                max_bytes: 8 * 1024,
+                item_limit: 20,
+                scan_limit: 10_000,
             })
             .await
             .unwrap();
@@ -402,12 +402,12 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
             view: InspectView::Log,
             cursor: None,
             filter: Some("SUPERSECRET".into()),
-            limit: 20,
-            max_bytes: 8 * 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
-    assert!(secret_filter.items.as_array().unwrap().is_empty());
+    assert!(secret_filter.items.is_empty());
 
     service
         .test_support()
@@ -432,8 +432,8 @@ async fn redacts_secrets_from_metadata_normalized_rows_and_log_inspection() {
             view: InspectView::Coverage,
             cursor: None,
             filter: None,
-            limit: 20,
-            max_bytes: 8 * 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
@@ -500,8 +500,8 @@ async fn preserves_raw_bep_before_redacting_every_persisted_and_visible_projecti
             view: InspectView::Diagnostics,
             cursor: None,
             filter: None,
-            limit: 20,
-            max_bytes: 8 * 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
@@ -596,8 +596,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
             view: InspectView::Log,
             cursor: None,
             filter: None,
-            limit: 20,
-            max_bytes: 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
@@ -614,8 +614,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
             view: InspectView::Log,
             cursor: Some(cursor.clone()),
             filter: None,
-            limit: 20,
-            max_bytes: 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
@@ -635,8 +635,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
                 view: InspectView::Log,
                 cursor: Some(cursor),
                 filter: None,
-                limit: 20,
-                max_bytes: 1024,
+                item_limit: 20,
+                scan_limit: 10_000,
             })
             .await
             .is_err()
@@ -651,8 +651,8 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
             view: InspectView::Log,
             cursor: Some("512".into()),
             filter: None,
-            limit: 20,
-            max_bytes: 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await;
     assert!(invalid.is_err());
@@ -666,13 +666,16 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
             view: InspectView::Log,
             cursor: None,
             filter: Some("LINE-150".into()),
-            limit: 20,
-            max_bytes: 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
-    assert_eq!(filtered.items.as_array().unwrap().len(), 1);
-    assert!(filtered.items[0].as_str().unwrap().contains("line-150"));
+    let InspectPayload::Log(filtered_items) = filtered.items else {
+        panic!("log inspection returned a different payload type");
+    };
+    assert_eq!(filtered_items.len(), 1);
+    assert!(filtered_items[0].contains("line-150"));
 
     let unmatched = service
         .inspect(InspectRequest {
@@ -683,12 +686,12 @@ async fn log_inspection_uses_bounded_opaque_cursors() {
             view: InspectView::Log,
             cursor: None,
             filter: Some("not-present".into()),
-            limit: 20,
-            max_bytes: 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
-    assert!(unmatched.items.as_array().unwrap().is_empty());
+    assert!(unmatched.items.is_empty());
 }
 
 #[tokio::test]
@@ -743,7 +746,7 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
     assert!(flag_marker.exists());
     let summary = failed.summary.as_ref().unwrap();
     assert!(summary.headline.contains("got 1, want 2"));
-    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    assert_eq!(summary.inspect_hint, Some(InspectHint::TestLog));
     let diagnostic = summary
         .diagnostics
         .iter()
@@ -776,18 +779,15 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
             view: InspectView::TestLog,
             cursor: None,
             filter: Some("//PKG:FAILING".into()),
-            limit: 20,
-            max_bytes: 8 * 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
-    let items = inspected.items.as_array().unwrap();
-    assert!(items.iter().all(serde_json::Value::is_string));
-    assert!(
-        items
-            .iter()
-            .any(|item| item.as_str().unwrap().contains("got 1, want 2"))
-    );
+    let InspectPayload::TestLog(items) = inspected.items else {
+        panic!("test-log inspection returned a different payload type");
+    };
+    assert!(items.iter().any(|item| item.contains("got 1, want 2")));
 
     let failed_paths = service.test_support().paths_for(&failed);
     let retained_before = tokio::fs::read(&failed_paths.test_logs_raw).await.unwrap();
@@ -861,7 +861,7 @@ FAILED (failures=1)
         .await
         .unwrap();
     let summary = failed.summary.as_ref().unwrap();
-    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    assert_eq!(summary.inspect_hint, Some(InspectHint::TestLog));
     assert!(
         summary
             .headline
@@ -936,7 +936,7 @@ async fn failed_java_test_logs_promote_the_located_application_frame() {
         .await
         .unwrap();
     let summary = failed.summary.as_ref().unwrap();
-    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    assert_eq!(summary.inspect_hint, Some(InspectHint::TestLog));
     let matching = summary
         .diagnostics
         .iter()
@@ -1009,7 +1009,7 @@ TypeError: Cannot read properties of undefined (reading 'lines')
         .await
         .unwrap();
     let summary = failed.summary.as_ref().unwrap();
-    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    assert_eq!(summary.inspect_hint, Some(InspectHint::TestLog));
     let matching = summary
         .diagnostics
         .iter()
@@ -1081,7 +1081,7 @@ invoice total should include the service fee
         .await
         .unwrap();
     let summary = failed.summary.as_ref().unwrap();
-    assert_eq!(summary.inspect_hint.as_deref(), Some("test_log"));
+    assert_eq!(summary.inspect_hint, Some(InspectHint::TestLog));
     let matching = summary
         .diagnostics
         .iter()
@@ -2195,7 +2195,7 @@ async fn query_and_informational_commands_return_bounded_initial_evidence() {
     let query_summary = query.summary.unwrap();
     assert_eq!(query_summary.query_result_count, Some(4));
     assert_eq!(query_summary.query_sample.len(), 3);
-    assert!(query_summary.inspect_hint.as_deref() == Some("query_results"));
+    assert_eq!(query_summary.inspect_hint, Some(InspectHint::QueryResults));
 
     let informational = service
         .run(InvocationRequest::new(
@@ -2216,7 +2216,7 @@ async fn query_and_informational_commands_return_bounded_initial_evidence() {
 }
 
 #[tokio::test]
-async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
+async fn inspect_preserves_typed_nested_results_for_server_encoding() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir(&workspace).await.unwrap();
@@ -2292,13 +2292,13 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
                 view,
                 cursor: None,
                 filter: None,
-                limit: 20,
-                max_bytes: 8 * 1024,
+                item_limit: 20,
+                scan_limit: 10_000,
             })
             .await
             .unwrap();
-        assert!(result.truncated);
-        assert!(serde_json::to_vec(&result).unwrap().len() <= 8 * 1024);
+        assert!(!result.truncated);
+        assert!(serde_json::to_vec(&result).unwrap().len() > 8 * 1024);
     }
     let unavailable = service
         .inspect(InspectRequest {
@@ -2309,14 +2309,14 @@ async fn inspect_shrinks_nested_results_to_the_hard_byte_budget() {
             view: InspectView::TestLog,
             cursor: None,
             filter: Some("//PKG:TEST".into()),
-            limit: 20,
-            max_bytes: 8 * 1024,
+            item_limit: 20,
+            scan_limit: 10_000,
         })
         .await
         .unwrap();
     assert_eq!(
         unavailable.items,
-        serde_json::json!(["//pkg:test: test_log_not_found"])
+        InspectPayload::TestLog(vec!["//pkg:test: test_log_not_found".to_owned()])
     );
 }
 

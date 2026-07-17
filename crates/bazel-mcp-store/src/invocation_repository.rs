@@ -1,6 +1,6 @@
 //! Compact invocation lookup and listing, plus explicit detail hydration.
 
-use std::{collections::BTreeSet, path::Path};
+use std::path::Path;
 
 use bazel_mcp_types::{
     BazelCommand, InvocationId, InvocationRecord, InvocationState, Page, PageRequest,
@@ -52,7 +52,8 @@ impl Store {
         page: PageRequest,
     ) -> Result<Page<InvocationHeader>, StoreError> {
         self.refresh_index_if_stale().await?;
-        let limit = page.limit.clamp(1, 200) as usize;
+        let item_limit = page.item_limit.clamp(1, 200) as usize;
+        let scan_limit = page.scan_limit.clamp(page.item_limit.max(1), 20_000) as usize;
         let workspace_text = workspace.map(|path| path.to_string_lossy().into_owned());
         let state_text = state.map(InvocationState::as_str);
         let command_text = command.map(BazelCommand::as_str);
@@ -69,57 +70,61 @@ impl Store {
             })
             .transpose()?;
         let index = self.inner.index.read().await;
-        let collect = |ordered: &BTreeSet<(i64, InvocationId)>| {
-            ordered
-                .iter()
-                .rev()
-                .filter(|(requested_at_ms, id)| {
-                    cursor.as_ref().is_none_or(|cursor| {
-                        *requested_at_ms < cursor.requested_at_ms
-                            || (*requested_at_ms == cursor.requested_at_ms
-                                && id.to_string() < cursor.id)
-                    })
-                })
-                .filter_map(|(_, id)| index.entries.get(id))
-                .filter(|entry| state.is_none_or(|state| entry.record.state == state))
-                .filter(|entry| {
-                    command.is_none_or(|command| entry.record.request.command == *command)
-                })
-                .map(|entry| entry.record.clone())
-                .take(limit + 1)
-                .collect::<Vec<_>>()
-        };
-        let mut items = if let Some(workspace) = workspace {
+        let ordered = if let Some(workspace) = workspace {
             index
                 .by_workspace
                 .get(workspace)
-                .map_or_else(Vec::new, collect)
+                .map_or_else(Vec::new, |ordered| ordered.iter().rev().copied().collect())
         } else {
-            collect(&index.by_requested)
+            index.by_requested.iter().rev().copied().collect()
         };
-        let truncated = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = if truncated {
-            items
-                .last()
-                .map(|record| {
-                    InvocationCursor::new(
-                        workspace_text.as_deref(),
-                        state_text,
-                        command_text,
-                        record.request.requested_at_ms,
-                        record.request.id.to_string(),
-                    )
-                    .encode()
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let mut items = Vec::with_capacity(item_limit);
+        let mut item_cursors = Vec::with_capacity(item_limit);
+        let mut continuation = None;
+        let mut scanned = 0_usize;
+        let mut truncated = false;
+        for (requested_at_ms, id) in ordered {
+            if !cursor.as_ref().is_none_or(|cursor| {
+                requested_at_ms < cursor.requested_at_ms
+                    || (requested_at_ms == cursor.requested_at_ms && id.to_string() < cursor.id)
+            }) {
+                continue;
+            }
+            if scanned == scan_limit {
+                truncated = true;
+                break;
+            }
+            let Some(entry) = index.entries.get(&id) else {
+                continue;
+            };
+            let matches = state.is_none_or(|state| entry.record.state == state)
+                && command.is_none_or(|command| entry.record.request.command == *command);
+            if matches && items.len() == item_limit {
+                truncated = true;
+                break;
+            }
+            scanned = scanned.saturating_add(1);
+            let cursor = InvocationCursor::new(
+                workspace_text.as_deref(),
+                state_text,
+                command_text,
+                requested_at_ms,
+                id.to_string(),
+            )
+            .encode()?;
+            continuation = Some(cursor.clone());
+            if matches {
+                items.push(entry.record.clone());
+                item_cursors.push(cursor);
+            }
+        }
         Ok(Page {
             items,
-            next_cursor,
+            total_count: None,
+            filtered_count: None,
+            next_cursor: if truncated { continuation } else { None },
             truncated,
+            item_cursors,
         })
     }
 }

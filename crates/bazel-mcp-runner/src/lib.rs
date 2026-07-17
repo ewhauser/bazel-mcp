@@ -13,7 +13,8 @@ mod test_evidence;
 mod version;
 
 pub use bazel_mcp_reducer::{StarlarkLimits, StarlarkReducerConfig};
-pub use inspection::{InspectRequest, InspectResult, InspectView};
+pub use bazel_mcp_types::{InspectResult, InspectView};
+pub use inspection::InspectRequest;
 #[doc(hidden)]
 pub use service::RunnerTestSupport;
 pub use service::{

@@ -36,15 +36,15 @@ use crate::{
 
 #[cfg(test)]
 use crate::inspection::{
-    EvidenceRecord, InspectRequest, InspectView, LogCursor, failure_evidence_records,
-    page_evidence_records, should_persist_failure_evidence,
+    EvidenceRecord, InspectRequest, LogCursor, failure_evidence_records, page_evidence_records,
+    should_persist_failure_evidence,
 };
 
 #[cfg(test)]
 use crate::{artifacts::local_artifact_path, test_evidence::artifact_matches_test};
 
 #[cfg(test)]
-use bazel_mcp_types::{ArtifactKind, BazelCommand};
+use bazel_mcp_types::{ArtifactKind, BazelCommand, InspectView};
 
 pub(crate) const COMPLETE_BEP_LOG_LIMIT: usize = 2 * 1024 * 1024;
 pub(crate) const FALLBACK_LOG_LIMIT: usize = 8 * 1024 * 1024;
@@ -1141,8 +1141,8 @@ mod tests {
             view: InspectView::Log,
             cursor: None,
             filter: None,
-            limit: 2,
-            max_bytes: 8 * 1024,
+            item_limit: 2,
+            scan_limit: 100,
         };
         let mut observed = Vec::new();
         loop {
@@ -1151,11 +1151,11 @@ mod tests {
                 .as_deref()
                 .map(|cursor| LogCursor::decode_for(cursor, id, InspectView::Log, None).unwrap())
                 .map_or(0, |cursor| cursor.next_record);
-            let (items, truncated, cursor) =
+            let page =
                 page_evidence_records(records.clone().into_iter(), start, &request, id).unwrap();
-            observed.extend(items);
-            request.cursor = cursor;
-            if !truncated {
+            observed.extend(page.items);
+            request.cursor = page.next_cursor;
+            if !page.truncated {
                 break;
             }
         }

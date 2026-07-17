@@ -676,14 +676,14 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
     let stdout_bytes = std::fs::metadata(&paths.stdout)?.len();
 
     let postprocess_started = Instant::now();
-    let (sample, total, _) = store
+    let total = store.count_query_rows(id).await?;
+    let sample = store
         .page_query_rows(
             id,
             None,
             PageRequest {
-                cursor: None,
-                limit: 3,
-                max_bytes: None,
+                scan_limit: 3,
+                ..PageRequest::new(None, 3)
             },
         )
         .await?;
@@ -706,35 +706,19 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
     let terminal_ms = millis(postprocess_started.elapsed());
 
     let page_started = Instant::now();
-    let (page, total, filtered) = store
-        .page_query_rows(
-            id,
-            None,
-            PageRequest {
-                cursor: None,
-                limit: 100,
-                max_bytes: None,
-            },
-        )
+    let page = store
+        .page_query_rows(id, None, PageRequest::new(None, 100))
         .await?;
     let unfiltered_page_ms = millis(page_started.elapsed());
     anyhow::ensure!(page.items.len() == 100, "unexpected query page length");
     anyhow::ensure!(
-        total == args.query_rows && filtered == total,
+        page.total_count == Some(args.query_rows) && page.filtered_count == page.total_count,
         "wrong query counts"
     );
 
     let continuation_started = Instant::now();
-    let (continued, total, filtered) = store
-        .page_query_rows(
-            id,
-            None,
-            PageRequest {
-                cursor: page.next_cursor,
-                limit: 100,
-                max_bytes: None,
-            },
-        )
+    let continued = store
+        .page_query_rows(id, None, PageRequest::new(page.next_cursor, 100))
         .await?;
     let continuation_page_ms = millis(continuation_started.elapsed());
     anyhow::ensure!(
@@ -742,26 +726,26 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
         "unexpected continuation length"
     );
     anyhow::ensure!(
-        total == args.query_rows && filtered == total,
+        continued.total_count == Some(args.query_rows)
+            && continued.filtered_count == continued.total_count,
         "wrong continuation counts"
     );
 
     let last_value = format!("//benchmark/package:target_{:012}", args.query_rows - 1);
     let filtered_started = Instant::now();
-    let (page, _, filtered) = store
+    let page = store
         .page_query_rows(
             id,
             Some(&last_value),
             PageRequest {
-                cursor: None,
-                limit: 100,
-                max_bytes: None,
+                scan_limit: u32::MAX,
+                ..PageRequest::new(None, 100)
             },
         )
         .await?;
     let filtered_page_ms = millis(filtered_started.elapsed());
     anyhow::ensure!(
-        page.items.len() == 1 && filtered == 1,
+        page.items.len() == 1 && page.filtered_count == Some(1),
         "filtered query mismatch"
     );
 

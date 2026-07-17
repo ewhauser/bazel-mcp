@@ -17,9 +17,9 @@ use std::sync::atomic::AtomicBool;
 use bazel_mcp_types::{DeferredRetrieval, TargetResult};
 
 use bazel_mcp_types::{
-    Artifact, CoverageFile, DeferredResultRecord, Diagnostic, InvocationId, InvocationMetrics,
-    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow, Termination,
-    TestResult,
+    Artifact, CoverageFile, DeferredResultRecord, Diagnostic, InspectHint, InvocationId,
+    InvocationMetrics, InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest,
+    QueryRow, Termination, TestResult,
 };
 use serde::de::DeserializeOwned;
 use thiserror::Error;
@@ -40,7 +40,7 @@ use crate::{
     manifest::{
         CURRENT_SCHEMA_VERSION, DurableRecord, decode as decode_durable, read as read_durable,
     },
-    query_paging::{QueryFilePage, page_query_file, page_records},
+    query_paging::{QueryFilePage, count_query_file, page_query_file, page_records},
     record::{HydratedInvocation, InvocationDetails, InvocationHeader},
 };
 
@@ -702,7 +702,7 @@ impl Store {
         id: InvocationId,
         filter: Option<&str>,
         page: PageRequest,
-    ) -> Result<(Page<Diagnostic>, u64, u64), StoreError> {
+    ) -> Result<Page<Diagnostic>, StoreError> {
         let record = self.get_invocation_header(id).await?;
         let items = record
             .summary
@@ -721,7 +721,7 @@ impl Store {
         id: InvocationId,
         filter: Option<&str>,
         page: PageRequest,
-    ) -> Result<(Page<TestResult>, u64, u64), StoreError> {
+    ) -> Result<Page<TestResult>, StoreError> {
         let details = self.read_details(id).await?;
         let items = details.tests;
         page_records("test_results", id, filter, page, items, |item| {
@@ -734,7 +734,7 @@ impl Store {
         id: InvocationId,
         filter: Option<&str>,
         page: PageRequest,
-    ) -> Result<(Page<Artifact>, u64, u64), StoreError> {
+    ) -> Result<Page<Artifact>, StoreError> {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
@@ -750,7 +750,7 @@ impl Store {
         id: InvocationId,
         filter: Option<&str>,
         page: PageRequest,
-    ) -> Result<(Page<CoverageFile>, u64, u64), StoreError> {
+    ) -> Result<Page<CoverageFile>, StoreError> {
         let details = self.read_details(id).await?;
         let items = details.coverage_files;
         page_records("coverage_files", id, filter, page, items, |item| {
@@ -763,12 +763,21 @@ impl Store {
         id: InvocationId,
         filter: Option<&str>,
         page: PageRequest,
-    ) -> Result<(Page<QueryRow>, u64, u64), StoreError> {
+    ) -> Result<Page<QueryRow>, StoreError> {
         self.page_query_rows_mapped_into(id, filter, page, |value, output| {
             output.clear();
             output.push_str(value);
         })
         .await
+    }
+
+    /// Count newline-delimited query results without decoding or materializing rows.
+    pub async fn count_query_rows(&self, id: InvocationId) -> Result<u64, StoreError> {
+        let mutation_lock = self.mutation_lock(id).await;
+        let _guard = mutation_lock.lock().await;
+        self.ensure_invocation(id).await?;
+        let path = self.paths_for_id(id).stdout;
+        tokio::task::spawn_blocking(move || count_query_file(&path)).await?
     }
 
     /// Page raw query output after applying a caller-supplied text transform.
@@ -780,7 +789,7 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
         transform: F,
-    ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
+    ) -> Result<Page<QueryRow>, StoreError>
     where
         F: Fn(&str) -> String + Send + 'static,
     {
@@ -798,7 +807,7 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
         transform: F,
-    ) -> Result<(Page<QueryRow>, u64, u64), StoreError>
+    ) -> Result<Page<QueryRow>, StoreError>
     where
         F: Fn(&str, &mut String) + Send + 'static,
     {
@@ -808,8 +817,7 @@ impl Store {
         let known_total = {
             let index = self.inner.index.read().await;
             let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
-            filter
-                .is_none()
+            (filter.is_none() && entry.record.state.is_terminal())
                 .then(|| {
                     entry
                         .record
@@ -829,10 +837,12 @@ impl Store {
         let start_ordinal = cursor
             .as_ref()
             .map_or(0, |value| value.ordinal.saturating_add(1));
+        let prior_total = cursor.as_ref().map_or(0, |value| value.total_scanned);
+        let prior_filtered = cursor.as_ref().map_or(0, |value| value.filtered_scanned);
         let path = self.paths_for_id(id).stdout;
         let filter = filter.map(str::to_owned);
-        let limit = page.limit.clamp(1, 100) as usize;
-        let maximum_bytes = page.max_bytes.unwrap_or(usize::MAX);
+        let item_limit = page.item_limit.clamp(1, 100) as usize;
+        let scan_limit = page.scan_limit.clamp(page.item_limit.max(1), 10_000) as usize;
         tokio::task::spawn_blocking(move || {
             page_query_file(
                 &path,
@@ -841,8 +851,10 @@ impl Store {
                 QueryFilePage {
                     start_offset,
                     start_ordinal,
-                    limit,
-                    maximum_bytes,
+                    prior_total,
+                    prior_filtered,
+                    item_limit,
+                    scan_limit,
                     known_total,
                 },
                 transform,
@@ -1246,9 +1258,7 @@ async fn recover_interrupted_ids(
             success: false,
             headline: "Invocation was interrupted when the previous server stopped".into(),
             truncated: true,
-            inspect_hint: Some(format!(
-                "Inspect invocation {id} for preserved raw evidence"
-            )),
+            inspect_hint: Some(InspectHint::Log),
             ..InvocationSummary::default()
         });
         if let Some(deferred) = durable.deferred.as_mut() {
@@ -1613,16 +1623,7 @@ mod tests {
             first_id
         );
         let page = first
-            .list_invocations(
-                None,
-                None,
-                None,
-                PageRequest {
-                    cursor: None,
-                    limit: 10,
-                    max_bytes: None,
-                },
-            )
+            .list_invocations(None, None, None, PageRequest::new(None, 10))
             .await
             .unwrap();
         assert_eq!(page.items.len(), 2);
@@ -1743,16 +1744,7 @@ mod tests {
                 }
                 loop {
                     let page = store
-                        .list_invocations(
-                            None,
-                            None,
-                            None,
-                            PageRequest {
-                                cursor: None,
-                                limit: 10,
-                                max_bytes: None,
-                            },
-                        )
+                        .list_invocations(None, None, None, PageRequest::new(None, 10))
                         .await
                         .unwrap();
                     if page.items.len() == 2 {
@@ -1826,16 +1818,7 @@ mod tests {
             .unwrap();
 
         let workspace_page = store
-            .list_invocations(
-                Some(&workspace_a),
-                None,
-                None,
-                PageRequest {
-                    cursor: None,
-                    limit: 10,
-                    max_bytes: None,
-                },
-            )
+            .list_invocations(Some(&workspace_a), None, None, PageRequest::new(None, 10))
             .await
             .unwrap();
         assert_eq!(
@@ -1899,33 +1882,64 @@ mod tests {
             .await
             .unwrap();
         let first = store
+            .page_query_rows(id, Some("needle"), PageRequest::new(None, 1))
+            .await
+            .unwrap();
+        assert_eq!(first.items[0].ordinal, 1);
+        assert_eq!(
+            (first.total_count, first.filtered_count),
+            (Some(3), Some(2))
+        );
+        assert!(first.truncated);
+        let second = store
+            .page_query_rows(id, Some("needle"), PageRequest::new(first.next_cursor, 1))
+            .await
+            .unwrap();
+        assert_eq!(second.items[0].ordinal, 2);
+    }
+
+    #[tokio::test]
+    async fn query_scan_limits_resume_without_gaps_when_a_page_has_no_matches() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).await.unwrap();
+        let record = record(root.path());
+        let id = record.request.id;
+        let paths = store.create_invocation(&record).await.unwrap();
+        tokio::fs::write(&paths.stdout, b"zero\none\nneedle\nthree\n")
+            .await
+            .unwrap();
+        let first = store
             .page_query_rows(
                 id,
                 Some("needle"),
                 PageRequest {
                     cursor: None,
-                    limit: 1,
-                    max_bytes: None,
+                    item_limit: 1,
+                    scan_limit: 2,
                 },
             )
             .await
             .unwrap();
-        assert_eq!(first.0.items[0].ordinal, 1);
-        assert_eq!((first.1, first.2), (3, 2));
-        assert!(first.0.truncated);
+        assert!(first.items.is_empty());
+        assert!(first.truncated);
+        assert_eq!(first.total_count, None);
+        assert_eq!(first.filtered_count, None);
+
         let second = store
             .page_query_rows(
                 id,
                 Some("needle"),
                 PageRequest {
-                    cursor: first.0.next_cursor,
-                    limit: 1,
-                    max_bytes: None,
+                    cursor: first.next_cursor,
+                    item_limit: 1,
+                    scan_limit: 2,
                 },
             )
             .await
             .unwrap();
-        assert_eq!(second.0.items[0].ordinal, 2);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].ordinal, 2);
+        assert_eq!(second.items[0].value, "needle");
     }
 
     #[tokio::test]
@@ -1940,7 +1954,7 @@ mod tests {
             .unwrap();
         let transformed = Arc::new(AtomicUsize::new(0));
         let observed = transformed.clone();
-        let (page, total, filtered) = store
+        let page = store
             .page_query_rows_mapped_into(
                 id,
                 Some("mixed NEEDLE"),
@@ -1954,13 +1968,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!((total, filtered), (3, 1));
+        assert_eq!((page.total_count, page.filtered_count), (Some(3), Some(1)));
         assert_eq!(page.items[0].value, "MiXeD needle");
         assert_eq!(transformed.load(AtomicOrdering::Relaxed), 3);
     }
 
     #[tokio::test]
-    async fn serialized_byte_packing_preserves_limit_filter_and_cursor_continuity() {
+    async fn item_limits_preserve_filter_and_cursor_continuity() {
         let root = TempDir::new().unwrap();
         let store = Store::open(root.path()).await.unwrap();
         let record = record(root.path());
@@ -1974,16 +1988,8 @@ mod tests {
         let mut cursor = None;
         let mut ordinals = Vec::new();
         loop {
-            let (page, _, _) = store
-                .page_query_rows(
-                    id,
-                    None,
-                    PageRequest {
-                        cursor,
-                        limit: 100,
-                        max_bytes: Some(120),
-                    },
-                )
+            let page = store
+                .page_query_rows(id, None, PageRequest::new(cursor, 1))
                 .await
                 .unwrap();
             assert_eq!(page.items.len(), 1);
@@ -1995,34 +2001,18 @@ mod tests {
         }
         assert_eq!(ordinals, vec![0, 1, 2, 3, 4]);
 
-        let (requested, _, _) = store
-            .page_query_rows(
-                id,
-                None,
-                PageRequest {
-                    cursor: None,
-                    limit: 3,
-                    max_bytes: Some(8 * 1024),
-                },
-            )
+        let requested = store
+            .page_query_rows(id, None, PageRequest::new(None, 3))
             .await
             .unwrap();
         assert_eq!(requested.items.len(), 3);
         assert!(requested.truncated);
 
-        let (filtered, _, filtered_count) = store
-            .page_query_rows(
-                id,
-                Some("row_3"),
-                PageRequest {
-                    cursor: None,
-                    limit: 100,
-                    max_bytes: Some(8 * 1024),
-                },
-            )
+        let filtered = store
+            .page_query_rows(id, Some("row_3"), PageRequest::new(None, 100))
             .await
             .unwrap();
-        assert_eq!(filtered_count, 1);
+        assert_eq!(filtered.filtered_count, Some(1));
         assert_eq!(filtered.items[0].ordinal, 3);
     }
 
@@ -2039,23 +2029,17 @@ mod tests {
         tokio::fs::write(&paths.stdout, contents).await.unwrap();
         let transformed = Arc::new(AtomicUsize::new(0));
         let observed = transformed.clone();
-        let (page, total, filtered) = store
-            .page_query_rows_mapped(
-                id,
-                None,
-                PageRequest {
-                    cursor: None,
-                    limit: 3,
-                    max_bytes: None,
-                },
-                move |value| {
-                    observed.fetch_add(1, AtomicOrdering::Relaxed);
-                    value.to_owned()
-                },
-            )
+        let page = store
+            .page_query_rows_mapped(id, None, PageRequest::new(None, 3), move |value| {
+                observed.fetch_add(1, AtomicOrdering::Relaxed);
+                value.to_owned()
+            })
             .await
             .unwrap();
-        assert_eq!((total, filtered), (100, 100));
+        assert_eq!(
+            (page.total_count, page.filtered_count),
+            (Some(100), Some(100))
+        );
         assert_eq!(page.items.len(), 3);
         assert_eq!(transformed.load(AtomicOrdering::Relaxed), 3);
     }
@@ -2070,31 +2054,19 @@ mod tests {
         tokio::fs::write(&paths.stdout, b"first\r\ninvalid-\xff\nlast")
             .await
             .unwrap();
-        let (first, total, filtered) = store
-            .page_query_rows(
-                id,
-                None,
-                PageRequest {
-                    cursor: None,
-                    limit: 2,
-                    max_bytes: None,
-                },
-            )
+        assert_eq!(store.count_query_rows(id).await.unwrap(), 3);
+        let first = store
+            .page_query_rows(id, None, PageRequest::new(None, 2))
             .await
             .unwrap();
-        assert_eq!((total, filtered), (3, 3));
+        assert_eq!(
+            (first.total_count, first.filtered_count),
+            (Some(3), Some(3))
+        );
         assert_eq!(first.items[0].value, "first");
         assert_eq!(first.items[1].value, "invalid-�");
-        let (last, _, _) = store
-            .page_query_rows(
-                id,
-                None,
-                PageRequest {
-                    cursor: first.next_cursor,
-                    limit: 2,
-                    max_bytes: None,
-                },
-            )
+        let last = store
+            .page_query_rows(id, None, PageRequest::new(first.next_cursor, 2))
             .await
             .unwrap();
         assert_eq!(last.items[0].value, "last");
@@ -2212,7 +2184,6 @@ mod tests {
                 .page_tests(id, None, PageRequest::default())
                 .await
                 .unwrap()
-                .0
                 .items[0]
                 .label,
             "//private:large-test-detail"
@@ -2222,7 +2193,6 @@ mod tests {
                 .page_coverage(id, None, PageRequest::default())
                 .await
                 .unwrap()
-                .0
                 .items[0]
                 .path,
             "private/large-coverage-detail.rs"
@@ -2785,11 +2755,11 @@ mod tests {
         tokio::fs::write(&paths.stdout, vec![b'x'; 2 * QUERY_LINE_LIMIT])
             .await
             .unwrap();
-        let (page, total, filtered) = store
+        let page = store
             .page_query_rows(id, None, PageRequest::default())
             .await
             .unwrap();
-        assert_eq!((total, filtered), (1, 1));
+        assert_eq!((page.total_count, page.filtered_count), (Some(1), Some(1)));
         assert_eq!(page.items[0].value.len(), QUERY_LINE_LIMIT);
     }
 
@@ -2800,12 +2770,12 @@ mod tests {
         let empty = record(root.path());
         let empty_id = empty.request.id;
         store.create_invocation(&empty).await.unwrap();
-        let (page, total, filtered) = store
+        let page = store
             .page_query_rows(empty_id, None, PageRequest::default())
             .await
             .unwrap();
         assert!(page.items.is_empty());
-        assert_eq!((total, filtered), (0, 0));
+        assert_eq!((page.total_count, page.filtered_count), (Some(0), Some(0)));
 
         let million = record(root.path());
         let million_id = million.request.id;
@@ -2815,20 +2785,13 @@ mod tests {
             writer.write_all(b"row\n").unwrap();
         }
         writer.flush().unwrap();
-        let (page, total, filtered) = store
-            .page_query_rows(
-                million_id,
-                None,
-                PageRequest {
-                    cursor: None,
-                    limit: 3,
-                    max_bytes: None,
-                },
-            )
+        let page = store
+            .page_query_rows(million_id, None, PageRequest::new(None, 3))
             .await
             .unwrap();
         assert_eq!(page.items.len(), 3);
-        assert_eq!((total, filtered), (1_000_000, 1_000_000));
+        assert_eq!((page.total_count, page.filtered_count), (None, None));
+        assert!(page.truncated);
     }
 
     #[tokio::test]

@@ -489,7 +489,7 @@ fn alloc_invocation_summary<'v>(heap: Heap<'v>, summary: &InvocationSummary) -> 
         ("truncated", heap.alloc(summary.truncated)),
         (
             "inspect_hint",
-            alloc_optional_str(heap, summary.inspect_hint.as_deref()),
+            alloc_optional_str(heap, summary.inspect_hint.map(|hint| hint.as_str())),
         ),
     ]))
 }
@@ -1244,7 +1244,7 @@ def reduce(ctx):
         baseline["coverage"]["coverage_percent"] != 75.0 or
         baseline["query_sample"][0]["ordinal"] != 7 or
         baseline["query_result_count"] != 9 or
-        baseline["inspect_hint"] != "inspect hint"
+        baseline["inspect_hint"] != "log"
     ):
         return patch([diagnostic("context mismatch")])
     return patch([
@@ -1349,7 +1349,7 @@ def reduce(ctx):
                 query_result_count: Some(9),
                 elapsed_ms: 41,
                 truncated: false,
-                inspect_hint: Some("inspect hint".to_owned()),
+                inspect_hint: Some(bazel_mcp_types::InspectHint::Log),
             },
         };
         let mut summary = InvocationSummary::default();

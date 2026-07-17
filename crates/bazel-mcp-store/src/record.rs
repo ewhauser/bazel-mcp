@@ -1,7 +1,7 @@
 //! Explicit compact and hydrated invocation record shapes.
 
 use bazel_mcp_types::{
-    CoverageFile, CoverageSummary, Diagnostic, InvocationMetrics, InvocationRecord,
+    CoverageFile, CoverageSummary, Diagnostic, InspectHint, InvocationMetrics, InvocationRecord,
     InvocationRequest, InvocationState, InvocationSummary, QueryRow, TargetCounts, TargetResult,
     Termination, TestCounts, TestResult,
 };
@@ -105,7 +105,7 @@ pub struct InvocationSummaryHeader {
     pub query_result_count: Option<u64>,
     pub elapsed_ms: u64,
     pub truncated: bool,
-    pub inspect_hint: Option<String>,
+    pub inspect_hint: Option<InspectHint>,
 }
 
 impl InvocationSummaryHeader {
@@ -148,7 +148,7 @@ impl From<InvocationSummary> for InvocationSummaryHeader {
             query_result_count: summary.query_result_count,
             elapsed_ms: summary.elapsed_ms,
             truncated: summary.truncated,
-            inspect_hint: summary.inspect_hint.clone(),
+            inspect_hint: summary.inspect_hint,
         }
     }
 }

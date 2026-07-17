@@ -5,6 +5,7 @@ mod command;
 mod coverage;
 mod deferred;
 mod diagnostic;
+mod inspection;
 mod invocation;
 mod pagination;
 mod query;
@@ -19,11 +20,16 @@ pub use deferred::{
     DeferredRetrieval, DeferredTerminalState, ResultDisposition,
 };
 pub use diagnostic::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+pub use inspection::{
+    AvailableViews, InspectCoverageItem, InspectCoverageSummary, InspectCoverageUnavailable,
+    InspectMetrics, InspectPayload, InspectResult, InspectSummary, InspectView,
+    InvocationLedgerEntry,
+};
 pub use invocation::{
     InvocationId, InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState,
     StateTransitionError, Termination, unix_timestamp_ms,
 };
 pub use pagination::{Page, PageRequest};
 pub use query::QueryRow;
-pub use result::{InvocationSummary, TargetCounts, TargetResult, TestCounts};
+pub use result::{InspectHint, InvocationSummary, TargetCounts, TargetResult, TestCounts};
 pub use test::{TestCase, TestResult, TestStatus};
