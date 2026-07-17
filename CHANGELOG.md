@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.1](https://github.com/ewhauser/bazel-mcp/compare/v0.5.0...v0.5.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* preserve Windows runner compilation ([08d2b9f](https://github.com/ewhauser/bazel-mcp/commit/08d2b9fec7040a45ff07d865013644ff7956e0b6))
+* **reducer:** preserve Rust compiler root causes ([26a87d6](https://github.com/ewhauser/bazel-mcp/commit/26a87d6440ab0fa32c23dc084146df6b9c1433f0))
+* **reducer:** preserve Rust compiler root causes ([29e0e90](https://github.com/ewhauser/bazel-mcp/commit/29e0e90c5b9332e9ec827f2991f56afd0b98ba1b))
+* **runner:** preserve filtered test log context ([2938650](https://github.com/ewhauser/bazel-mcp/commit/2938650d13f953c6292bc78c9ca81be7dc209fbf))
+
+
+### Performance Improvements
+
+* **bep:** borrow frames during streaming reduction ([0a515ae](https://github.com/ewhauser/bazel-mcp/commit/0a515ae94885fbde31a1f1fad007a31ea28ffd69))
+* reduce recurring allocation buffers ([77c31b2](https://github.com/ewhauser/bazel-mcp/commit/77c31b27114ede5b77243b655471001841bcae90))
+* **reducer:** avoid Starlark JSON round trips ([d145d3a](https://github.com/ewhauser/bazel-mcp/commit/d145d3a65e5ec1ffafeb9d79fc2d62104a333cff))
+* **reducer:** reduce diagnostic deduplication allocations ([ece862f](https://github.com/ewhauser/bazel-mcp/commit/ece862fe73cfdbb37e17e02b97fac7dd4494f691))
+* **store:** remove global writer serialization ([46a18c6](https://github.com/ewhauser/bazel-mcp/commit/46a18c6f1bdc1a84d211334c738e920bcfcac1bb))
+* **store:** remove global writer serialization ([00660e2](https://github.com/ewhauser/bazel-mcp/commit/00660e2ff2129f3cf3547ed633546c079a84a156))
+* streamline private filesystem writes ([0f9f957](https://github.com/ewhauser/bazel-mcp/commit/0f9f957f29c0e0457b4674a75f7b7a35633beef4))
+
 ## [0.5.0](https://github.com/ewhauser/bazel-mcp/compare/v0.4.0...v0.5.0) (2026-07-17)
 
 
