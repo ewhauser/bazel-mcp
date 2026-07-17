@@ -1,0 +1,10 @@
+=== RUN   TestNormalize
+=== RUN   TestNormalize/empty
+--- PASS: TestNormalize/empty (0.00s)
+=== RUN   TestNormalize/unicode
+    normalize_test.go:31:
+        got: "cafe"
+        want: "café"
+--- FAIL: TestNormalize (0.00s)
+    --- FAIL: TestNormalize/unicode (0.00s)
+FAIL

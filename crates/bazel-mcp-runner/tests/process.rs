@@ -1195,6 +1195,89 @@ invoice total should include the service fee
 }
 
 #[tokio::test]
+async fn failed_go_test_logs_promote_the_located_subtest_assertion() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let output_root = root.path().join("output-user-root");
+    let test_directory = output_root.join("execroot/ws/bazel-out/testlogs/pkg/failing");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&test_directory).await.unwrap();
+    let test_log = test_directory.join("test.log");
+    let test_xml = test_directory.join("test.xml");
+    tokio::fs::write(
+        &test_log,
+        "=== RUN   TestInvoiceTotal\n\
+=== RUN   TestInvoiceTotal/service_fee\n\
+    invoice_test.go:18: got 42; want 41\n\
+--- FAIL: TestInvoiceTotal (0.00s)\n\
+    --- FAIL: TestInvoiceTotal/service_fee (0.00s)\n\
+FAIL\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        &test_xml,
+        r#"<testsuites><testsuite><testcase name="go_default_test"><failure message="exited with error code 1"/></testcase></testsuite></testsuites>"#,
+    )
+    .await
+    .unwrap();
+    let bep = root.path().join("failed-go-test.bep");
+    tokio::fs::write(
+        &bep,
+        failed_test_bep(
+            &format!("file://{}", test_log.display()),
+            &format!("file://{}", test_xml.display()),
+        ),
+    )
+    .await
+    .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --build_event_binary_file=*) bep_path=${{arg#*=}} ;;\n  esac\ndone\ncp '{}' \"$bep_path\"\necho 'invoice_test.go:18: got 42; want 41'\nexit 1\n",
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//pkg:failing".into()],
+        ))
+        .await
+        .unwrap();
+
+    let summary = failed.summary.as_ref().unwrap();
+    assert_eq!(summary.inspect_hint, Some(InspectHint::TestLog));
+    assert!(summary.headline.contains("TestInvoiceTotal/service_fee"));
+    assert!(summary.headline.contains("got 42; want 41"));
+    let matching = summary
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("got 42; want 41"))
+        .collect::<Vec<_>>();
+    assert_eq!(matching.len(), 1);
+    let diagnostic = matching[0];
+    assert_eq!(diagnostic.category, DiagnosticCategory::Test);
+    assert_eq!(diagnostic.target.as_deref(), Some("//pkg:failing"));
+    assert_eq!(
+        diagnostic.location.as_ref().unwrap().path,
+        "invoice_test.go"
+    );
+    assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(18));
+    assert!(
+        summary
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("=== RUN")
+                && diagnostic.message != "FAIL")
+    );
+    assert_eq!(
+        summary.tests[0].cases[0].name,
+        "TestInvoiceTotal/service_fee"
+    );
+}
+
+#[tokio::test]
 async fn failed_rust_test_log_promotes_case_and_assertion_to_initial_summary() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

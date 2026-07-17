@@ -1,0 +1,16 @@
+[
+  {
+    "name": "TestCache/miss",
+    "message": "Go test TestCache/miss failed at cache_test.go:42: cache lookup returned an empty entry",
+    "location": {
+      "path": "cache_test.go",
+      "line": 42,
+      "column": null
+    }
+  },
+  {
+    "name": "TestCache",
+    "message": "Go test TestCache failed",
+    "location": null
+  }
+]

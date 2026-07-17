@@ -9,7 +9,7 @@ use bazel_mcp_reducer::{
 };
 use bazel_mcp_types::{
     Artifact, Diagnostic, DiagnosticCategory, DiagnosticLocation, InspectHint, InvocationSummary,
-    Severity,
+    Severity, TestCase, TestStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -276,19 +276,46 @@ fn enrich_from_test_log(path: &Path, target: &str, summary: &mut InvocationSumma
         push_test_diagnostic(summary, target, diagnostic);
     }
     for failure in accumulator.finish() {
-        summary.diagnostics.push(Diagnostic {
-            severity: Severity::Error,
-            category: DiagnosticCategory::Test,
-            message: failure.message,
-            location: failure.location.map(|location| DiagnosticLocation {
-                path: location.path,
-                line: location.line,
-                column: location.column,
-            }),
-            target: Some(target.to_owned()),
-            action: None,
-            repetition_count: 1,
-        });
+        let is_go_failure = failure.message.starts_with("Go test ");
+        if is_go_failure {
+            summary.diagnostics.retain(|existing| {
+                !(existing.category == DiagnosticCategory::Test
+                    && existing.target.as_deref() == Some(target)
+                    && existing.location.as_ref() == failure.location.as_ref()
+                    && failure.message.contains(&existing.message))
+            });
+        }
+        if is_go_failure
+            && let Some(test) = summary.tests.iter_mut().find(|test| test.label == target)
+            && test.cases.len() < 20
+            && !test.cases.iter().any(|case| {
+                case.name == failure.name && case.message.as_deref() == Some(&failure.message)
+            })
+        {
+            test.cases.push(TestCase {
+                name: failure.name.clone(),
+                status: TestStatus::Failed,
+                duration_ms: None,
+                message: Some(failure.message.clone()),
+            });
+        }
+        push_test_diagnostic(
+            summary,
+            target,
+            Diagnostic {
+                severity: Severity::Error,
+                category: DiagnosticCategory::Test,
+                message: failure.message,
+                location: failure.location.map(|location| DiagnosticLocation {
+                    path: location.path,
+                    line: location.line,
+                    column: location.column,
+                }),
+                target: Some(target.to_owned()),
+                action: None,
+                repetition_count: 1,
+            },
+        );
     }
     Ok(())
 }
@@ -297,10 +324,15 @@ fn push_test_diagnostic(summary: &mut InvocationSummary, target: &str, mut diagn
     diagnostic.category = DiagnosticCategory::Test;
     diagnostic.target = Some(target.to_owned());
     summary.diagnostics.retain(|existing| {
+        let same_message = existing.message == diagnostic.message;
+        let embedded_located_message = existing.location.is_some()
+            && existing.location == diagnostic.location
+            && diagnostic.message.contains(&existing.message);
         !((existing.category == DiagnosticCategory::Compilation
             || (existing.category == diagnostic.category && existing.target.is_none()))
-            && existing.message == diagnostic.message
-            && (existing.location == diagnostic.location || existing.location.is_none()))
+            && ((same_message
+                && (existing.location == diagnostic.location || existing.location.is_none()))
+                || embedded_located_message))
     });
     summary.diagnostics.push(diagnostic);
 }

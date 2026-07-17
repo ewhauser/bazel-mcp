@@ -1,0 +1,20 @@
+[
+  {
+    "name": "TestRetry",
+    "message": "Go test TestRetry failed at retry_test.go:9: got false; want true",
+    "location": {
+      "path": "retry_test.go",
+      "line": 9,
+      "column": null
+    }
+  },
+  {
+    "name": "TestBackend",
+    "message": "Go test TestBackend failed at backend_test.go:11: fatal: service unavailable",
+    "location": {
+      "path": "backend_test.go",
+      "line": 11,
+      "column": null
+    }
+  }
+]

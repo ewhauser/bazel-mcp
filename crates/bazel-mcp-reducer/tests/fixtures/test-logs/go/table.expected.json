@@ -1,0 +1,16 @@
+[
+  {
+    "name": "TestNormalize/unicode",
+    "message": "Go test TestNormalize/unicode failed at normalize_test.go:31: got: \"cafe\"; want: \"café\"",
+    "location": {
+      "path": "normalize_test.go",
+      "line": 31,
+      "column": null
+    }
+  },
+  {
+    "name": "TestNormalize",
+    "message": "Go test TestNormalize failed",
+    "location": null
+  }
+]

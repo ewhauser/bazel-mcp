@@ -257,4 +257,38 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert!(result.diagnostics[0].message.contains("assertion"));
     }
+
+    #[test]
+    fn reducer_collapses_duplicate_go_fanout_and_excludes_framework_noise() {
+        let mut reducer = TestEvidenceReducer::new(TestEvidenceInput {
+            label: "//example:go_test",
+        });
+        for _ in 0..2 {
+            for line in [
+                "=== RUN   TestInvoiceTotal",
+                "invoice_test.go:18: got 42; want 41",
+                "--- FAIL: TestInvoiceTotal (0.00s)",
+                "FAIL",
+            ] {
+                reducer.observe_line(line);
+            }
+            reducer.finish_log(true);
+        }
+        let result = reducer.finish();
+
+        assert_eq!(result.cases.len(), 1);
+        assert_eq!(result.cases[0].name, "TestInvoiceTotal");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].category,
+            bazel_mcp_types::DiagnosticCategory::Test
+        );
+        assert_eq!(
+            result.diagnostics[0].target.as_deref(),
+            Some("//example:go_test")
+        );
+        assert!(result.diagnostics[0].message.contains("got 42; want 41"));
+        assert!(!result.diagnostics[0].message.contains("=== RUN"));
+        assert!(!result.diagnostics[0].message.ends_with("FAIL"));
+    }
 }

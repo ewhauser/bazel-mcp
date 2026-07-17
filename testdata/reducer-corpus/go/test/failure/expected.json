@@ -3,7 +3,7 @@
   "terminal_error": null,
   "summary": {
     "success": false,
-    "headline": "Bazel failed: invoice total mismatch: got 41, want 42",
+    "headline": "Bazel failed: Go test TestInvoiceTotal failed at invoice_test.go:9: invoice total mismatch: got 41, want 42",
     "targets": [
       {
         "label": "//cases:test_failure",
@@ -19,7 +19,7 @@
       {
         "severity": "error",
         "category": "test",
-        "message": "invoice total mismatch: got 41, want 42",
+        "message": "Go test TestInvoiceTotal failed at invoice_test.go:9: invoice total mismatch: got 41, want 42",
         "location": {
           "path": "invoice_test.go",
           "line": 9,
@@ -46,7 +46,14 @@
         "duration_ms": null,
         "attempts": 1,
         "shard": null,
-        "cases": [],
+        "cases": [
+          {
+            "name": "TestInvoiceTotal",
+            "status": "failed",
+            "duration_ms": null,
+            "message": "Go test TestInvoiceTotal failed at invoice_test.go:9: invoice total mismatch: got 41, want 42"
+          }
+        ],
         "test_log_available": false,
         "test_log_unavailable_reason": "test_log_not_snapshotted"
       }

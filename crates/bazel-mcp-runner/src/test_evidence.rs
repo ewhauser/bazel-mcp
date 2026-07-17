@@ -235,11 +235,16 @@ impl InvocationService {
         if committed {
             for diagnostic in &diagnostics {
                 summary.diagnostics.retain(|existing| {
+                    let same_message = existing.message == diagnostic.message;
+                    let embedded_located_message = existing.location.is_some()
+                        && existing.location == diagnostic.location
+                        && diagnostic.message.contains(&existing.message);
                     !((existing.category == DiagnosticCategory::Compilation
                         || (existing.category == diagnostic.category && existing.target.is_none()))
-                        && existing.message == diagnostic.message
-                        && (existing.location == diagnostic.location
-                            || existing.location.is_none()))
+                        && ((same_message
+                            && (existing.location == diagnostic.location
+                                || existing.location.is_none()))
+                            || embedded_located_message))
                 });
             }
             summary.diagnostics.extend(diagnostics);
