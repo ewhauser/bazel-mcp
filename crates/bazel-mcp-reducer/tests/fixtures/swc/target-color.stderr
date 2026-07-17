@@ -1,0 +1,8 @@
+[31m  x Big integer literals are not available in the configured target environment ("es5")[0m
+   ,-[[36m/tmp/output/target_syntax.runfiles/_main/pkg/target.js:1:1[0m]
+ 1 | const amount = 10n;
+   :                ^^
+   `----
+Caused by:
+    0: failed to transform module for target es5
+ERROR: Build did NOT complete successfully

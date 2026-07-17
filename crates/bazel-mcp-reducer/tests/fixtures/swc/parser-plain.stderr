@@ -1,0 +1,7 @@
+ERROR: /tmp/output/execroot/_main/pkg/BUILD.bazel:12:11: Compiling TypeScript failed: error executing SwcCompile command
+  x Expected ',', got 'identifier'
+   ,-[/tmp/output/execroot/_main/pkg/parser.ts:3:1]
+ 3 | const total = invoice lines;
+   :                       ^^^^^
+   `----
+ERROR: Build did NOT complete successfully

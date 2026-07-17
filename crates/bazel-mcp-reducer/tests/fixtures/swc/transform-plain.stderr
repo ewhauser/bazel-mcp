@@ -1,0 +1,6 @@
+failed to process JavaScript transform
+  x top level await is not supported by the configured module transform
+   ,-[/private/tmp/sandbox/execroot/workspace/pkg/transform.mjs:8:1]
+ 8 | await loadInvoice();
+   : ^^^^^
+   `----
