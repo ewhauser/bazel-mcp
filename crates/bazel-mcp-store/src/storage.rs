@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
@@ -27,7 +28,10 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     InvocationPaths,
     cursor::FileCursor,
-    files::{remove_if_exists, set_private_directory, write_bytes_atomic, write_json_atomic},
+    files::{
+        create_private_directory, create_private_directory_all, remove_if_exists,
+        write_bytes_atomic, write_json_atomic,
+    },
     index::{
         Index, IndexEntry, ensure_exists, insert as insert_index_entry, mark_telemetry_flushed,
         merge_index_telemetry, merge_pending_telemetry, merge_telemetry,
@@ -132,16 +136,11 @@ pub struct InvocationCompletion {
 impl Store {
     pub async fn open(cache_root: impl AsRef<Path>) -> Result<Self, StoreError> {
         let cache_root = cache_root.as_ref().to_owned();
-        tokio::fs::create_dir_all(&cache_root).await?;
-        set_private_directory(&cache_root).await?;
-        tokio::fs::create_dir_all(cache_root.join("invocations")).await?;
-        tokio::fs::create_dir_all(cache_root.join("trash")).await?;
-        tokio::fs::create_dir_all(cache_root.join("owners")).await?;
-        tokio::fs::create_dir_all(cache_root.join("mutations")).await?;
-        set_private_directory(&cache_root.join("invocations")).await?;
-        set_private_directory(&cache_root.join("trash")).await?;
-        set_private_directory(&cache_root.join("owners")).await?;
-        set_private_directory(&cache_root.join("mutations")).await?;
+        create_private_directory_all(&cache_root).await?;
+        create_private_directory_all(&cache_root.join("invocations")).await?;
+        create_private_directory_all(&cache_root.join("trash")).await?;
+        create_private_directory_all(&cache_root.join("owners")).await?;
+        create_private_directory_all(&cache_root.join("mutations")).await?;
 
         let _maintenance = ProcessLock::acquire(cache_root.join("MAINTENANCE")).await?;
         let _metadata = ProcessLock::acquire(cache_root.join("LOCK")).await?;
@@ -933,7 +932,7 @@ async fn persist_durable(
     }
     let bytes = serde_json::to_vec(durable)?;
     let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    write_bytes_atomic(&paths.manifest, &bytes).await?;
+    write_bytes_atomic(&paths.manifest, bytes).await?;
     Ok(PersistOutcome {
         retained_bytes: durable.payload_bytes.saturating_add(manifest_bytes),
         manifest_bytes,
@@ -1301,8 +1300,7 @@ pub(crate) async fn stage_raw_evidence(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    tokio::fs::create_dir(&trash).await?;
-    set_private_directory(&trash).await?;
+    create_private_directory(&trash).await?;
     for source in [
         &paths.stdout,
         &paths.stderr,
@@ -1446,18 +1444,6 @@ fn open_lock_file(path: &Path) -> Result<File, std::io::Error> {
     options.open(path)
 }
 
-#[cfg(unix)]
-fn set_private_file_blocking(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_file_blocking(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
-}
-
 pub(crate) fn owner_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
     cache_root.join("owners").join(format!("{id}.lock"))
 }
@@ -1498,8 +1484,16 @@ fn write_generation(cache_root: &Path, generation: u64) -> Result<u64, StoreErro
         )));
     }
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, generation.to_string())?;
-    set_private_file_blocking(&temporary)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(generation.to_string().as_bytes())?;
+    drop(file);
     std::fs::rename(temporary, path)?;
     Ok(generation)
 }
@@ -1507,10 +1501,7 @@ fn write_generation(cache_root: &Path, generation: u64) -> Result<u64, StoreErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        io::Write as _,
-        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     use bazel_mcp_types::{
         BazelCommand, CoverageSummary, InvocationRequest, TargetCounts, TestCounts, TestStatus,
@@ -2233,46 +2224,43 @@ mod tests {
     async fn canonical_directories_and_files_remain_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = TempDir::new().unwrap();
-        let store = Store::open(root.path()).await.unwrap();
-        let record = record(root.path());
+        let container = TempDir::new().unwrap();
+        let cache_root = container.path().join("cache");
+        let store = Store::open(&cache_root).await.unwrap();
+        let record = record(container.path());
         let paths = store.create_invocation(&record).await.unwrap();
-        assert_eq!(
-            std::fs::metadata(&paths.directory)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&paths.manifest)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        let shard = paths.directory.parent().unwrap();
+        let day = shard.parent().unwrap();
         for directory in [
-            root.path().join("owners"),
-            root.path().join("mutations"),
-            root.path().join("trash"),
+            cache_root.clone(),
+            cache_root.join("invocations"),
+            cache_root.join("trash"),
+            cache_root.join("owners"),
+            cache_root.join("mutations"),
+            day.to_owned(),
+            shard.to_owned(),
+            paths.directory.clone(),
         ] {
             assert_eq!(
-                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
-                0o700
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{} was not private",
+                directory.display()
             );
         }
         for file in [
-            root.path().join("LOCK"),
-            root.path().join("MAINTENANCE"),
-            root.path().join("GENERATION"),
-            owner_lock_path(root.path(), record.request.id),
-            mutation_lock_path(root.path(), record.request.id),
+            cache_root.join("LOCK"),
+            cache_root.join("MAINTENANCE"),
+            cache_root.join("GENERATION"),
+            owner_lock_path(&cache_root, record.request.id),
+            mutation_lock_path(&cache_root, record.request.id),
+            paths.manifest.clone(),
         ] {
             assert_eq!(
-                std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
-                0o600
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{} was not private",
+                file.display()
             );
         }
     }

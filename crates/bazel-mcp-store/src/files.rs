@@ -1,4 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{DirBuilder, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 use bazel_mcp_types::InvocationId;
 use tokio::fs;
@@ -59,17 +66,14 @@ impl InvocationPaths {
         let parent = self
             .directory
             .parent()
-            .ok_or_else(|| std::io::Error::other("invocation directory does not have a parent"))?;
-        fs::create_dir_all(parent).await?;
-        set_private_directory(parent).await?;
-        if let Some(day) = parent.parent() {
-            set_private_directory(day).await?;
-        }
-        fs::create_dir(&self.directory).await?;
-        if let Err(error) = set_private_directory(&self.directory).await {
-            let _ = fs::remove_dir(&self.directory).await;
-            return Err(error);
-        }
+            .ok_or_else(|| io::Error::other("invocation directory does not have a parent"))?
+            .to_owned();
+        let directory = self.directory.clone();
+        tokio::task::spawn_blocking(move || {
+            create_private_directory_all_blocking(&parent)?;
+            create_private_directory_blocking(&directory)
+        })
+        .await??;
         Ok(())
     }
 }
@@ -79,14 +83,12 @@ pub(crate) async fn write_json_atomic<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec(value)?;
-    write_bytes_atomic(path, &bytes).await
+    write_bytes_atomic(path, bytes).await
 }
 
-pub(crate) async fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).await?;
-    set_private_file(&temporary).await?;
-    fs::rename(temporary, path).await?;
+pub(crate) async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), StoreError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || write_bytes_atomic_blocking(&path, &bytes)).await??;
     Ok(())
 }
 
@@ -98,26 +100,78 @@ pub(crate) async fn remove_if_exists(path: &Path) -> Result<(), StoreError> {
     }
 }
 
-#[cfg(unix)]
-pub(crate) async fn set_private_directory(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+pub(crate) async fn create_private_directory_all(path: &Path) -> Result<(), StoreError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || create_private_directory_all_blocking(&path)).await??;
     Ok(())
+}
+
+pub(crate) async fn create_private_directory(path: &Path) -> Result<(), StoreError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || create_private_directory_blocking(&path)).await??;
+    Ok(())
+}
+
+fn create_private_directory_all_blocking(path: &Path) -> io::Result<()> {
+    let mut builder = private_directory_builder();
+    builder.recursive(true).create(path)
+}
+
+fn create_private_directory_blocking(path: &Path) -> io::Result<()> {
+    private_directory_builder().create(path)
+}
+
+#[cfg(unix)]
+fn private_directory_builder() -> DirBuilder {
+    let mut builder = DirBuilder::new();
+    builder.mode(0o700);
+    builder
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn set_private_directory(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
+fn private_directory_builder() -> DirBuilder {
+    DirBuilder::new()
 }
 
-#[cfg(unix)]
-pub(crate) async fn set_private_file(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    Ok(())
+fn write_bytes_atomic_blocking(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = path.with_extension("tmp");
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
-#[cfg(not(unix))]
-pub(crate) async fn set_private_file(_path: &Path) -> Result<(), StoreError> {
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_writes_are_private_and_replace_the_committed_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("manifest.json");
+        write_bytes_atomic(&path, b"first".to_vec()).await.unwrap();
+        write_bytes_atomic(&path, b"second".to_vec()).await.unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!path.with_extension("tmp").exists());
+    }
 }

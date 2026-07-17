@@ -957,18 +957,11 @@ pub(crate) async fn file_size(path: &Path) -> u64 {
 }
 
 fn private_file(path: &Path) -> io::Result<std::fs::File> {
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .read(true)
-        .write(true)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).read(true).write(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(file)
+    options.mode(0o600);
+    options.open(path)
 }
 
 #[cfg(test)]
@@ -978,6 +971,25 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_private_at_creation_and_can_be_reopened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let path = root.path().join("capture.log");
+        let mut file = private_file(&path).unwrap();
+        file.write_all(b"evidence").unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(private_file(&path).unwrap());
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+    }
 
     #[tokio::test]
     async fn bounded_tail_reads_only_the_requested_suffix() {

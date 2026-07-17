@@ -172,3 +172,10 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   targeted test rerun; return a small bounded context window around matching
   test-log lines so the causal message stays visible without another tool call.
   Thread: `019f6df4-be14-75b2-8e2b-654b60a669c3`.
+- Each `bazel.run` lifecycle committed its manifest four times through separate
+  write, chmod, and rename blocking-pool operations while also re-chmodding
+  shared day and shard directories; this consumed server CPU without reducing
+  model-visible bytes or tool calls. Keep private modes at file and directory
+  creation, perform each atomic publication in one blocking operation, and
+  preserve startup cleanup of interrupted temporary files. Thread:
+  `019f6e39-5686-7362-83fb-bdfa398e7cf5`.
