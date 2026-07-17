@@ -30,38 +30,46 @@ impl Redactor {
     /// beyond `maximum_bytes`.
     #[must_use]
     pub fn redact_bounded(&self, value: &str, maximum_bytes: usize) -> String {
+        let mut output = String::new();
+        self.redact_bounded_into(value, maximum_bytes, &mut output);
+        output
+    }
+
+    /// Redacts matches into a caller-owned buffer so repeated operations can
+    /// reuse its allocation.
+    pub fn redact_bounded_into(&self, value: &str, maximum_bytes: usize, output: &mut String) {
         let mut patterns = self.patterns.iter();
         let Some(first) = patterns.next() else {
-            return bounded_prefix(value, maximum_bytes);
+            output.clear();
+            push_bounded(output, value, maximum_bytes);
+            return;
         };
-        patterns.fold(
-            replace_all_bounded(first, value, maximum_bytes),
-            |current, pattern| replace_all_bounded(pattern, &current, maximum_bytes),
-        )
+        replace_all_bounded(first, value, maximum_bytes, output);
+        let mut scratch = String::new();
+        for pattern in patterns {
+            replace_all_bounded(pattern, output, maximum_bytes, &mut scratch);
+            std::mem::swap(output, &mut scratch);
+        }
     }
 }
 
-fn replace_all_bounded(pattern: &Regex, value: &str, maximum_bytes: usize) -> String {
+fn replace_all_bounded(pattern: &Regex, value: &str, maximum_bytes: usize, output: &mut String) {
     const REPLACEMENT: &str = "[REDACTED]";
 
-    let mut output = String::with_capacity(value.len().min(maximum_bytes));
+    output.clear();
+    output.reserve(value.len().min(maximum_bytes));
     let mut previous_end = 0;
     for matched in pattern.find_iter(value) {
-        if !push_bounded(
-            &mut output,
-            &value[previous_end..matched.start()],
-            maximum_bytes,
-        ) {
-            return output;
+        if !push_bounded(output, &value[previous_end..matched.start()], maximum_bytes) {
+            return;
         }
         if output.len().saturating_add(REPLACEMENT.len()) > maximum_bytes {
-            return output;
+            return;
         }
         output.push_str(REPLACEMENT);
         previous_end = matched.end();
     }
-    push_bounded(&mut output, &value[previous_end..], maximum_bytes);
-    output
+    push_bounded(output, &value[previous_end..], maximum_bytes);
 }
 
 fn push_bounded(output: &mut String, value: &str, maximum_bytes: usize) -> bool {
@@ -76,12 +84,6 @@ fn push_bounded(output: &mut String, value: &str, maximum_bytes: usize) -> bool 
     }
     output.push_str(&value[..boundary]);
     false
-}
-
-fn bounded_prefix(value: &str, maximum_bytes: usize) -> String {
-    let mut output = String::new();
-    push_bounded(&mut output, value, maximum_bytes);
-    output
 }
 
 #[cfg(test)]
@@ -106,5 +108,17 @@ mod tests {
     fn never_exposes_a_secret_cut_by_the_output_boundary() {
         let redactor = Redactor::new(&[r"token=[^\s]+".to_owned()]).unwrap();
         assert_eq!(redactor.redact_bounded("token=secret", 5), "");
+    }
+
+    #[test]
+    fn reusable_output_matches_owned_redaction_for_multiple_patterns() {
+        let redactor =
+            Redactor::new(&[r"token=[^\s]+".to_owned(), r"password=[^\s]+".to_owned()]).unwrap();
+        let mut output = String::with_capacity(128);
+        redactor.redact_bounded_into("token=secret password=hunter2 visible", 128, &mut output);
+        assert_eq!(output, "[REDACTED] [REDACTED] visible");
+
+        redactor.redact_bounded_into("short", 128, &mut output);
+        assert_eq!(output, "short");
     }
 }

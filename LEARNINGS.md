@@ -134,6 +134,12 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   materialization until reduction selects the `log` view, and skip it for
   ordinary successful queries. Thread:
   `019f6db7-4010-7191-8796-1c83ff2a7f42`.
+- A filtered `bazel.inspect query_results` scan over 100,000 rows allocated a
+  fresh line, transformed value, lowercase match string, and serialized clone
+  per row: 14.88 MB across 401,020 allocations. Reuse decoding,
+  transformation, and serialization buffers, compare ASCII case in place, and
+  transfer ownership only for selected rows. Thread:
+  `019f6db7-4010-7191-8796-1c83ff2a7f42`.
 - Recorded BEP strings used fixed-length uppercase workspace markers while
   service locations used lowercase markers, complicating live/replay parity and
   leaking padding into visible messages; normalize both marker forms before
