@@ -32,15 +32,6 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
         "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:9:10: Compiling cases/type_mismatch.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from cc_binary rule target //cases:type_mismatch) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 30 arguments skipped)",
         "location": null,
         "target": null,

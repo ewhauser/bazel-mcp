@@ -32,15 +32,6 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
         "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:15:8: Executing genrule //cases:typescript_failure failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //cases:typescript_failure) /bin/bash -c ... (remaining 1 argument skipped)",
         "location": null,
         "target": null,

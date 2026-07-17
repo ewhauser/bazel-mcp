@@ -572,6 +572,69 @@ async fn protobuf_source_locations_are_workspace_relative() {
 }
 
 #[tokio::test]
+async fn go_compiler_run_and_diagnostics_inspection_omit_bazel_status_lines() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = service(
+        &root,
+        &workspace,
+        "#!/bin/sh\necho 'INFO: Analyzed target //example:broken (8 packages loaded, 12 targets configured)' >&2\necho 'main.go:3:17: cannot use \"not an integer\" (untyped string constant) as int value in variable declaration' >&2\necho 'ERROR: Build did NOT complete successfully' >&2\nexit 1\n",
+    )
+    .await;
+
+    let failed = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Build,
+            vec!["//example:broken".into()],
+        ))
+        .await
+        .unwrap();
+    let summary = failed.summary.as_ref().unwrap();
+    assert_eq!(summary.diagnostics.len(), 1);
+    let diagnostic = &summary.diagnostics[0];
+    assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+    assert_eq!(
+        diagnostic.message,
+        "cannot use \"not an integer\" (untyped string constant) as int value in variable declaration"
+    );
+    assert_eq!(
+        diagnostic.location,
+        Some(bazel_mcp_types::DiagnosticLocation {
+            path: "main.go".into(),
+            line: Some(3),
+            column: Some(17),
+        })
+    );
+    assert!(summary.diagnostics.iter().all(|diagnostic| {
+        !diagnostic.message.starts_with("INFO:")
+            && !diagnostic
+                .message
+                .contains("Build did NOT complete successfully")
+    }));
+
+    let inspected = service
+        .inspect(InspectRequest {
+            invocation_id: Some(failed.request.id),
+            workspace: None,
+            state: None,
+            command: None,
+            view: InspectView::Diagnostics,
+            cursor: None,
+            filter: None,
+            item_limit: 20,
+            scan_limit: 10_000,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        inspected.items,
+        InspectPayload::Diagnostics(vec![diagnostic.clone()])
+    );
+}
+
+#[tokio::test]
 async fn log_inspection_uses_bounded_opaque_cursors() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

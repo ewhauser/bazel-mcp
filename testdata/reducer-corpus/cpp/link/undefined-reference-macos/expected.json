@@ -37,15 +37,6 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
         "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:27:10: Linking cases/undefined_reference failed: (Exit 1): cc_wrapper.sh failed: error executing CppLink command (from cc_binary rule target //cases:undefined_reference) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh @bazel-out/darwin_arm64-fastbuild/bin/cases/undefined_reference-0.params",
         "location": null,
         "target": null,

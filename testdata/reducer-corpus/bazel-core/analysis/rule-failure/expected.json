@@ -77,15 +77,6 @@
         "target": null,
         "action": null,
         "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
       }
     ],
     "tests": [],

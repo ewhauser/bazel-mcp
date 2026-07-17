@@ -58,15 +58,6 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
         "message": "ERROR: <WORKSPACE>/BUILD.bazel:3:15: Running fixture action //:compile_failure failed: (Exit 1): bash failed: error executing FixtureAction command (from fixture_action rule target //:compile_failure) /bin/bash -c 'echo '\\''fixture.cc:7: error: BAZEL_MCP_CPP_ROOT_CAUSE'\\'' >&2; exit 1'",
         "location": null,
         "target": null,

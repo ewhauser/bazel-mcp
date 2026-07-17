@@ -41,15 +41,6 @@
       {
         "severity": "error",
         "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "compilation",
         "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:12: Compiling Rust bin type_mismatch (1 file) failed: (Exit 1): process_wrapper failed: error executing Rustc command (from rust_binary rule target //cases:type_mismatch) bazel-out/darwin_arm64-opt-exec/bin/external/rules_rust+/util/process_wrapper/process_wrapper --subst 'pwd=${pwd}' --subst 'exec_root=${exec_root}' --subst 'output_base=${output_base}' -- ... (remaining 2 arguments skipped)",
         "location": null,
         "target": null,

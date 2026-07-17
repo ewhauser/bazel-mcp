@@ -40,15 +40,6 @@
       },
       {
         "severity": "error",
-        "category": "compilation",
-        "message": "ERROR: Build did NOT complete successfully",
-        "location": null,
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
         "category": "unknown",
         "message": "FAILED:",
         "location": null,

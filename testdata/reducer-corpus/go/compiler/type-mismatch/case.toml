@@ -1,5 +1,6 @@
 schema_version = 1
 id = "go/compiler/type-mismatch"
+issue = 97
 workspace = "examples/go"
 command = "build"
 args = ["//cases:compile_failure"]
@@ -28,8 +29,10 @@ category = "compilation"
 message_contains = "cannot use \"USD\""
 path = "cases/compile_failure.go"
 line = 4
+column = 9
 
 [expect.absent]
+message_contains = ["INFO: Analyzed target", "Build did NOT complete successfully"]
 raw_contains = ["token=", "authorization:"]
 
 [provenance]
