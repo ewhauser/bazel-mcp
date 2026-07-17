@@ -87,11 +87,14 @@ pub async fn serve(config: ValidatedServerConfig) -> anyhow::Result<()> {
                 "received shutdown signal; cancelling active Bazel invocations"
             );
             service_cancellation.cancel();
-            let deadline = tokio::time::Instant::now() + shutdown_wait;
-            while shutdown_runner.active_invocation_count().await > 0
-                && tokio::time::Instant::now() < deadline
+            if tokio::time::timeout(shutdown_wait, shutdown_runner.wait_until_idle())
+                .await
+                .is_err()
             {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                tracing::warn!(
+                    active = shutdown_runner.active_invocation_count().await,
+                    "timed out waiting for active Bazel invocations during shutdown"
+                );
             }
             tracing::info!(
                 active = shutdown_runner.active_invocation_count().await,

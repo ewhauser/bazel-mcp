@@ -70,8 +70,7 @@ impl InvocationService {
                     ..Default::default()
                 };
                 return self
-                    .store
-                    .transition(
+                    .transition_invocation(
                         queued.request.id,
                         InvocationState::Failed,
                         Some(Termination::SpawnFailure {
@@ -237,8 +236,7 @@ impl InvocationService {
                     ..Default::default()
                 };
                 return self
-                    .store
-                    .transition(
+                    .transition_invocation(
                         queued.request.id,
                         InvocationState::Failed,
                         Some(Termination::SpawnFailure { message }),
@@ -260,8 +258,7 @@ impl InvocationService {
         });
         let mut process_group = ProcessGroupGuard::for_child(&child);
         if let Err(error) = self
-            .store
-            .transition(queued.request.id, InvocationState::Running, None, None)
+            .transition_invocation(queued.request.id, InvocationState::Running, None, None)
             .await
         {
             let _ = terminate_child(
@@ -294,8 +291,7 @@ impl InvocationService {
                     ..Default::default()
                 };
                 let _ = self
-                    .store
-                    .transition(
+                    .transition_invocation(
                         queued.request.id,
                         InvocationState::Failed,
                         Some(Termination::Interrupted),
@@ -586,20 +582,19 @@ impl InvocationService {
                 reduction_ms: duration_millis(reduction_started.elapsed()),
                 ..Default::default()
             };
-            self.store
-                .finish_invocation(
-                    queued.request.id,
-                    InvocationCompletion {
-                        state,
-                        termination: termination.clone(),
-                        summary,
-                        metrics,
-                        canonical_arguments,
-                        artifacts,
-                    },
-                )
-                .await
-                .map_err(Into::into)
+            self.finish_invocation(
+                queued.request.id,
+                InvocationCompletion {
+                    state,
+                    termination: termination.clone(),
+                    summary,
+                    metrics,
+                    canonical_arguments,
+                    artifacts,
+                },
+            )
+            .await
+            .map_err(Into::into)
         }
         .await;
 
@@ -634,8 +629,7 @@ impl InvocationService {
                     ..Default::default()
                 };
                 let _ = self
-                    .store
-                    .transition(
+                    .transition_invocation(
                         queued.request.id,
                         terminal_state,
                         Some(termination),
@@ -805,8 +799,7 @@ impl InvocationService {
             return Ok(current);
         }
         match self
-            .store
-            .transition(
+            .transition_invocation(
                 id,
                 InvocationState::Cancelled,
                 Some(Termination::Cancelled),

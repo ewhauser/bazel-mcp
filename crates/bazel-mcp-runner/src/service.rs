@@ -13,7 +13,7 @@ use bazel_mcp_policy::{
     validate_workspace,
 };
 use bazel_mcp_reducer::{ReducerPipeline, StarlarkReducerConfig, load_starlark_reducers};
-use bazel_mcp_store::{InvocationPaths, Store, StoreError};
+use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
     DeferredFailure, DeferredFailureKind, DeferredResultRecord, DeferredResultView,
     DeferredRetrieval, DeferredTerminalState, InvocationId, InvocationRecord, InvocationRequest,
@@ -49,6 +49,7 @@ use bazel_mcp_types::{ArtifactKind, BazelCommand};
 pub(crate) const COMPLETE_BEP_LOG_LIMIT: usize = 2 * 1024 * 1024;
 pub(crate) const FALLBACK_LOG_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) const BES_COMPLETION_GRACE: Duration = Duration::from_secs(2);
+const DURABLE_LIFECYCLE_RECHECK: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -353,7 +354,7 @@ impl InvocationService {
             .await?;
         let id = prepared.queued.request.id;
         let result = self.run_prepared(prepared).await;
-        self.scheduler.remove(id).await;
+        self.scheduler.remove(id);
         result
     }
 
@@ -403,7 +404,7 @@ impl InvocationService {
                     );
                 }
             }
-            supervisor.scheduler.remove(id).await;
+            supervisor.scheduler.remove(id);
         });
         Ok(id)
     }
@@ -415,6 +416,24 @@ impl InvocationService {
         cancellation: CancellationToken,
     ) -> Result<InvocationRecord, RunnerError> {
         loop {
+            if let Some(mut lifecycle) = self.scheduler.lifecycle(id) {
+                loop {
+                    if lifecycle.borrow_and_update().is_terminal() {
+                        return Ok(self.store.get_invocation(id).await?);
+                    }
+                    tokio::select! {
+                        () = cancellation.cancelled() => {
+                            return Err(RunnerError::WaitCancelled(id));
+                        }
+                        changed = lifecycle.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             if self
                 .store
                 .get_invocation_header(id)
@@ -424,9 +443,13 @@ impl InvocationService {
             {
                 return Ok(self.store.get_invocation(id).await?);
             }
+
+            // A restarted service has no in-memory publisher, while another
+            // process may still own the durable invocation. Recheck that rare
+            // fallback at the store generation cadence; live work never polls.
             tokio::select! {
                 () = cancellation.cancelled() => return Err(RunnerError::WaitCancelled(id)),
-                () = tokio::time::sleep(Duration::from_millis(25)) => {}
+                () = tokio::time::sleep(DURABLE_LIFECYCLE_RECHECK) => {}
             }
         }
     }
@@ -555,9 +578,12 @@ impl InvocationService {
             .create_invocation_with_deferred(&stored, deferred.as_ref())
             .await?;
         let output_base_wait = Arc::new(OutputBaseWaitStatus::default());
-        self.scheduler
-            .register(id, cancellation.clone(), output_base_wait.clone())
-            .await;
+        self.scheduler.register(
+            id,
+            cancellation.clone(),
+            output_base_wait.clone(),
+            stored.state,
+        );
 
         Ok(PreparedSubmission {
             queued,
@@ -631,8 +657,7 @@ impl InvocationService {
                 return self.finish_cancelled(id).await;
             }
             if let Err(error) = self
-                .store
-                .transition(id, InvocationState::Starting, None, None)
+                .transition_invocation(id, InvocationState::Starting, None, None)
                 .await
             {
                 let message = self.redactor.redact_bounded(
@@ -647,8 +672,7 @@ impl InvocationService {
                     .is_ok_and(|record| !record.state.is_terminal())
                 {
                     let _ = self
-                        .store
-                        .transition(
+                        .transition_invocation(
                             id,
                             InvocationState::Failed,
                             Some(Termination::SpawnFailure {
@@ -701,8 +725,7 @@ impl InvocationService {
         }
         if current.state == InvocationState::Queued
             && let Err(error) = self
-                .store
-                .transition(id, InvocationState::Starting, None, None)
+                .transition_invocation(id, InvocationState::Starting, None, None)
                 .await
             && !matches!(error, StoreError::State(_))
         {
@@ -712,22 +735,21 @@ impl InvocationService {
         if current.state.is_terminal() {
             return Ok(current);
         }
-        self.store
-            .transition(
-                id,
-                InvocationState::Failed,
-                Some(Termination::SpawnFailure {
-                    message: message.clone(),
-                }),
-                Some(bazel_mcp_types::InvocationSummary {
-                    success: false,
-                    headline: format!("Could not start Bazel: {message}"),
-                    truncated: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .map_err(Into::into)
+        self.transition_invocation(
+            id,
+            InvocationState::Failed,
+            Some(Termination::SpawnFailure {
+                message: message.clone(),
+            }),
+            Some(bazel_mcp_types::InvocationSummary {
+                success: false,
+                headline: format!("Could not start Bazel: {message}"),
+                truncated: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn materialize_worker_failure(
@@ -760,8 +782,7 @@ impl InvocationService {
             .is_ok_and(|record| !record.state.is_terminal())
         {
             let _ = self
-                .store
-                .transition(
+                .transition_invocation(
                     id,
                     InvocationState::Failed,
                     Some(Termination::SpawnFailure {
@@ -835,11 +856,17 @@ impl InvocationService {
     /// Request cancellation for every invocation owned by this server process.
     /// Used during graceful transport and operating-system shutdown.
     pub async fn cancel_all_active(&self) -> usize {
-        self.scheduler.cancel_all().await
+        self.scheduler.cancel_all()
     }
 
     pub async fn active_invocation_count(&self) -> usize {
-        self.scheduler.active_count().await
+        self.scheduler.active_count()
+    }
+
+    /// Wait until every invocation owned by this process has left the live
+    /// registry. Lifecycle changes wake this future without periodic checks.
+    pub async fn wait_until_idle(&self) {
+        self.scheduler.wait_until_idle().await;
     }
 
     pub async fn cancel_with_reason(
@@ -860,14 +887,13 @@ impl InvocationService {
             let reason = self.redactor.redact_bounded(reason, 1_000);
             self.store.update_cancellation_reason(id, &reason).await?;
         }
-        let cancellation = self.scheduler.cancellation(id).await;
+        let cancellation = self.scheduler.cancellation(id);
         if let Some(cancellation) = &cancellation {
             cancellation.cancel();
         }
         if record.state == InvocationState::Queued {
             match self
-                .store
-                .transition(
+                .transition_invocation(
                     id,
                     InvocationState::Cancelled,
                     Some(Termination::Cancelled),
@@ -922,6 +948,9 @@ impl InvocationService {
     }
 
     pub async fn invocation_state(&self, id: InvocationId) -> Result<InvocationState, RunnerError> {
+        if let Some(state) = self.scheduler.lifecycle_state(id) {
+            return Ok(state);
+        }
         Ok(self.store.get_invocation_header(id).await?.state)
     }
 
@@ -929,8 +958,8 @@ impl InvocationService {
         &self,
         id: InvocationId,
     ) -> Result<InvocationProgress, RunnerError> {
-        let state = self.store.get_invocation_header(id).await?.state;
-        let wait = self.scheduler.output_base_wait(id).await;
+        let state = self.invocation_state(id).await?;
+        let wait = self.scheduler.output_base_wait(id);
         let wait = wait.map(|status| status.snapshot()).unwrap_or_else(|| {
             crate::output_base_lock::OutputBaseWaitSnapshot {
                 active: false,
@@ -944,6 +973,31 @@ impl InvocationService {
             output_base_lock_wait_ms: wait.elapsed_ms,
             output_base_lock_owner: wait.owner,
         })
+    }
+
+    pub(crate) async fn transition_invocation(
+        &self,
+        id: InvocationId,
+        next: InvocationState,
+        termination: Option<Termination>,
+        summary: Option<bazel_mcp_types::InvocationSummary>,
+    ) -> Result<InvocationRecord, StoreError> {
+        let record = self
+            .store
+            .transition(id, next, termination, summary)
+            .await?;
+        self.scheduler.publish_state(id, record.state);
+        Ok(record)
+    }
+
+    pub(crate) async fn finish_invocation(
+        &self,
+        id: InvocationId,
+        completion: InvocationCompletion,
+    ) -> Result<InvocationRecord, StoreError> {
+        let record = self.store.finish_invocation(id, completion).await?;
+        self.scheduler.publish_state(id, record.state);
+        Ok(record)
     }
 
     fn redacted_request(&self, request: &InvocationRequest) -> InvocationRequest {

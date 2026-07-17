@@ -1287,14 +1287,20 @@ async fn deferred_submission_commits_before_completion_and_survives_wait_cancell
         Err(bazel_mcp_runner::RunnerError::WaitCancelled(found)) if found == id
     ));
 
-    let completed = tokio::time::timeout(
-        Duration::from_secs(3),
-        service.wait(id, CancellationToken::new()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(completed.state, InvocationState::Succeeded);
+    let waiters = (0..64)
+        .map(|_| {
+            let service = service.clone();
+            tokio::spawn(async move { service.wait(id, CancellationToken::new()).await })
+        })
+        .collect::<Vec<_>>();
+    for waiter in waiters {
+        let completed = tokio::time::timeout(Duration::from_secs(3), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.state, InvocationState::Succeeded);
+    }
     assert_eq!(
         tokio::fs::read_to_string(&launches)
             .await
@@ -1325,6 +1331,41 @@ async fn deferred_submission_commits_before_completion_and_survives_wait_cancell
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn wait_uses_durable_recovery_when_no_live_publisher_exists() {
+    let root = tempfile::tempdir().unwrap();
+    let store_root = root.path().join("store");
+    let request = InvocationRequest::new(
+        root.path().join("workspace"),
+        BazelCommand::Build,
+        vec!["//:recovered".into()],
+    );
+    let id = request.id;
+    {
+        let store = Store::open(&store_root).await.unwrap();
+        store
+            .create_invocation(&InvocationRecord::queued(request))
+            .await
+            .unwrap();
+    }
+
+    let service = InvocationService::new(
+        Store::open(&store_root).await.unwrap(),
+        RunnerConfig::default(),
+    )
+    .unwrap();
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(1),
+        service.wait(id, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(recovered.state, InvocationState::Interrupted);
+    assert_eq!(service.active_invocation_count().await, 0);
 }
 
 #[tokio::test]
