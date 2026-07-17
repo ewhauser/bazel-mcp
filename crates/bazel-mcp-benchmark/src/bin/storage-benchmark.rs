@@ -562,7 +562,7 @@ async fn benchmark_concurrency(
     let mut inspection_latencies = Vec::new();
     while tasks.iter().any(|task| !task.is_finished()) && lookup_latencies.len() < 100_000 {
         let lookup_started = Instant::now();
-        store.get_invocation(inspect_id).await?;
+        store.get_invocation_header(inspect_id).await?;
         lookup_latencies.push(lookup_started.elapsed());
         let inspection_started = Instant::now();
         store
@@ -572,7 +572,7 @@ async fn benchmark_concurrency(
     }
     if lookup_latencies.is_empty() {
         let lookup_started = Instant::now();
-        store.get_invocation(inspect_id).await?;
+        store.get_invocation_header(inspect_id).await?;
         lookup_latencies.push(lookup_started.elapsed());
         let inspection_started = Instant::now();
         store
@@ -768,7 +768,7 @@ async fn benchmark_query(args: &Args) -> anyhow::Result<(QueryMetrics, f64)> {
     let mut lookups = Vec::with_capacity(args.lookup_samples);
     for _ in 0..args.lookup_samples {
         let started = Instant::now();
-        let record = store.get_invocation(id).await?;
+        let record = store.get_invocation_header(id).await?;
         lookups.push(started.elapsed());
         anyhow::ensure!(
             record.request.id == id,
@@ -932,7 +932,7 @@ async fn benchmark_gc(invocations: usize) -> anyhow::Result<GcMetrics> {
     let mut inspections = Vec::new();
     while running.load(Ordering::Acquire) && lookups.len() < 100_000 {
         let lookup_started = Instant::now();
-        store.get_invocation(live_id).await?;
+        store.get_invocation_header(live_id).await?;
         lookups.push(lookup_started.elapsed());
         let inspection_started = Instant::now();
         store
@@ -942,7 +942,7 @@ async fn benchmark_gc(invocations: usize) -> anyhow::Result<GcMetrics> {
     }
     if lookups.is_empty() {
         let lookup_started = Instant::now();
-        store.get_invocation(live_id).await?;
+        store.get_invocation_header(live_id).await?;
         lookups.push(lookup_started.elapsed());
         let inspection_started = Instant::now();
         store

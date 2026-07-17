@@ -1,8 +1,6 @@
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
@@ -14,26 +12,37 @@ use std::{
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 
+#[cfg(test)]
+use bazel_mcp_types::{DeferredRetrieval, TargetResult};
+
 use bazel_mcp_types::{
-    Artifact, BazelCommand, CoverageFile, DeferredFailure, DeferredResultRecord,
-    DeferredResultView, DeferredRetrieval, DeferredTerminalState, Diagnostic, InvocationId,
-    InvocationMetrics, InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest,
-    QueryRow, TargetResult, Termination, TestResult,
+    Artifact, CoverageFile, DeferredResultRecord, Diagnostic, InvocationId, InvocationMetrics,
+    InvocationRecord, InvocationState, InvocationSummary, Page, PageRequest, QueryRow, Termination,
+    TestResult,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     InvocationPaths,
-    cursor::{DeferredCursor, FileCursor, InvocationCursor, OrdinalCursor},
+    cursor::FileCursor,
     files::{remove_if_exists, set_private_directory, write_bytes_atomic, write_json_atomic},
+    index::{
+        Index, IndexEntry, ensure_exists, insert as insert_index_entry, mark_telemetry_flushed,
+        merge_index_telemetry, merge_pending_telemetry, merge_telemetry,
+        replace as replace_index_entry,
+    },
+    manifest::{
+        CURRENT_SCHEMA_VERSION, DurableRecord, decode as decode_durable, read as read_durable,
+    },
+    query_paging::{QueryFilePage, page_query_file, page_records},
+    record::{HydratedInvocation, InvocationDetails, InvocationHeader},
 };
 
-const RECORD_SCHEMA_VERSION: u32 = 1;
-const QUERY_LINE_LIMIT: usize = 64 * 1024;
-const GC_LOW_WATERMARK_PERCENT: u64 = 80;
-const GC_GENERATION_BATCH_SIZE: usize = 64;
+#[cfg(test)]
+use crate::{query_paging::QUERY_LINE_LIMIT, record::InvocationSummaryHeader};
+
 const GENERATION_POLL_INTERVAL_US: u64 = 1_000;
 
 #[derive(Debug, Error)]
@@ -60,12 +69,12 @@ pub enum StoreError {
 
 #[derive(Clone)]
 pub struct Store {
-    cache_root: PathBuf,
-    inner: Arc<StoreInner>,
+    pub(crate) cache_root: PathBuf,
+    pub(crate) inner: Arc<StoreInner>,
 }
 
-struct StoreInner {
-    index: RwLock<Index>,
+pub(crate) struct StoreInner {
+    pub(crate) index: RwLock<Index>,
     mutation_locks: Mutex<BTreeMap<InvocationId, Weak<Mutex<()>>>>,
     owner_leases: Mutex<BTreeMap<InvocationId, ProcessLock>>,
     observed_generation: AtomicU64,
@@ -73,13 +82,13 @@ struct StoreInner {
     manifest_commits: AtomicU64,
     manifest_bytes_written: AtomicU64,
     payload_recounts: AtomicU64,
-    gc_renames: AtomicU64,
-    gc_unlinks: AtomicU64,
-    gc_rename_us: AtomicU64,
-    gc_index_write_us: AtomicU64,
-    gc_unlink_us: AtomicU64,
+    pub(crate) gc_renames: AtomicU64,
+    pub(crate) gc_unlinks: AtomicU64,
+    pub(crate) gc_rename_us: AtomicU64,
+    pub(crate) gc_index_write_us: AtomicU64,
+    pub(crate) gc_unlink_us: AtomicU64,
     #[cfg(test)]
-    fail_next_gc_unlink: AtomicBool,
+    pub(crate) fail_next_gc_unlink: AtomicBool,
     startup_stats: StoreStartupStats,
 }
 
@@ -104,10 +113,10 @@ pub struct StoreStartupStats {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct ReclaimOutcome {
-    changed: bool,
-    deleted: bool,
-    reclaimed: bool,
+pub(crate) struct ReclaimOutcome {
+    pub(crate) changed: bool,
+    pub(crate) deleted: bool,
+    pub(crate) reclaimed: bool,
 }
 
 /// One coalesced terminal metadata commit for a completed Bazel invocation.
@@ -118,81 +127,6 @@ pub struct InvocationCompletion {
     pub metrics: InvocationMetrics,
     pub canonical_arguments: Option<Vec<String>>,
     pub artifacts: Vec<Artifact>,
-}
-
-#[derive(Default)]
-struct Index {
-    entries: BTreeMap<InvocationId, IndexEntry>,
-    by_requested: BTreeSet<(i64, InvocationId)>,
-    by_workspace: BTreeMap<PathBuf, BTreeSet<(i64, InvocationId)>>,
-    deferred_by_created: BTreeSet<(i64, InvocationId)>,
-    terminal_by_finished: BTreeSet<(i64, InvocationId)>,
-    retained_bytes: u64,
-}
-
-#[derive(Clone)]
-struct IndexEntry {
-    record: InvocationRecord,
-    deferred: Option<DeferredResultRecord>,
-    retained_bytes: u64,
-    telemetry_generation: u64,
-    telemetry_flush_scheduled: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct DurableRecord {
-    schema_version: u32,
-    invocation: InvocationRecord,
-    #[serde(default)]
-    deferred: Option<DeferredResultRecord>,
-    #[serde(default)]
-    payload_bytes: u64,
-}
-
-impl DurableRecord {
-    fn index_entry(&self, retained_bytes: u64) -> IndexEntry {
-        IndexEntry {
-            record: compact_record(&self.invocation),
-            deferred: self.deferred.clone(),
-            retained_bytes,
-            telemetry_generation: 0,
-            telemetry_flush_scheduled: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct InvocationDetails {
-    targets: Vec<TargetResult>,
-    tests: Vec<TestResult>,
-    coverage_files: Vec<CoverageFile>,
-}
-
-impl InvocationDetails {
-    fn from_record(record: &InvocationRecord) -> Self {
-        let Some(summary) = &record.summary else {
-            return Self::default();
-        };
-        Self {
-            targets: summary.targets.clone(),
-            tests: summary.tests.clone(),
-            coverage_files: summary
-                .coverage
-                .as_ref()
-                .map_or_else(Vec::new, |coverage| coverage.files.clone()),
-        }
-    }
-
-    fn hydrate(self, record: &mut InvocationRecord) {
-        let Some(summary) = record.summary.as_mut() else {
-            return;
-        };
-        summary.targets = self.targets;
-        summary.tests = self.tests;
-        if let Some(coverage) = summary.coverage.as_mut() {
-            coverage.files = self.coverage_files;
-        }
-    }
 }
 
 impl Store {
@@ -248,11 +182,11 @@ impl Store {
         InvocationPaths::new(&self.cache_root, record.request.id)
     }
 
-    fn paths_for_id(&self, id: InvocationId) -> InvocationPaths {
+    pub(crate) fn paths_for_id(&self, id: InvocationId) -> InvocationPaths {
         InvocationPaths::new(&self.cache_root, id)
     }
 
-    async fn mutation_lock(&self, id: InvocationId) -> Arc<Mutex<()>> {
+    pub(crate) async fn mutation_lock(&self, id: InvocationId) -> Arc<Mutex<()>> {
         let mut locks = self.inner.mutation_locks.lock().await;
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(&id).and_then(Weak::upgrade) {
@@ -277,7 +211,7 @@ impl Store {
         self.inner.owner_leases.lock().await.remove(&id);
     }
 
-    async fn recover_orphaned_invocations(&self) -> Result<usize, StoreError> {
+    pub(crate) async fn recover_orphaned_invocations(&self) -> Result<usize, StoreError> {
         let ids = {
             let index = self.inner.index.read().await;
             nonterminal_ids(&index)
@@ -297,7 +231,7 @@ impl Store {
         Ok(0)
     }
 
-    async fn commit_generation(&self) -> Result<u64, StoreError> {
+    pub(crate) async fn commit_generation(&self) -> Result<u64, StoreError> {
         let _metadata = ProcessLock::acquire(self.cache_root.join("LOCK")).await?;
         let previous = read_generation(&self.cache_root)?;
         let generation = write_generation(&self.cache_root, previous.saturating_add(1))?;
@@ -309,7 +243,7 @@ impl Store {
         Ok(generation)
     }
 
-    async fn refresh_index_if_stale(&self) -> Result<(), StoreError> {
+    pub(crate) async fn refresh_index_if_stale(&self) -> Result<(), StoreError> {
         if !self.claim_generation_check() {
             return Ok(());
         }
@@ -341,7 +275,7 @@ impl Store {
             .is_ok()
     }
 
-    async fn refresh_index(&self, force: bool) -> Result<(), StoreError> {
+    pub(crate) async fn refresh_index(&self, force: bool) -> Result<(), StoreError> {
         let _metadata = ProcessLock::acquire(self.cache_root.join("LOCK")).await?;
         let generation = read_generation(&self.cache_root)?;
         if !force && generation == self.inner.observed_generation.load(Ordering::Acquire) {
@@ -378,7 +312,7 @@ impl Store {
         self.inner.startup_stats
     }
 
-    async fn persist_durable(
+    pub(crate) async fn persist_durable(
         &self,
         paths: &InvocationPaths,
         durable: &mut DurableRecord,
@@ -428,8 +362,8 @@ impl Store {
         paths.create().await?;
         let result = async {
             let mut durable = DurableRecord {
-                schema_version: RECORD_SCHEMA_VERSION,
-                invocation: compact_record(record),
+                schema_version: CURRENT_SCHEMA_VERSION,
+                invocation: InvocationHeader::from_record(record),
                 deferred: deferred.cloned(),
                 payload_bytes: 0,
             };
@@ -453,224 +387,6 @@ impl Store {
             self.inner.owner_leases.lock().await.insert(id, owner);
         }
         Ok(paths)
-    }
-
-    pub async fn get_deferred_result(
-        &self,
-        id: InvocationId,
-        retrieval: DeferredRetrieval,
-        now_ms: i64,
-    ) -> Result<DeferredResultView, StoreError> {
-        self.ensure_invocation(id).await?;
-        let (deferred, record) = {
-            let index = self.inner.index.read().await;
-            let entry = index.entries.get(&id).ok_or(StoreError::NotFound(id))?;
-            let Some(deferred) = entry.deferred.clone() else {
-                return Err(StoreError::DeferredNotFound(id));
-            };
-            (deferred, entry.record.clone())
-        };
-        if deferred.retrieval != retrieval
-            || deferred.is_expired(now_ms, record.state.is_terminal())
-        {
-            if deferred.is_expired(now_ms, record.state.is_terminal()) {
-                self.mutate(id, false, |durable| {
-                    durable.deferred = None;
-                    Ok(())
-                })
-                .await?;
-            }
-            return Err(StoreError::DeferredNotFound(id));
-        }
-        let invocation = if record.state.is_terminal() {
-            self.read_full_invocation(id).await?
-        } else {
-            record
-        };
-        Ok(DeferredResultView {
-            deferred,
-            invocation,
-        })
-    }
-
-    pub async fn list_deferred_results(
-        &self,
-        retrieval: DeferredRetrieval,
-        now_ms: i64,
-        page: PageRequest,
-    ) -> Result<Page<DeferredResultView>, StoreError> {
-        self.refresh_index_if_stale().await?;
-        let limit = page.limit.clamp(1, 200) as usize;
-        let cursor = page
-            .cursor
-            .as_deref()
-            .map(|value| DeferredCursor::decode_for(value, retrieval.as_str()))
-            .transpose()?;
-        let index = self.inner.index.read().await;
-        let mut items: Vec<_> = index
-            .deferred_by_created
-            .iter()
-            .rev()
-            .filter_map(|(_, id)| {
-                let entry = index.entries.get(id)?;
-                let deferred = entry.deferred.as_ref()?;
-                (deferred.retrieval == retrieval
-                    && !deferred.is_expired(now_ms, entry.record.state.is_terminal())
-                    && cursor.as_ref().is_none_or(|cursor| {
-                        deferred.created_at_ms < cursor.created_at_ms
-                            || (deferred.created_at_ms == cursor.created_at_ms
-                                && deferred.invocation_id.to_string() < cursor.id)
-                    }))
-                .then(|| DeferredResultView {
-                    deferred: deferred.clone(),
-                    invocation: entry.record.clone(),
-                })
-            })
-            .take(limit + 1)
-            .collect();
-        let truncated = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = if truncated {
-            items
-                .last()
-                .map(|view| {
-                    DeferredCursor::new(
-                        retrieval.as_str(),
-                        view.deferred.created_at_ms,
-                        view.deferred.invocation_id.to_string(),
-                    )
-                    .encode()
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        Ok(Page {
-            items,
-            next_cursor,
-            truncated,
-        })
-    }
-
-    pub async fn record_deferred_cancellation(
-        &self,
-        id: InvocationId,
-        requested_at_ms: i64,
-    ) -> Result<(), StoreError> {
-        self.mutate(id, false, |durable| {
-            let deferred = durable
-                .deferred
-                .as_mut()
-                .ok_or(StoreError::DeferredNotFound(id))?;
-            if deferred.cancellation_requested_at_ms.is_none() {
-                deferred.cancellation_requested_at_ms = Some(requested_at_ms);
-            }
-            deferred.updated_at_ms = deferred.updated_at_ms.max(requested_at_ms);
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn set_deferred_terminal_override(
-        &self,
-        id: InvocationId,
-        state: DeferredTerminalState,
-        updated_at_ms: i64,
-    ) -> Result<(), StoreError> {
-        self.mutate(id, false, |durable| {
-            let deferred = durable
-                .deferred
-                .as_mut()
-                .ok_or(StoreError::DeferredNotFound(id))?;
-            deferred.terminal_override = Some(state);
-            deferred.updated_at_ms = deferred.updated_at_ms.max(updated_at_ms);
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn persist_deferred_failure(
-        &self,
-        id: InvocationId,
-        failure: &DeferredFailure,
-        updated_at_ms: i64,
-    ) -> Result<(), StoreError> {
-        self.mutate(id, false, |durable| {
-            let deferred = durable
-                .deferred
-                .as_mut()
-                .ok_or(StoreError::DeferredNotFound(id))?;
-            deferred.failure = Some(failure.clone());
-            deferred.updated_at_ms = deferred.updated_at_ms.max(updated_at_ms);
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn extend_deferred_expiry(
-        &self,
-        id: InvocationId,
-        minimum_expires_at_ms: i64,
-        updated_at_ms: i64,
-    ) -> Result<(), StoreError> {
-        self.mutate(id, false, |durable| {
-            let deferred = durable
-                .deferred
-                .as_mut()
-                .ok_or(StoreError::DeferredNotFound(id))?;
-            deferred.expires_at_ms = deferred.expires_at_ms.max(minimum_expires_at_ms);
-            deferred.updated_at_ms = deferred.updated_at_ms.max(updated_at_ms);
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn delete_expired_deferred_results(&self, now_ms: i64) -> Result<usize, StoreError> {
-        self.refresh_index_if_stale().await?;
-        let ids: Vec<_> = {
-            let index = self.inner.index.read().await;
-            index
-                .entries
-                .iter()
-                .filter_map(|(id, entry)| {
-                    entry
-                        .deferred
-                        .as_ref()
-                        .is_some_and(|deferred| {
-                            deferred.is_expired(now_ms, entry.record.state.is_terminal())
-                        })
-                        .then_some(*id)
-                })
-                .collect()
-        };
-        let mut deleted = 0;
-        for id in &ids {
-            let mut removed = false;
-            self.mutate(*id, false, |durable| {
-                if durable.deferred.as_ref().is_some_and(|deferred| {
-                    deferred.is_expired(now_ms, durable.invocation.state.is_terminal())
-                }) {
-                    durable.deferred = None;
-                    removed = true;
-                }
-                Ok(())
-            })
-            .await?;
-            deleted += usize::from(removed);
-        }
-        Ok(deleted)
-    }
-
-    pub async fn get_invocation(&self, id: InvocationId) -> Result<InvocationRecord, StoreError> {
-        self.ensure_invocation(id).await?;
-        self.inner
-            .index
-            .read()
-            .await
-            .entries
-            .get(&id)
-            .map(|entry| entry.record.clone())
-            .ok_or(StoreError::NotFound(id))
     }
 
     pub async fn transition(
@@ -703,22 +419,21 @@ impl Store {
             let index = self.inner.index.read().await;
             merge_index_telemetry(&index, id, &mut durable.invocation.metrics)
         };
-        durable.invocation.transition(next)?;
-        durable.invocation.termination = termination.clone();
-        durable.invocation.summary = summary.clone();
+        let mut result = durable.invocation.clone().into_record();
+        result.transition(next)?;
+        result.termination = termination.clone();
+        result.summary = summary.clone();
         if next.is_terminal()
             && let Some(deferred) = durable.deferred.as_mut()
         {
-            let terminal_at_ms = durable
-                .invocation
+            let terminal_at_ms = result
                 .finished_at_ms
                 .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms);
             deferred.extend_terminal_expiry(terminal_at_ms);
         }
-        let result = durable.invocation.clone();
+        durable.invocation = InvocationHeader::from_record(&result);
         if next.is_terminal() {
             write_details(&paths, &result).await?;
-            durable.invocation = compact_record(&result);
         }
         let retained_bytes = match self
             .persist_durable(&paths, &mut durable, next.is_terminal())
@@ -764,7 +479,7 @@ impl Store {
         } = completion;
         if !state.is_terminal() {
             return Err(StoreError::State(bazel_mcp_types::StateTransitionError {
-                current: self.get_invocation(id).await?.state,
+                current: self.get_invocation_header(id).await?.state,
                 next: state,
             }));
         }
@@ -775,31 +490,30 @@ impl Store {
             ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
         let paths = self.paths_for_id(id);
         let (mut durable, _) = read_durable(&paths.manifest).await?;
-        durable.invocation.transition(state)?;
-        durable.invocation.termination = Some(termination);
-        durable.invocation.summary = Some(summary);
-        durable.invocation.metrics = metrics;
+        let mut result = durable.invocation.clone().into_record();
+        result.transition(state)?;
+        result.termination = Some(termination);
+        result.summary = Some(summary);
+        result.metrics = metrics;
         let telemetry_generation = {
             let index = self.inner.index.read().await;
-            merge_index_telemetry(&index, id, &mut durable.invocation.metrics)
+            merge_index_telemetry(&index, id, &mut result.metrics)
         };
-        durable.invocation.canonical_arguments = canonical_arguments;
+        result.canonical_arguments = canonical_arguments;
         if let Some(deferred) = durable.deferred.as_mut() {
             deferred.extend_terminal_expiry(
-                durable
-                    .invocation
+                result
                     .finished_at_ms
                     .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms),
             );
         }
-        let result = durable.invocation.clone();
+        durable.invocation = InvocationHeader::from_record(&result);
         if artifacts.is_empty() {
             remove_if_exists(&paths.artifacts).await?;
         } else {
             write_json_atomic(&paths.artifacts, &artifacts).await?;
         }
         write_details(&paths, &result).await?;
-        durable.invocation = compact_record(&result);
         let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
         self.commit_generation().await?;
         let mut index = self.inner.index.write().await;
@@ -957,322 +671,6 @@ impl Store {
         .await
     }
 
-    pub async fn list_invocations(
-        &self,
-        workspace: Option<&Path>,
-        state: Option<InvocationState>,
-        command: Option<&BazelCommand>,
-        page: PageRequest,
-    ) -> Result<Page<InvocationRecord>, StoreError> {
-        self.refresh_index_if_stale().await?;
-        let limit = page.limit.clamp(1, 200) as usize;
-        let workspace_text = workspace.map(|path| path.to_string_lossy().into_owned());
-        let state_text = state.map(InvocationState::as_str);
-        let command_text = command.map(BazelCommand::as_str);
-        let cursor = page
-            .cursor
-            .as_deref()
-            .map(|value| {
-                InvocationCursor::decode_for(
-                    value,
-                    workspace_text.as_deref(),
-                    state_text,
-                    command_text,
-                )
-            })
-            .transpose()?;
-        let index = self.inner.index.read().await;
-        let collect = |ordered: &BTreeSet<(i64, InvocationId)>| {
-            ordered
-                .iter()
-                .rev()
-                .filter(|(requested_at_ms, id)| {
-                    cursor.as_ref().is_none_or(|cursor| {
-                        *requested_at_ms < cursor.requested_at_ms
-                            || (*requested_at_ms == cursor.requested_at_ms
-                                && id.to_string() < cursor.id)
-                    })
-                })
-                .filter_map(|(_, id)| index.entries.get(id))
-                .filter(|entry| state.is_none_or(|state| entry.record.state == state))
-                .filter(|entry| {
-                    command.is_none_or(|command| entry.record.request.command == *command)
-                })
-                .map(|entry| entry.record.clone())
-                .take(limit + 1)
-                .collect::<Vec<_>>()
-        };
-        let mut items = if let Some(workspace) = workspace {
-            index
-                .by_workspace
-                .get(workspace)
-                .map_or_else(Vec::new, collect)
-        } else {
-            collect(&index.by_requested)
-        };
-        let truncated = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = if truncated {
-            items
-                .last()
-                .map(|record| {
-                    InvocationCursor::new(
-                        workspace_text.as_deref(),
-                        state_text,
-                        command_text,
-                        record.request.requested_at_ms,
-                        record.request.id.to_string(),
-                    )
-                    .encode()
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        Ok(Page {
-            items,
-            next_cursor,
-            truncated,
-        })
-    }
-
-    pub async fn enforce_retention(
-        &self,
-        maximum_age: Duration,
-        maximum_bytes: u64,
-    ) -> Result<usize, StoreError> {
-        let Some(_maintenance) =
-            ProcessLock::try_acquire(self.cache_root.join("MAINTENANCE")).await?
-        else {
-            return Ok(0);
-        };
-        // A forced scan also repairs the narrow crash window between an
-        // atomic manifest commit and its generation notification.
-        self.refresh_index(true).await?;
-        self.recover_orphaned_invocations().await?;
-        let now_ms = bazel_mcp_types::unix_timestamp_ms();
-        self.delete_expired_deferred_results(now_ms).await?;
-        let cutoff =
-            now_ms.saturating_sub(i64::try_from(maximum_age.as_millis()).unwrap_or(i64::MAX));
-        // Running evidence can grow without metadata commits. Refresh only the
-        // bounded live set; terminal bytes remain commit-accounted, so normal
-        // GC never walks the cache tree.
-        let live_ids: Vec<_> = self
-            .inner
-            .index
-            .read()
-            .await
-            .entries
-            .iter()
-            .filter_map(|(id, entry)| (!entry.record.state.is_terminal()).then_some(*id))
-            .collect();
-        for id in live_ids {
-            let current = evidence_size(&self.paths_for_id(id)).await?;
-            let mut index = self.inner.index.write().await;
-            let previous = index.entries.get_mut(&id).and_then(|entry| {
-                if entry.record.state.is_terminal() {
-                    return None;
-                }
-                let previous = entry.retained_bytes;
-                entry.retained_bytes = current;
-                Some(previous)
-            });
-            if let Some(previous) = previous {
-                index.retained_bytes = index.retained_bytes.saturating_sub(previous);
-                index.retained_bytes = index.retained_bytes.saturating_add(current);
-            }
-        }
-        let candidates: Vec<_> = {
-            let index = self.inner.index.read().await;
-            index
-                .terminal_by_finished
-                .iter()
-                .map(|(finished, id)| (*id, *finished))
-                .collect()
-        };
-
-        let low_watermark = maximum_bytes
-            .saturating_mul(GC_LOW_WATERMARK_PERCENT)
-            .checked_div(100)
-            .unwrap_or(0);
-        let mut reclaimed = 0;
-        let mut pending_notifications = 0;
-        let mut pending_lock_cleanup = Vec::new();
-        let mut processed = BTreeSet::new();
-        for (id, finished) in &candidates {
-            if retention_age_elapsed(*finished, cutoff) {
-                self.reclaim_retention_candidate(
-                    *id,
-                    &mut reclaimed,
-                    &mut pending_notifications,
-                    &mut pending_lock_cleanup,
-                )
-                .await?;
-                processed.insert(*id);
-            }
-        }
-        if self.inner.index.read().await.retained_bytes > maximum_bytes {
-            for (id, _) in candidates {
-                if self.inner.index.read().await.retained_bytes <= low_watermark {
-                    break;
-                }
-                if processed.insert(id) {
-                    self.reclaim_retention_candidate(
-                        id,
-                        &mut reclaimed,
-                        &mut pending_notifications,
-                        &mut pending_lock_cleanup,
-                    )
-                    .await?;
-                }
-            }
-        }
-        if pending_notifications > 0 {
-            self.publish_retention_batch(&mut pending_notifications, &mut pending_lock_cleanup)
-                .await?;
-        }
-        Ok(reclaimed)
-    }
-
-    async fn reclaim_retention_candidate(
-        &self,
-        id: InvocationId,
-        reclaimed: &mut usize,
-        pending_notifications: &mut usize,
-        pending_lock_cleanup: &mut Vec<InvocationId>,
-    ) -> Result<(), StoreError> {
-        let outcome = match self.reclaim_terminal(id).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if *pending_notifications > 0 {
-                    self.publish_retention_batch(pending_notifications, pending_lock_cleanup)
-                        .await?;
-                }
-                return Err(error);
-            }
-        };
-        *reclaimed += usize::from(outcome.reclaimed);
-        if outcome.deleted {
-            pending_lock_cleanup.push(id);
-        }
-        if outcome.changed {
-            *pending_notifications += 1;
-            if *pending_notifications >= GC_GENERATION_BATCH_SIZE {
-                self.publish_retention_batch(pending_notifications, pending_lock_cleanup)
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn publish_retention_batch(
-        &self,
-        pending_notifications: &mut usize,
-        pending_lock_cleanup: &mut Vec<InvocationId>,
-    ) -> Result<(), StoreError> {
-        let generation = self.commit_generation().await;
-        let ids = std::mem::take(pending_lock_cleanup);
-        let cache_root = self.cache_root.clone();
-        tokio::task::spawn_blocking(move || {
-            for id in ids {
-                let _ = std::fs::remove_file(owner_lock_path(&cache_root, id));
-                let _ = std::fs::remove_file(mutation_lock_path(&cache_root, id));
-            }
-        })
-        .await?;
-        *pending_notifications = 0;
-        generation?;
-        Ok(())
-    }
-
-    async fn reclaim_terminal(&self, id: InvocationId) -> Result<ReclaimOutcome, StoreError> {
-        let mutation_lock = self.mutation_lock(id).await;
-        let _guard = mutation_lock.lock().await;
-        let _process_mutation =
-            ProcessLock::acquire(mutation_lock_path(&self.cache_root, id)).await?;
-        let paths = self.paths_for_id(id);
-        let (mut durable, manifest_bytes) = match read_durable(&paths.manifest).await {
-            Ok(durable) => durable,
-            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ReclaimOutcome::default());
-            }
-            Err(error) => return Err(error),
-        };
-        if !durable.invocation.state.is_terminal() {
-            return Ok(ReclaimOutcome::default());
-        }
-        let before = durable.payload_bytes.saturating_add(manifest_bytes);
-        let currently_protected = durable.deferred.as_ref().is_some_and(|deferred| {
-            !deferred.is_expired(
-                bazel_mcp_types::unix_timestamp_ms(),
-                durable.invocation.state.is_terminal(),
-            )
-        });
-        if currently_protected {
-            stage_raw_evidence(&self.cache_root, id, &paths).await?;
-            let retained_bytes = self.persist_durable(&paths, &mut durable, true).await?;
-            {
-                let mut index = self.inner.index.write().await;
-                replace_index_entry(&mut index, id, durable.index_entry(retained_bytes));
-            }
-            drop(_process_mutation);
-            // The rename and manifest update committed pruning. Unlinking the
-            // staged evidence is deliberately outside the shared index lock.
-            let _ = finish_staged_evidence(&self.cache_root, id).await;
-            return Ok(ReclaimOutcome {
-                changed: true,
-                deleted: false,
-                reclaimed: retained_bytes < before,
-            });
-        }
-        let rename_started = Instant::now();
-        if let Some(trash) = rename_to_trash(&self.cache_root, id).await? {
-            self.inner
-                .gc_rename_us
-                .fetch_add(elapsed_us(rename_started.elapsed()), Ordering::Relaxed);
-            self.inner.gc_renames.fetch_add(1, Ordering::Relaxed);
-            {
-                let index_started = Instant::now();
-                let mut index = self.inner.index.write().await;
-                remove_index_entry(&mut index, id);
-                self.inner
-                    .gc_index_write_us
-                    .fetch_add(elapsed_us(index_started.elapsed()), Ordering::Relaxed);
-            }
-            drop(_process_mutation);
-            // Rename is the deletion commit. If unlinking fails, the index
-            // stays removed and startup finishes this trash entry.
-            let unlink_started = Instant::now();
-            #[cfg(test)]
-            let unlink_result = if self
-                .inner
-                .fail_next_gc_unlink
-                .swap(false, Ordering::Relaxed)
-            {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected GC unlink failure",
-                ))
-            } else {
-                tokio::fs::remove_dir_all(trash).await
-            };
-            #[cfg(not(test))]
-            let unlink_result = tokio::fs::remove_dir_all(trash).await;
-            if unlink_result.is_ok() {
-                self.inner.gc_unlinks.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner
-                .gc_unlink_us
-                .fetch_add(elapsed_us(unlink_started.elapsed()), Ordering::Relaxed);
-            return Ok(ReclaimOutcome {
-                changed: true,
-                deleted: true,
-                reclaimed: true,
-            });
-        }
-        Ok(ReclaimOutcome::default())
-    }
-
     /// Replace the artifact sidecar outside the normal coalesced terminal path.
     /// This is retained for tests and recovery-oriented callers; production
     /// completion writes artifacts through `finish_invocation`.
@@ -1306,7 +704,7 @@ impl Store {
         filter: Option<&str>,
         page: PageRequest,
     ) -> Result<(Page<Diagnostic>, u64, u64), StoreError> {
-        let record = self.get_invocation(id).await?;
+        let record = self.get_invocation_header(id).await?;
         let items = record
             .summary
             .map_or_else(Vec::new, |summary| summary.diagnostics);
@@ -1454,7 +852,7 @@ impl Store {
         .await?
     }
 
-    async fn mutate<F>(
+    pub(crate) async fn mutate<F>(
         &self,
         id: InvocationId,
         recount_payload: bool,
@@ -1485,7 +883,7 @@ impl Store {
         Ok(())
     }
 
-    async fn ensure_invocation(&self, id: InvocationId) -> Result<(), StoreError> {
+    pub(crate) async fn ensure_invocation(&self, id: InvocationId) -> Result<(), StoreError> {
         self.refresh_index_if_stale().await?;
         if self.inner.index.read().await.entries.contains_key(&id) {
             return Ok(());
@@ -1497,17 +895,20 @@ impl Store {
         ensure_exists(&index, id)
     }
 
-    async fn read_full_invocation(&self, id: InvocationId) -> Result<InvocationRecord, StoreError> {
+    pub(crate) async fn read_hydrated_invocation(
+        &self,
+        id: InvocationId,
+    ) -> Result<HydratedInvocation, StoreError> {
         let mutation_lock = self.mutation_lock(id).await;
         let _guard = mutation_lock.lock().await;
         self.ensure_invocation(id).await?;
         let paths = self.paths_for_id(id);
         let (durable, _) = read_durable(&paths.manifest).await?;
-        let mut record = durable.invocation;
-        read_json_or_default::<InvocationDetails>(&paths.details)
-            .await?
-            .hydrate(&mut record);
-        Ok(record)
+        let details = read_json_or_default::<InvocationDetails>(&paths.details).await?;
+        Ok(HydratedInvocation {
+            header: durable.invocation,
+            details,
+        })
     }
 
     async fn read_details(&self, id: InvocationId) -> Result<InvocationDetails, StoreError> {
@@ -1518,115 +919,8 @@ impl Store {
     }
 }
 
-fn elapsed_us(duration: Duration) -> u64 {
+pub(crate) fn elapsed_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
-fn ensure_exists(index: &Index, id: InvocationId) -> Result<(), StoreError> {
-    index
-        .entries
-        .contains_key(&id)
-        .then_some(())
-        .ok_or(StoreError::NotFound(id))
-}
-
-fn insert_index_entry(index: &mut Index, id: InvocationId, entry: IndexEntry) {
-    add_secondary_indexes(index, id, &entry);
-    index.retained_bytes = index.retained_bytes.saturating_add(entry.retained_bytes);
-    index.entries.insert(id, entry);
-}
-
-fn replace_index_entry(index: &mut Index, id: InvocationId, mut entry: IndexEntry) {
-    if let Some(previous) = index.entries.remove(&id) {
-        merge_telemetry(&previous.record.metrics, &mut entry.record.metrics);
-        entry.telemetry_generation = previous.telemetry_generation;
-        entry.telemetry_flush_scheduled = previous.telemetry_flush_scheduled;
-        remove_secondary_indexes(index, id, &previous);
-        index.retained_bytes = index.retained_bytes.saturating_sub(previous.retained_bytes);
-    }
-    add_secondary_indexes(index, id, &entry);
-    index.retained_bytes = index.retained_bytes.saturating_add(entry.retained_bytes);
-    index.entries.insert(id, entry);
-}
-
-fn remove_index_entry(index: &mut Index, id: InvocationId) {
-    if let Some(entry) = index.entries.remove(&id) {
-        remove_secondary_indexes(index, id, &entry);
-        index.retained_bytes = index.retained_bytes.saturating_sub(entry.retained_bytes);
-    }
-}
-
-fn merge_index_telemetry(index: &Index, id: InvocationId, metrics: &mut InvocationMetrics) -> u64 {
-    if let Some(entry) = index.entries.get(&id) {
-        merge_telemetry(&entry.record.metrics, metrics);
-        entry.telemetry_generation
-    } else {
-        0
-    }
-}
-
-fn mark_telemetry_flushed(index: &mut Index, id: InvocationId, generation: u64) {
-    if let Some(entry) = index.entries.get_mut(&id)
-        && entry.telemetry_generation == generation
-    {
-        entry.telemetry_flush_scheduled = false;
-    }
-}
-
-fn merge_telemetry(source: &InvocationMetrics, destination: &mut InvocationMetrics) {
-    destination.model_visible_bytes = destination
-        .model_visible_bytes
-        .max(source.model_visible_bytes);
-    destination.progress_notifications = destination
-        .progress_notifications
-        .max(source.progress_notifications);
-    destination.inspect_calls = destination.inspect_calls.max(source.inspect_calls);
-}
-
-fn add_secondary_indexes(index: &mut Index, id: InvocationId, entry: &IndexEntry) {
-    let requested = (entry.record.request.requested_at_ms, id);
-    index.by_requested.insert(requested);
-    index
-        .by_workspace
-        .entry(entry.record.request.workspace.clone())
-        .or_default()
-        .insert(requested);
-    if let Some(deferred) = &entry.deferred {
-        index
-            .deferred_by_created
-            .insert((deferred.created_at_ms, id));
-    }
-    if entry.record.state.is_terminal() {
-        index
-            .terminal_by_finished
-            .insert((entry.record.finished_at_ms.unwrap_or(i64::MIN), id));
-    }
-}
-
-fn remove_secondary_indexes(index: &mut Index, id: InvocationId, entry: &IndexEntry) {
-    let requested = (entry.record.request.requested_at_ms, id);
-    index.by_requested.remove(&requested);
-    let workspace = entry.record.request.workspace.clone();
-    let remove_workspace = index
-        .by_workspace
-        .get_mut(&workspace)
-        .is_some_and(|entries| {
-            entries.remove(&requested);
-            entries.is_empty()
-        });
-    if remove_workspace {
-        index.by_workspace.remove(&workspace);
-    }
-    if let Some(deferred) = &entry.deferred {
-        index
-            .deferred_by_created
-            .remove(&(deferred.created_at_ms, id));
-    }
-    if entry.record.state.is_terminal() {
-        index
-            .terminal_by_finished
-            .remove(&(entry.record.finished_at_ms.unwrap_or(i64::MIN), id));
-    }
 }
 
 async fn persist_durable(
@@ -1675,7 +969,7 @@ async fn evidence_payload_size(paths: &InvocationPaths) -> Result<u64, StoreErro
     Ok(size)
 }
 
-async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
+pub(crate) async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
     let mut size = 0_u64;
     for path in [
         &paths.manifest,
@@ -1698,27 +992,6 @@ async fn evidence_size(paths: &InvocationPaths) -> Result<u64, StoreError> {
         }
     }
     Ok(size)
-}
-
-async fn read_durable(path: &Path) -> Result<(DurableRecord, u64), StoreError> {
-    let bytes = tokio::fs::read(path).await?;
-    let manifest_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    Ok((decode_durable(path, &bytes)?, manifest_bytes))
-}
-
-fn decode_durable(path: &Path, bytes: &[u8]) -> Result<DurableRecord, StoreError> {
-    let durable: DurableRecord =
-        serde_json::from_slice(bytes).map_err(|error| StoreError::CorruptRecord {
-            path: path.to_owned(),
-            message: error.to_string(),
-        })?;
-    if durable.schema_version != RECORD_SCHEMA_VERSION {
-        return Err(StoreError::UnsupportedRecordSchema {
-            found: durable.schema_version,
-            path: path.to_owned(),
-        });
-    }
-    Ok(durable)
 }
 
 async fn recover_trash(cache_root: &Path) -> Result<(), StoreError> {
@@ -1966,10 +1239,11 @@ async fn recover_interrupted_ids(
             recovered.push((id, durable.index_entry(retained_bytes)));
             continue;
         }
-        durable.invocation.state = InvocationState::Interrupted;
-        durable.invocation.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms());
-        durable.invocation.termination = Some(Termination::Interrupted);
-        durable.invocation.summary = Some(InvocationSummary {
+        let mut full_record = durable.invocation.clone().into_record();
+        full_record.state = InvocationState::Interrupted;
+        full_record.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms());
+        full_record.termination = Some(Termination::Interrupted);
+        full_record.summary = Some(InvocationSummary {
             success: false,
             headline: "Invocation was interrupted when the previous server stopped".into(),
             truncated: true,
@@ -1980,15 +1254,13 @@ async fn recover_interrupted_ids(
         });
         if let Some(deferred) = durable.deferred.as_mut() {
             deferred.extend_terminal_expiry(
-                durable
-                    .invocation
+                full_record
                     .finished_at_ms
                     .unwrap_or_else(bazel_mcp_types::unix_timestamp_ms),
             );
         }
-        let full_record = durable.invocation.clone();
         write_details(&paths, &full_record).await?;
-        durable.invocation = compact_record(&full_record);
+        durable.invocation = InvocationHeader::from_record(&full_record);
         let outcome = persist_durable(&paths, &mut durable, true).await?;
         recovered.push((id, durable.index_entry(outcome.retained_bytes)));
         drop(mutation);
@@ -1997,11 +1269,11 @@ async fn recover_interrupted_ids(
     Ok(recovered)
 }
 
-fn retention_age_elapsed(finished_at_ms: i64, cutoff_ms: i64) -> bool {
+pub(crate) fn retention_age_elapsed(finished_at_ms: i64, cutoff_ms: i64) -> bool {
     finished_at_ms <= cutoff_ms
 }
 
-async fn rename_to_trash(
+pub(crate) async fn rename_to_trash(
     cache_root: &Path,
     id: InvocationId,
 ) -> Result<Option<PathBuf>, StoreError> {
@@ -2018,7 +1290,7 @@ fn evidence_trash(cache_root: &Path, id: InvocationId) -> PathBuf {
     cache_root.join("trash").join(format!("{id}.evidence"))
 }
 
-async fn stage_raw_evidence(
+pub(crate) async fn stage_raw_evidence(
     cache_root: &Path,
     id: InvocationId,
     paths: &InvocationPaths,
@@ -2052,7 +1324,10 @@ async fn stage_raw_evidence(
     Ok(())
 }
 
-async fn finish_staged_evidence(cache_root: &Path, id: InvocationId) -> Result<(), StoreError> {
+pub(crate) async fn finish_staged_evidence(
+    cache_root: &Path,
+    id: InvocationId,
+) -> Result<(), StoreError> {
     match tokio::fs::remove_dir_all(evidence_trash(cache_root, id)).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -2065,7 +1340,7 @@ async fn write_details(
     record: &InvocationRecord,
 ) -> Result<(), StoreError> {
     let details = InvocationDetails::from_record(record);
-    if details.targets.is_empty() && details.tests.is_empty() && details.coverage_files.is_empty() {
+    if details.is_empty() {
         remove_if_exists(&paths.details).await
     } else {
         write_json_atomic(&paths.details, &details).await
@@ -2083,435 +1358,6 @@ where
     }
 }
 
-fn page_records<T, F>(
-    scope: &str,
-    id: InvocationId,
-    filter: Option<&str>,
-    page: PageRequest,
-    records: Vec<T>,
-    searchable: F,
-) -> Result<(Page<T>, u64, u64), StoreError>
-where
-    T: Serialize,
-    F: Fn(&T) -> String,
-{
-    let limit = page.limit.clamp(1, 100) as usize;
-    let maximum_bytes = page.max_bytes.unwrap_or(usize::MAX);
-    let invocation_id = id.to_string();
-    let after = page
-        .cursor
-        .as_deref()
-        .map(|value| OrdinalCursor::decode_for(value, scope, &invocation_id, filter))
-        .transpose()?
-        .map_or(-1, |cursor| cursor.ordinal);
-    let normalized_filter = filter.map(str::to_ascii_lowercase);
-    let total = records.len() as u64;
-    let filtered = records
-        .iter()
-        .filter(|record| {
-            normalized_filter
-                .as_ref()
-                .is_none_or(|filter| searchable(record).to_ascii_lowercase().contains(filter))
-        })
-        .count() as u64;
-    let mut selected = Vec::new();
-    let mut used_bytes = 2_usize;
-    let mut last_ordinal = None;
-    let mut truncated = false;
-    for (ordinal, record) in records.into_iter().enumerate() {
-        let ordinal = i64::try_from(ordinal).unwrap_or(i64::MAX);
-        if ordinal <= after
-            || !normalized_filter
-                .as_ref()
-                .is_none_or(|filter| searchable(&record).to_ascii_lowercase().contains(filter))
-        {
-            continue;
-        }
-        let item_bytes = serde_json::to_vec(&record)?.len();
-        let separator = usize::from(!selected.is_empty());
-        if selected.len() == limit
-            || (!selected.is_empty()
-                && used_bytes
-                    .saturating_add(separator)
-                    .saturating_add(item_bytes)
-                    > maximum_bytes)
-        {
-            truncated = true;
-            break;
-        }
-        used_bytes = used_bytes
-            .saturating_add(separator)
-            .saturating_add(item_bytes);
-        last_ordinal = Some(ordinal);
-        selected.push(record);
-    }
-    let next_cursor = if truncated {
-        last_ordinal
-            .map(|ordinal| OrdinalCursor::new(scope, &invocation_id, filter, ordinal).encode())
-            .transpose()?
-    } else {
-        None
-    };
-    Ok((
-        Page {
-            items: selected,
-            next_cursor,
-            truncated,
-        },
-        total,
-        filtered,
-    ))
-}
-
-struct QueryFilePage {
-    start_offset: u64,
-    start_ordinal: u64,
-    limit: usize,
-    maximum_bytes: usize,
-    known_total: Option<u64>,
-}
-
-fn page_query_file<F>(
-    path: &Path,
-    invocation_id: &str,
-    filter: Option<&str>,
-    request: QueryFilePage,
-    transform: F,
-) -> Result<(Page<QueryRow>, u64, u64), StoreError>
-where
-    F: Fn(&str, &mut String),
-{
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((
-                Page {
-                    items: Vec::new(),
-                    next_cursor: None,
-                    truncated: false,
-                },
-                0,
-                0,
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if filter.is_none() {
-        let total = if let Some(total) = request.known_total {
-            total
-        } else {
-            count_query_rows(&file)?
-        };
-        return page_unfiltered_query_file(file, invocation_id, request, total, transform);
-    }
-    let mut reader = BoundedLineReader::new(BufReader::new(file), QUERY_LINE_LIMIT);
-    let mut total = 0_u64;
-    let mut filtered = 0_u64;
-    let mut selected = Vec::with_capacity(request.limit);
-    let mut used_bytes = 2_usize;
-    let mut truncated = false;
-    let mut transformed = String::new();
-    let mut serialized = Vec::new();
-    while let Some(line) = reader.next_line()? {
-        total = total.saturating_add(1);
-        transform(line.value.as_ref(), &mut transformed);
-        let matches = filter.is_none_or(|filter| contains_ignore_ascii_case(&transformed, filter));
-        if matches {
-            filtered = filtered.saturating_add(1);
-            if line.start_offset >= request.start_offset && !truncated {
-                if selected.len() == request.limit {
-                    truncated = true;
-                } else {
-                    let item_bytes =
-                        serialized_query_row_len(line.ordinal, &transformed, &mut serialized)?;
-                    let separator = usize::from(!selected.is_empty());
-                    if !selected.is_empty()
-                        && used_bytes
-                            .saturating_add(separator)
-                            .saturating_add(item_bytes)
-                            > request.maximum_bytes
-                    {
-                        truncated = true;
-                    } else {
-                        used_bytes = used_bytes
-                            .saturating_add(separator)
-                            .saturating_add(item_bytes);
-                        selected.push(SelectedQueryLine {
-                            end_offset: line.end_offset,
-                            ordinal: line.ordinal,
-                            value: std::mem::take(&mut transformed),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    let next_cursor = if truncated {
-        selected
-            .last()
-            .map(|line| {
-                FileCursor::new(
-                    "query_rows",
-                    invocation_id,
-                    filter,
-                    line.end_offset,
-                    line.ordinal,
-                )
-                .encode()
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    Ok((
-        Page {
-            items: selected
-                .into_iter()
-                .map(|line| QueryRow {
-                    ordinal: line.ordinal,
-                    value: line.value,
-                })
-                .collect(),
-            next_cursor,
-            truncated,
-        },
-        total,
-        filtered,
-    ))
-}
-
-fn count_query_rows(mut file: &File) -> Result<u64, StoreError> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    file.seek(SeekFrom::Start(0))?;
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    let mut rows = 0_u64;
-    let mut saw_bytes = false;
-    let mut last_byte = b'\n';
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        saw_bytes = true;
-        last_byte = buffer[read - 1];
-        rows = rows.saturating_add(
-            u64::try_from(memchr::memchr_iter(b'\n', &buffer[..read]).count()).unwrap_or(u64::MAX),
-        );
-    }
-    if saw_bytes && last_byte != b'\n' {
-        rows = rows.saturating_add(1);
-    }
-    Ok(rows)
-}
-
-fn page_unfiltered_query_file<F>(
-    mut file: File,
-    invocation_id: &str,
-    request: QueryFilePage,
-    total: u64,
-    transform: F,
-) -> Result<(Page<QueryRow>, u64, u64), StoreError>
-where
-    F: Fn(&str, &mut String),
-{
-    use std::io::{Seek, SeekFrom};
-
-    file.seek(SeekFrom::Start(request.start_offset))?;
-    let mut reader = BoundedLineReader::with_position(
-        BufReader::new(file),
-        QUERY_LINE_LIMIT,
-        request.start_offset,
-        request.start_ordinal,
-    );
-    let mut selected = Vec::with_capacity(request.limit);
-    let mut used_bytes = 2_usize;
-    let mut truncated = false;
-    let mut transformed = String::new();
-    let mut serialized = Vec::new();
-    while let Some(line) = reader.next_line()? {
-        if selected.len() == request.limit {
-            truncated = true;
-            break;
-        }
-        transform(line.value.as_ref(), &mut transformed);
-        let item_bytes = serialized_query_row_len(line.ordinal, &transformed, &mut serialized)?;
-        let separator = usize::from(!selected.is_empty());
-        if !selected.is_empty()
-            && used_bytes
-                .saturating_add(separator)
-                .saturating_add(item_bytes)
-                > request.maximum_bytes
-        {
-            truncated = true;
-            break;
-        }
-        used_bytes = used_bytes
-            .saturating_add(separator)
-            .saturating_add(item_bytes);
-        selected.push(SelectedQueryLine {
-            end_offset: line.end_offset,
-            ordinal: line.ordinal,
-            value: std::mem::take(&mut transformed),
-        });
-    }
-    let next_cursor = if truncated {
-        selected
-            .last()
-            .map(|line| {
-                FileCursor::new(
-                    "query_rows",
-                    invocation_id,
-                    None,
-                    line.end_offset,
-                    line.ordinal,
-                )
-                .encode()
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    Ok((
-        Page {
-            items: selected
-                .into_iter()
-                .map(|line| QueryRow {
-                    ordinal: line.ordinal,
-                    value: line.value,
-                })
-                .collect(),
-            next_cursor,
-            truncated,
-        },
-        total,
-        total,
-    ))
-}
-
-#[derive(Serialize)]
-struct BorrowedQueryRow<'a> {
-    ordinal: u64,
-    value: &'a str,
-}
-
-fn serialized_query_row_len(
-    ordinal: u64,
-    value: &str,
-    buffer: &mut Vec<u8>,
-) -> Result<usize, StoreError> {
-    buffer.clear();
-    serde_json::to_writer(&mut *buffer, &BorrowedQueryRow { ordinal, value })?;
-    Ok(buffer.len())
-}
-
-fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
-    let needle = needle.as_bytes();
-    needle.is_empty()
-        || value
-            .as_bytes()
-            .windows(needle.len())
-            .any(|window| window.eq_ignore_ascii_case(needle))
-}
-
-struct BoundedLineReader<R> {
-    reader: R,
-    offset: u64,
-    ordinal: u64,
-    limit: usize,
-    value: Vec<u8>,
-}
-
-struct BoundedLine<'a> {
-    start_offset: u64,
-    end_offset: u64,
-    ordinal: u64,
-    value: Cow<'a, str>,
-}
-
-struct SelectedQueryLine {
-    end_offset: u64,
-    ordinal: u64,
-    value: String,
-}
-
-impl<R: BufRead> BoundedLineReader<R> {
-    fn new(reader: R, limit: usize) -> Self {
-        Self::with_position(reader, limit, 0, 0)
-    }
-
-    fn with_position(reader: R, limit: usize, offset: u64, ordinal: u64) -> Self {
-        Self {
-            reader,
-            offset,
-            ordinal,
-            limit,
-            value: Vec::new(),
-        }
-    }
-
-    fn next_line(&mut self) -> std::io::Result<Option<BoundedLine<'_>>> {
-        let start_offset = self.offset;
-        let ordinal = self.ordinal;
-        self.value.clear();
-        let mut saw_bytes = false;
-        loop {
-            let (consumed, newline, reached_eof) = {
-                let available = self.reader.fill_buf()?;
-                if available.is_empty() {
-                    (0, false, true)
-                } else if let Some(position) = available.iter().position(|byte| *byte == b'\n') {
-                    let consumed = position + 1;
-                    let copy = position.min(self.limit.saturating_sub(self.value.len()));
-                    self.value.extend_from_slice(&available[..copy]);
-                    (consumed, true, false)
-                } else {
-                    let consumed = available.len();
-                    let copy = consumed.min(self.limit.saturating_sub(self.value.len()));
-                    self.value.extend_from_slice(&available[..copy]);
-                    (consumed, false, false)
-                }
-            };
-            if reached_eof {
-                if !saw_bytes {
-                    return Ok(None);
-                }
-                break;
-            }
-            saw_bytes = true;
-            self.reader.consume(consumed);
-            self.offset = self
-                .offset
-                .saturating_add(u64::try_from(consumed).unwrap_or(u64::MAX));
-            if newline {
-                break;
-            }
-        }
-        if self.value.last() == Some(&b'\r') {
-            self.value.pop();
-        }
-        self.ordinal = self.ordinal.saturating_add(1);
-        Ok(Some(BoundedLine {
-            start_offset,
-            end_offset: self.offset,
-            ordinal,
-            value: String::from_utf8_lossy(&self.value),
-        }))
-    }
-}
-
-fn compact_record(record: &InvocationRecord) -> InvocationRecord {
-    let mut compact = record.clone();
-    if let Some(summary) = compact.summary.as_mut() {
-        summary.targets.clear();
-        summary.tests.clear();
-        if let Some(coverage) = summary.coverage.as_mut() {
-            coverage.files.clear();
-        }
-    }
-    compact
-}
-
 fn transition_lost_evidence(
     index: &mut Index,
     id: InvocationId,
@@ -2524,7 +1370,8 @@ fn transition_lost_evidence(
         .get(&id)
         .ok_or(StoreError::NotFound(id))?
         .record
-        .clone();
+        .clone()
+        .into_record();
     record.transition(next)?;
     record.termination = termination;
     record.summary = summary;
@@ -2532,7 +1379,7 @@ fn transition_lost_evidence(
         index,
         id,
         IndexEntry {
-            record: compact_record(&record),
+            record: InvocationHeader::from_record(&record),
             deferred: None,
             retained_bytes: 0,
             telemetry_generation: 0,
@@ -2550,12 +1397,12 @@ fn parse_id(value: &str) -> Option<InvocationId> {
     serde_json::from_str::<InvocationId>(&format!("\"{value}\"")).ok()
 }
 
-struct ProcessLock {
+pub(crate) struct ProcessLock {
     _file: File,
 }
 
 impl ProcessLock {
-    async fn acquire(path: PathBuf) -> Result<Self, StoreError> {
+    pub(crate) async fn acquire(path: PathBuf) -> Result<Self, StoreError> {
         let lock = tokio::task::spawn_blocking(move || {
             let file = open_lock_file(&path)?;
             file.lock()?;
@@ -2565,7 +1412,7 @@ impl ProcessLock {
         Ok(lock)
     }
 
-    async fn try_acquire(path: PathBuf) -> Result<Option<Self>, StoreError> {
+    pub(crate) async fn try_acquire(path: PathBuf) -> Result<Option<Self>, StoreError> {
         let lock = tokio::task::spawn_blocking(move || {
             let file = open_lock_file(&path)?;
             match file.try_lock() {
@@ -2611,11 +1458,11 @@ fn set_private_file_blocking(_path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn owner_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
+pub(crate) fn owner_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
     cache_root.join("owners").join(format!("{id}.lock"))
 }
 
-fn mutation_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
+pub(crate) fn mutation_lock_path(cache_root: &Path, id: InvocationId) -> PathBuf {
     cache_root.join("mutations").join(format!("{id}.lock"))
 }
 
@@ -2655,20 +1502,6 @@ fn write_generation(cache_root: &Path, generation: u64) -> Result<u64, StoreErro
     set_private_file_blocking(&temporary)?;
     std::fs::rename(temporary, path)?;
     Ok(generation)
-}
-
-fn merge_pending_telemetry(previous: &Index, refreshed: &mut Index) {
-    for (id, previous_entry) in &previous.entries {
-        let Some(refreshed_entry) = refreshed.entries.get_mut(id) else {
-            continue;
-        };
-        merge_telemetry(
-            &previous_entry.record.metrics,
-            &mut refreshed_entry.record.metrics,
-        );
-        refreshed_entry.telemetry_generation = previous_entry.telemetry_generation;
-        refreshed_entry.telemetry_flush_scheduled = previous_entry.telemetry_flush_scheduled;
-    }
 }
 
 #[cfg(test)]
@@ -2872,7 +1705,8 @@ mod tests {
         durable.invocation.state = InvocationState::Succeeded;
         durable.invocation.finished_at_ms = Some(bazel_mcp_types::unix_timestamp_ms() - 1);
         durable.invocation.termination = Some(Termination::Exit { code: 0 });
-        durable.invocation.summary = Some(InvocationSummary::default());
+        durable.invocation.summary =
+            Some(InvocationSummaryHeader::from(&InvocationSummary::default()));
         persist_durable(&paths, &mut durable, true).await.unwrap();
         assert_eq!(read_generation(root.path()).unwrap(), generation);
         drop(writer);
@@ -3346,6 +2180,32 @@ mod tests {
         drop(store);
 
         let reopened = Store::open(root.path()).await.unwrap();
+        let header = reopened.get_invocation_header(id).await.unwrap();
+        assert_eq!(header.summary.as_ref().unwrap().target_counts.requested, 1);
+        let hydrated = reopened.get_hydrated_invocation(id).await.unwrap();
+        assert_eq!(
+            hydrated.details.targets[0].label,
+            "//private:large-target-detail"
+        );
+        assert_eq!(
+            hydrated.details.tests[0].label,
+            "//private:large-test-detail"
+        );
+        assert_eq!(
+            hydrated.details.coverage_files[0].path,
+            "private/large-coverage-detail.rs"
+        );
+        assert_eq!(
+            reopened
+                .get_invocation(id)
+                .await
+                .unwrap()
+                .summary
+                .unwrap()
+                .targets[0]
+                .label,
+            "//private:large-target-detail"
+        );
         assert_eq!(
             reopened
                 .page_tests(id, None, PageRequest::default())

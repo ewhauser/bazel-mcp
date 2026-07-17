@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "invocation": {
+    "request": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "workspace": "/workspace",
+      "startup_arguments": [],
+      "command": "build",
+      "arguments": [],
+      "timeout_ms": null,
+      "environment": {},
+      "requested_at_ms": 1
+    },
+    "state": "queued",
+    "started_at_ms": null,
+    "finished_at_ms": null,
+    "termination": null,
+    "summary": null,
+    "metrics": {
+      "raw_output_bytes": 0,
+      "bep_bytes": 0,
+      "bep_events": 0,
+      "model_visible_bytes": 0,
+      "progress_notifications": 0,
+      "inspect_calls": 0,
+      "queue_ms": 0,
+      "output_base_lock_wait_ms": 0,
+      "bazel_wall_ms": 0,
+      "reduction_ms": 0
+    },
+    "canonical_arguments": null,
+    "cancellation_reason": null
+  },
+  "deferred": null,
+  "payload_bytes": 0
+}
