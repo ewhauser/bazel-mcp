@@ -12,10 +12,3 @@ knowledge, Bazel usage, CI or release issues, or workflow advice unrelated to
 MCP efficiency. Do not include secrets or raw sensitive output.
 
 ## Highest priority remaining
-
-1. **Return bounded context for filtered test logs.** Filtering
-   `bazel.inspect test_log` to a failing test name retained the panic header but
-   dropped the adjacent `Result` error because the continuation line did not
-   repeat the filter text. Return a small context window around matches so the
-   causal message remains visible without a targeted rerun. Thread:
-   `019f6df4-be14-75b2-8e2b-654b60a669c3`.

@@ -704,9 +704,12 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
     tokio::fs::create_dir_all(&test_directory).await.unwrap();
     let test_log = test_directory.join("test.log");
     let test_xml = test_directory.join("test.xml");
-    tokio::fs::write(&test_log, "setup\npkg/failing_test.go:42: got 1, want 2\n")
-        .await
-        .unwrap();
+    tokio::fs::write(
+        &test_log,
+        "setup\npkg/failing_test.go:42: got 1, want 2\ncaused by adjacent detail token=SUPERSECRET\n",
+    )
+    .await
+    .unwrap();
     tokio::fs::write(
         &test_xml,
         r#"<testsuites><testsuite><testcase name="failing_case" time="0.01"><failure message="expected true"/></testcase></testsuite></testsuites>"#,
@@ -732,7 +735,10 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
         bep.display(),
         failed_once.display(),
     );
-    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+    let service = configured_service(&root, &workspace, &script, |config| {
+        config.policy.redaction_patterns = vec![r"token=[^\s]+".to_owned()];
+    })
+    .await;
 
     let failed = service
         .run(InvocationRequest::new(
@@ -788,6 +794,29 @@ async fn failed_test_logs_are_snapshotted_and_retrieved_without_a_public_uri() {
         panic!("test-log inspection returned a different payload type");
     };
     assert!(items.iter().any(|item| item.contains("got 1, want 2")));
+
+    let contextual = service
+        .inspect(InspectRequest {
+            invocation_id: Some(failed.request.id),
+            workspace: None,
+            state: None,
+            command: None,
+            view: InspectView::TestLog,
+            cursor: None,
+            filter: Some("got 1, want 2".into()),
+            item_limit: 20,
+            scan_limit: 10_000,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        contextual.items,
+        InspectPayload::TestLog(vec![
+            "[//pkg:failing] setup".to_owned(),
+            "[//pkg:failing] pkg/failing_test.go:42: got 1, want 2".to_owned(),
+            "[//pkg:failing] caused by adjacent detail [REDACTED]".to_owned(),
+        ])
+    );
 
     let failed_paths = service.test_support().paths_for(&failed);
     let retained_before = tokio::fs::read(&failed_paths.test_logs_raw).await.unwrap();

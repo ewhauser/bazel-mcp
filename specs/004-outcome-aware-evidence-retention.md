@@ -197,7 +197,10 @@ bounded fallback tail, and opaque forward pagination apply before return.
 The `test_log` view uses the same public string shape. Complete failed-test logs
 are first copied into private invocation storage so a later Bazel invocation
 cannot mutate prior evidence. Redacted line records provide bounded filtering
-and pagination; missing, remote, rejected-by-containment, and expired evidence
+and pagination. A literal line match includes one redacted line of same-target
+context on either side; overlapping windows merge in source order, and every
+context line consumes the ordinary item and byte budgets. Missing, remote,
+rejected-by-containment, and expired evidence
 have explicit reasons.
 
 ## Default retention policy
