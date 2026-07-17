@@ -1,0 +1,16 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:undefined_reference (92 packages loaded, 538 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:27:10: Linking cases/undefined_reference failed: (Exit 1): cc_wrapper.sh failed: error executing CppLink command (from cc_binary rule target //cases:undefined_reference) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh @bazel-out/darwin_arm64-fastbuild/bin/cases/undefined_reference-0.params
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+Undefined symbols for architecture arm64:
+  "calculate_invoice_total(int)", referenced from:
+      _main in undefined_reference.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 11.978s, Critical Path: 0.26s
+INFO: 10 processes: 9 internal, 1 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

@@ -1,0 +1,76 @@
+{
+  "event_count": 63,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: 'invoice/does_not_exist.h' file not found",
+    "targets": [
+      {
+        "label": "//cases:missing_header",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "'invoice/does_not_exist.h' file not found",
+        "location": {
+          "path": "cases/missing_header.cc",
+          "line": 1,
+          "column": 10
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:18:10: Compiling cases/missing_header.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from cc_binary rule target //cases:missing_header) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 30 arguments skipped)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "CppCompile action failed with exit code 1",
+        "location": null,
+        "target": "//cases:missing_header",
+        "action": "CppCompile",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

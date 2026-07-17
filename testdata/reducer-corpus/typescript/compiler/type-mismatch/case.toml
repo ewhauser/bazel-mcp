@@ -1,0 +1,41 @@
+schema_version = 1
+id = "typescript/compiler/type-mismatch"
+workspace = "examples/node"
+command = "build"
+args = ["//cases:typescript_failure"]
+tags = ["typescript", "compiler", "fast"]
+platforms = ["linux", "macos"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "TS2322"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "compilation"
+message_contains = "TS2322"
+path = "cases/type_failure.ts"
+line = 5
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "TypeScript compiler"
+tool_version = "5.9.3"
+
+[provenance.rules]
+aspect_rules_js = "3.2.3"
+rules_nodejs = "6.7.3"

@@ -1,0 +1,8 @@
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rust_test(
+    name = "assertion_failure",
+    srcs = ["assertion_failure.rs"],
+    edition = "2021",
+    tags = ["manual", "reducer-fixture"],
+)

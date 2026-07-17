@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "case": "java/compiler/missing-symbol",
+  "workspace": "examples/jvm",
+  "command": "build",
+  "args": [
+    "--java_runtime_version=remotejdk_21",
+    "--tool_java_runtime_version=remotejdk_21",
+    "//cases:compile_failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "javac",
+  "tool_version": "remotejdk_25",
+  "rules": {
+    "rules_java": "9.7.0"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}

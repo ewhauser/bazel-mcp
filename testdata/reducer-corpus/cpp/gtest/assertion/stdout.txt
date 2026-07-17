@@ -1,0 +1,26 @@
+==================== Test output for //cases:gtest_assertion:
+Running main() from gmock_main.cc
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from InvoiceTest
+[ RUN      ] InvoiceTest.IncludesServiceFee
+cases/assertion_failure_test.cc:8: Failure
+Expected equality of these values:
+  CalculateInvoiceTotal(40, 2)
+    Which is: 42
+  41
+invoice total should include the service fee
+
+[  FAILED  ] InvoiceTest.IncludesServiceFee (0 ms)
+[----------] 1 test from InvoiceTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 0 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] InvoiceTest.IncludesServiceFee
+
+ 1 FAILED TEST
+================================================================================
+
+Executed 1 out of 1 test: 1 fails locally.

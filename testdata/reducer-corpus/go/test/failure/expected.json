@@ -1,0 +1,91 @@
+{
+  "event_count": 72,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: invoice total mismatch: got 41, want 42",
+    "targets": [
+      {
+        "label": "//cases:test_failure",
+        "success": true
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 1,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "invoice total mismatch: got 41, want 42",
+        "location": {
+          "path": "invoice_test.go",
+          "line": 9,
+          "column": null
+        },
+        "target": "//cases:test_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test failed: //cases:test_failure",
+        "location": null,
+        "target": "//cases:test_failure",
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [
+      {
+        "label": "//cases:test_failure",
+        "status": "failed",
+        "duration_ms": null,
+        "attempts": 1,
+        "shard": null,
+        "cases": [],
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
+      }
+    ],
+    "test_counts": {
+      "passed": 0,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": "test_log"
+  },
+  "artifacts": [
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/6c5345c092650180744a439250ce7615/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/test_failure/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/6c5345c092650180744a439250ce7615/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/test_failure/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/cases/test_failure_/test_failure",
+      "kind": "file",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/6c5345c092650180744a439250ce7615/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/test_failure_/test_failure",
+      "size_bytes": 3063346,
+      "locally_available": true
+    }
+  ]
+}

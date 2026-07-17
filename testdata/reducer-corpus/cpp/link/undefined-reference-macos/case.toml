@@ -1,0 +1,40 @@
+schema_version = 1
+id = "cpp/link/undefined-reference-macos"
+workspace = "examples/cpp"
+command = "build"
+args = ["//cases:undefined_reference"]
+tags = ["cpp", "linker", "fast"]
+platforms = ["macos"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "calculate_invoice_total"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "compilation"
+message_contains = "calculate_invoice_total"
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "Apple ld"
+tool_version = "platform-default"
+origin_repository = "https://github.com/google/googletest"
+origin_commit = "a25f43576effe4ebe887412a603cddfa8fc3ba64"
+
+[provenance.rules]
+rules_cc = "0.2.22"

@@ -1,0 +1,8 @@
+load("@rules_java//java:defs.bzl", "java_binary")
+
+java_binary(
+    name = "success",
+    srcs = ["Success.java"],
+    main_class = "invoice.Success",
+    visibility = ["//visibility:public"],
+)

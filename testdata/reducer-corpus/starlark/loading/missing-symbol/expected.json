@@ -1,0 +1,93 @@
+{
+  "event_count": 13,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: Error: file ':defs.bzl' does not contain symbol 'missing_rule'",
+    "targets": [],
+    "target_counts": {
+      "requested": 0,
+      "succeeded": 0,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "loading",
+        "message": "Error: file ':defs.bzl' does not contain symbol 'missing_rule'",
+        "location": {
+          "path": "cases/loading/BUILD.bazel",
+          "line": 1,
+          "column": 20
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "Error: file ':defs.bzl' does not contain symbol 'missing_rule'",
+        "location": {
+          "path": "cases/loading/BUILD.bazel",
+          "line": 1,
+          "column": null
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "loading",
+        "message": "no such target '//cases/loading:failure': target 'failure' not declared in package 'cases/loading' defined by <WORKSPACE>______________________________________________________/cases/loading/BUILD.bazel",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "loading",
+        "message": "ERROR: Skipping '//cases/loading:failure': no such target '//cases/loading:failure': target 'failure' not declared in package 'cases/loading' defined by <WORKSPACE>/cases/loading/BUILD.bazel",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "loading",
+        "message": "ERROR: no such target '//cases/loading:failure': target 'failure' not declared in package 'cases/loading' defined by <WORKSPACE>/cases/loading/BUILD.bazel",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

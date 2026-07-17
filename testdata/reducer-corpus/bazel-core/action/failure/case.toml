@@ -1,0 +1,43 @@
+schema_version = 1
+id = "bazel-core/action/failure"
+workspace = "examples/bazel-core"
+command = "build"
+args = ["//cases:action_failure"]
+tags = ["bazel-core", "action", "fast", "live-smoke"]
+platforms = ["linux", "macos"]
+timeout_seconds = 120
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "BAZEL_MCP_ACTION_ROOT_CAUSE"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+message_contains = "BAZEL_MCP_ACTION_ROOT_CAUSE"
+
+[[expect.diagnostics]]
+severity = "error"
+category = "action"
+message_contains = "action failed"
+target = "//cases:action_failure"
+action = "ReducerFixtureFailure"
+repetition_count = 1
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "Bazel"
+tool_version = "9.2.0"
+
+[provenance.rules]
+bazel = "9.2.0"

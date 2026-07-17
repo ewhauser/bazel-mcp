@@ -1,0 +1,18 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:type_mismatch (92 packages loaded, 538 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:9:10: Compiling cases/type_mismatch.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from cc_binary rule target //cases:type_mismatch) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 30 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+cases/type_mismatch.cc:5:7: error: no viable conversion from 'std::string' (aka 'basic_string<char>') to 'int'
+    5 |   int invoice_total = currency;
+      |       ^               ~~~~~~~~
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1/string:1216:55: note: candidate function
+ 1216 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 operator __self_view() const _NOEXCEPT {
+      |                                                       ^
+1 error generated.
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 12.043s, Critical Path: 0.29s
+INFO: 9 processes: 9 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

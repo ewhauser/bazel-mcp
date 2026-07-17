@@ -1,0 +1,43 @@
+schema_version = 1
+id = "go/test/failure"
+issue = 48
+workspace = "examples/go"
+command = "test"
+args = ["//cases:test_failure"]
+tags = ["go", "test-log", "fast"]
+platforms = ["linux", "macos", "windows"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+test_target = "//cases:test_failure"
+
+[evidence]
+test_logs = ["test.log"]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 3
+headline_contains = "invoice total mismatch"
+inspect_hint = "test_log"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+message_contains = "invoice total mismatch: got 41, want 42"
+path = "invoice_test.go"
+line = 9
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "go test"
+tool_version = "1.23.4"
+
+[provenance.rules]
+rules_go = "0.61.1"

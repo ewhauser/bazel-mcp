@@ -1,0 +1,45 @@
+schema_version = 1
+id = "bazel-core/action/fanout"
+workspace = "examples/bazel-core"
+command = "build"
+args = ["--keep_going", "//cases:fanout_one", "//cases:fanout_two"]
+tags = ["bazel-core", "action", "fanout", "fast"]
+platforms = ["linux", "macos"]
+timeout_seconds = 120
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "BAZEL_MCP_FANOUT_ROOT_CAUSE"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+message_contains = "BAZEL_MCP_FANOUT_ROOT_CAUSE_ONE"
+
+[[expect.diagnostics]]
+message_contains = "BAZEL_MCP_FANOUT_ROOT_CAUSE_TWO"
+
+[[expect.diagnostics]]
+severity = "error"
+category = "action"
+message_contains = "action failed"
+action = "ReducerFixtureFailure"
+repetition_count = 2
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "Bazel"
+tool_version = "9.2.0"
+
+[provenance.rules]
+bazel = "9.2.0"

@@ -1,0 +1,44 @@
+schema_version = 1
+id = "javascript/syntax/failure"
+workspace = "examples/node"
+command = "test"
+args = ["//cases:syntax_failure"]
+tags = ["javascript", "syntax", "test-log", "fast"]
+platforms = ["linux", "macos", "windows"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+test_target = "//cases:syntax_failure"
+
+[evidence]
+test_logs = ["test.log"]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 3
+headline_contains = "SyntaxError"
+inspect_hint = "test_log"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "test"
+message_contains = "SyntaxError"
+path = "cases/syntax_failure.js"
+target = "//cases:syntax_failure"
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "Node.js"
+tool_version = "24.12.0"
+
+[provenance.rules]
+aspect_rules_js = "3.2.3"
+rules_nodejs = "6.7.3"

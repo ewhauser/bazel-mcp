@@ -1,0 +1,6 @@
+==================== Test output for //cases:runtime_assertion:
+Exception in thread "main" java.lang.AssertionError: invoice total mismatch: expected 42 but was 41
+	at invoice.RuntimeAssertion.main(RuntimeAssertion.java:5)
+================================================================================
+
+Executed 1 out of 1 test: 1 fails locally.

@@ -1,0 +1,12 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:syntax_failure (96 packages loaded, 1408 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:3:14: Generating Descriptor Set proto_library //cases:syntax_failure failed: (Exit 1): protoc failed: error executing GenProtoDescriptorSet command (from proto_library rule target //cases:syntax_failure) external/protobuf++protoc+prebuilt_protoc.osx_aarch_64/bin/protoc '--descriptor_set_out=bazel-out/darwin_arm64-fastbuild/bin/cases/syntax_failure-descriptor-set.proto.bin' -I. ... (remaining 8 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+cases/syntax_failure.proto:5:1: Expected ";".
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 11.220s, Critical Path: 0.22s
+INFO: 3 processes: 2 internal, 1 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

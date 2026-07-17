@@ -1,0 +1,14 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:compile_failure (103 packages loaded, 3900 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:3:13: Building cases/libcompile_failure.jar (1 source file) failed: (Exit 1): java failed: error executing Javac command (from java_library rule target //cases:compile_failure) external/rules_java++toolchains+remotejdk25_macos_aarch64/bin/java '--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED' '--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED' ... (remaining 19 arguments skipped)
+cases/MissingSymbol.java:5: error: cannot find symbol
+    return MissingInvoiceCalculator.calculate(40);
+           ^
+  symbol:   variable MissingInvoiceCalculator
+  location: class MissingSymbol
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 26.938s, Critical Path: 3.48s
+INFO: 4 processes: 2 internal, 2 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

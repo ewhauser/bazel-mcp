@@ -1,0 +1,98 @@
+{
+  "event_count": 66,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: ModuleNotFoundError: No module named 'invoice_currency'",
+    "targets": [
+      {
+        "label": "//cases:import_failure",
+        "success": true
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 1,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "ModuleNotFoundError: No module named 'invoice_currency'",
+        "location": {
+          "path": "cases/import_failure.py",
+          "line": 1,
+          "column": null
+        },
+        "target": "//cases:import_failure",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test failed: //cases:import_failure",
+        "location": null,
+        "target": "//cases:import_failure",
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [
+      {
+        "label": "//cases:import_failure",
+        "status": "failed",
+        "duration_ms": null,
+        "attempts": 1,
+        "shard": null,
+        "cases": [],
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
+      }
+    ],
+    "test_counts": {
+      "passed": 0,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": "test_log"
+  },
+  "artifacts": [
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/import_failure/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/import_failure/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/cases/import_failure",
+      "kind": "file",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/import_failure",
+      "size_bytes": 27481,
+      "locally_available": true
+    },
+    {
+      "name": "cases/import_failure.py",
+      "kind": "file",
+      "uri": "file://<WORKSPACE>____________________________________________________/cases/import_failure.py",
+      "size_bytes": 71,
+      "locally_available": true
+    }
+  ]
+}

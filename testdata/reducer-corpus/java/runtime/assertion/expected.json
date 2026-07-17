@@ -1,0 +1,98 @@
+{
+  "event_count": 74,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: java.lang.AssertionError: invoice total mismatch: expected 42 but was 41",
+    "targets": [
+      {
+        "label": "//cases:runtime_assertion",
+        "success": true
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 1,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "java.lang.AssertionError: invoice total mismatch: expected 42 but was 41",
+        "location": {
+          "path": "invoice/RuntimeAssertion.java",
+          "line": 5,
+          "column": null
+        },
+        "target": "//cases:runtime_assertion",
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "test",
+        "message": "Test failed: //cases:runtime_assertion",
+        "location": null,
+        "target": "//cases:runtime_assertion",
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [
+      {
+        "label": "//cases:runtime_assertion",
+        "status": "failed",
+        "duration_ms": null,
+        "attempts": 1,
+        "shard": null,
+        "cases": [],
+        "test_log_available": false,
+        "test_log_unavailable_reason": "test_log_not_snapshotted"
+      }
+    ],
+    "test_counts": {
+      "passed": 0,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": "test_log"
+  },
+  "artifacts": [
+    {
+      "name": "test.log",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/5091202ae2e1bc3b68669952f672a9ae/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/runtime_assertion/test.log",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "test.xml",
+      "kind": "test_log",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/5091202ae2e1bc3b68669952f672a9ae/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/runtime_assertion/test.xml",
+      "size_bytes": 0,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/cases/runtime_assertion",
+      "kind": "file",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/5091202ae2e1bc3b68669952f672a9ae/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/runtime_assertion",
+      "size_bytes": 14106,
+      "locally_available": true
+    },
+    {
+      "name": "bazel-out/darwin_arm64-fastbuild/bin/cases/runtime_assertion.jar",
+      "kind": "file",
+      "uri": "file://<RUNTIME_ROOT>________________________________________________________________________/bazel/5091202ae2e1bc3b68669952f672a9ae/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/cases/runtime_assertion.jar",
+      "size_bytes": 922,
+      "locally_available": true
+    }
+  ]
+}

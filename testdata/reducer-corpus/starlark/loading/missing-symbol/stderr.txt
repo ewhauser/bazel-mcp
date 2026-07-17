@@ -1,0 +1,13 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+ERROR: Traceback (most recent call last):
+	File "<WORKSPACE>/cases/loading/BUILD.bazel", line 1, column 20, in <toplevel>
+		load(":defs.bzl", "missing_rule")
+Error: file ':defs.bzl' does not contain symbol 'missing_rule'
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//cases/loading:failure': no such target '//cases/loading:failure': target 'failure' not declared in package 'cases/loading' defined by <WORKSPACE>/cases/loading/BUILD.bazel
+ERROR: no such target '//cases/loading:failure': target 'failure' not declared in package 'cases/loading' defined by <WORKSPACE>/cases/loading/BUILD.bazel
+INFO: Elapsed time: 5.236s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

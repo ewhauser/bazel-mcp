@@ -1,0 +1,25 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+DEBUG: <RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/external/rules_python+/python/private/py_executable.bzl:1498:14:
+======================================================================
+WARNING: Target @@//cases:traceback_failure is using implicit __init__.py creation.
+  This diabolic behavior is deprecated and will be disabled by default in a
+  future release.
+  See https://github.com/bazel-contrib/rules_python/issues/2945
+
+  Ensure all __init__.py files are explicitly created and
+  added to the srcs or deps of your targets.
+
+  Disable implicit creation by setting:
+    legacy_create_init = 0
+  on the target, or globally by setting:
+    --incompatible_default_to_explicit_init_py
+======================================================================
+INFO: Analyzed target //cases:traceback_failure (96 packages loaded, 2990 targets configured).
+FAIL: //cases:traceback_failure (Exit 1) (see <RUNTIME_ROOT>/bazel/cd5afd9c5a4d4ad87fe931e4f87c3468/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/traceback_failure/test.log)
+INFO: From Testing //cases:traceback_failure:
+INFO: Found 1 test target...
+INFO: Elapsed time: 11.888s, Critical Path: 1.09s
+INFO: 13 processes: 11 internal, 3 darwin-sandbox.
+INFO: Build completed, 1 test FAILED, 13 total actions
+INFO: Build Event Protocol files produced successfully.

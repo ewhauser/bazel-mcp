@@ -1,0 +1,3 @@
+load(":defs.bzl", "missing_rule")
+
+missing_rule(name = "failure")

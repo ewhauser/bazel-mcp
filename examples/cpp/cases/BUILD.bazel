@@ -1,0 +1,54 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+cc_binary(
+    name = "success",
+    srcs = ["success.cc"],
+)
+
+cc_binary(
+    name = "type_mismatch",
+    srcs = ["type_mismatch.cc"],
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+)
+
+cc_binary(
+    name = "missing_header",
+    srcs = ["missing_header.cc"],
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+)
+
+cc_binary(
+    name = "undefined_reference",
+    srcs = ["undefined_reference.cc"],
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+)
+
+cc_test(
+    name = "gtest_assertion",
+    srcs = ["assertion_failure_test.cc"],
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+    deps = ["@googletest//:gtest_main"],
+)
+
+cc_test(
+    name = "gtest_exception",
+    srcs = ["runtime_exception_test.cc"],
+    tags = [
+        "manual",
+        "reducer-fixture",
+    ],
+    deps = ["@googletest//:gtest_main"],
+)

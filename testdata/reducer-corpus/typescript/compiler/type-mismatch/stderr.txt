@@ -1,0 +1,14 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+DEBUG: <RUNTIME_ROOT>/bazel/feb5f1499fa827d25b9c36ce25bc0fad/external/aspect_tools_telemetry+/extension.bzl:167:14: Aspect Telemetry is uploading ruleset usage data now and on future builds, pursuant to the https://aspect.build/privacy-policy.
+
+See https://github.com/aspect-build/tools_telemetry for details and opt-out instructions.
+INFO: Analyzed target //cases:typescript_failure (98 packages loaded, 5555 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:15:8: Executing genrule //cases:typescript_failure failed: (Exit 2): bash failed: error executing Genrule command (from genrule rule target //cases:typescript_failure) /bin/bash -c ... (remaining 1 argument skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 14.544s, Critical Path: 1.14s
+INFO: 2 processes: 2 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

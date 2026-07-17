@@ -1,0 +1,46 @@
+schema_version = 1
+id = "cpp/gtest/exception"
+workspace = "examples/cpp"
+command = "test"
+args = ["//cases:gtest_exception"]
+tags = ["cpp", "gtest", "test-log", "fast"]
+platforms = ["linux", "macos"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+test_target = "//cases:gtest_exception"
+
+[evidence]
+test_logs = ["test.log"]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 3
+headline_contains = "InvoiceTest.RejectsMissingCurrency"
+inspect_hint = "test_log"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "test"
+message_contains = "invoice currency was not configured"
+target = "//cases:gtest_exception"
+
+[expect.absent]
+message_contains = ["unknown file", "Test failed: target"]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "GoogleTest"
+tool_version = "1.17.0.bcr.2"
+origin_repository = "https://github.com/google/googletest"
+origin_commit = "a25f43576effe4ebe887412a603cddfa8fc3ba64"
+
+[provenance.rules]
+googletest = "1.17.0.bcr.2"
+rules_cc = "0.2.22"

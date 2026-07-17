@@ -1,0 +1,72 @@
+{
+  "event_count": 27,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: ERROR: BAZEL_MCP_ACTION_ROOT_CAUSE",
+    "targets": [
+      {
+        "label": "//cases:action_failure",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: BAZEL_MCP_ACTION_ROOT_CAUSE",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:16: Running reducer fixture //cases:action_failure failed: (Exit 1): bash failed: error executing ReducerFixtureFailure command (from fixture_failure rule target //cases:action_failure) /bin/bash -c 'echo '\\''ERROR: BAZEL_MCP_ACTION_ROOT_CAUSE'\\'' >&2; exit 1'",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "ReducerFixtureFailure action failed with exit code 1",
+        "location": null,
+        "target": "//cases:action_failure",
+        "action": "ReducerFixtureFailure",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

@@ -1,0 +1,76 @@
+{
+  "event_count": 71,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: cannot use \"USD\" (untyped string constant) as int value in return statement",
+    "targets": [
+      {
+        "label": "//cases:compile_failure",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "cannot use \"USD\" (untyped string constant) as int value in return statement",
+        "location": {
+          "path": "cases/compile_failure.go",
+          "line": 4,
+          "column": 9
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/BUILD.bazel:3:11: GoCompilePkg cases/compile_failure.a failed: (Exit 1): builder failed: error executing GoCompilePkg command (from go_library rule target //cases:compile_failure) bazel-out/darwin_arm64-opt-exec/bin/external/rules_go++go_sdk+main___download_0_darwin_arm64/builder_reset/builder compilepkg -sdk external/rules_go++go_sdk+main___download_0_darwin_arm64 -goroot ... (remaining 27 arguments skipped)",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "GoCompilePkg action failed with exit code 1",
+        "location": null,
+        "target": "//cases:compile_failure",
+        "action": "GoCompilePkg",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

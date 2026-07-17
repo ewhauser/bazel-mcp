@@ -1,0 +1,5 @@
+filegroup(
+    name = "visibility_failure",
+    srcs = ["//private:secret"],
+    tags = ["manual", "reducer-fixture"],
+)

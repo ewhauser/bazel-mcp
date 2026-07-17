@@ -1,0 +1,13 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:compile_failure (103 packages loaded, 8786 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:3:11: GoCompilePkg cases/compile_failure.a failed: (Exit 1): builder failed: error executing GoCompilePkg command (from go_library rule target //cases:compile_failure) bazel-out/darwin_arm64-opt-exec/bin/external/rules_go++go_sdk+main___download_0_darwin_arm64/builder_reset/builder compilepkg -sdk external/rules_go++go_sdk+main___download_0_darwin_arm64 -goroot ... (remaining 27 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+cases/compile_failure.go:4:9: cannot use "USD" (untyped string constant) as int value in return statement
+compilepkg: error running subcommand external/rules_go++go_sdk+main___download_0_darwin_arm64/pkg/tool/darwin_arm64/compile: exit status 2
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 37.688s, Critical Path: 13.35s
+INFO: 9 processes: 7 internal, 2 darwin-sandbox.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

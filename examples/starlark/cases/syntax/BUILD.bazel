@@ -1,0 +1,3 @@
+load(":defs.bzl", "broken_rule")
+
+broken_rule(name = "failure")

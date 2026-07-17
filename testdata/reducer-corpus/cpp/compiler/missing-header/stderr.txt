@@ -1,0 +1,15 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+INFO: Analyzed target //cases:missing_header (92 packages loaded, 538 targets configured).
+ERROR: <WORKSPACE>/cases/BUILD.bazel:18:10: Compiling cases/missing_header.cc failed: (Exit 1): cc_wrapper.sh failed: error executing CppCompile command (from cc_binary rule target //cases:missing_header) external/rules_cc++cc_configure_extension+local_config_cc/cc_wrapper.sh -U_FORTIFY_SOURCE -fstack-protector -Wall -Wthread-safety -Wself-assign -Wunused-but-set-parameter -Wno-free-nonheap-object ... (remaining 30 arguments skipped)
+
+Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging
+cases/missing_header.cc:1:10: fatal error: 'invoice/does_not_exist.h' file not found
+    1 | #include "invoice/does_not_exist.h"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~
+1 error generated.
+Use --verbose_failures to see the command lines of failed build steps.
+INFO: Elapsed time: 11.928s, Critical Path: 0.16s
+INFO: 9 processes: 9 internal.
+ERROR: Build did NOT complete successfully
+INFO: Build Event Protocol files produced successfully.

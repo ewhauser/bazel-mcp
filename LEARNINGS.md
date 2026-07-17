@@ -113,3 +113,16 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   `test.log`, leaving the initial response at the failed target or `unknown
   file: Failure`; reduce the bounded gtest failure block into one test-scoped
   diagnostic. Thread: `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- JavaScript test-log promotion retained the same Node exception twice, once
+  with its application location and once without it; deduplicate equivalent
+  test-scoped diagnostics in favor of the located form to preserve item and
+  byte budget. Thread: `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Starlark and Bazel analysis recordings produced an empty analysis diagnostic
+  beside the actionable failure, consuming model-visible item budget; discard
+  empty reducer messages before ranking and serialization. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.
+- Recorded BEP strings used fixed-length uppercase workspace markers while
+  service locations used lowercase markers, complicating live/replay parity and
+  leaking padding into visible messages; normalize both marker forms before
+  projecting diagnostics and artifact URIs. Thread:
+  `019f6b89-e945-78a0-9264-a6ad416905a1`.

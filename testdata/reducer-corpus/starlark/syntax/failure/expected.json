@@ -1,0 +1,89 @@
+{
+  "event_count": 13,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: syntax error at ':': expected )",
+    "targets": [],
+    "target_counts": {
+      "requested": 0,
+      "succeeded": 0,
+      "failed": 0
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "loading",
+        "message": "syntax error at ':': expected )",
+        "location": {
+          "path": "cases/syntax/defs.bzl",
+          "line": 1,
+          "column": 17
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "loading",
+        "message": "error loading package 'cases/syntax': compilation of module 'cases/syntax/defs.bzl' failed",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: <WORKSPACE>/cases/syntax/defs.bzl:3:1: expected an indented block",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Skipping '//cases/syntax:failure': error loading package 'cases/syntax': compilation of module 'cases/syntax/defs.bzl' failed",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: error loading package 'cases/syntax': compilation of module 'cases/syntax/defs.bzl' failed",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "ERROR: Build did NOT complete successfully",
+        "location": null,
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}

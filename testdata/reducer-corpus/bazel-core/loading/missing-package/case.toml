@@ -1,0 +1,38 @@
+schema_version = 1
+id = "bazel-core/loading/missing-package"
+workspace = "examples/bazel-core"
+command = "build"
+args = ["//missing_package:target"]
+tags = ["bazel-core", "loading", "fast"]
+platforms = ["any"]
+timeout_seconds = 120
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "missing_package"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "loading"
+message_contains = "missing_package"
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "Bazel"
+tool_version = "9.2.0"
+
+[provenance.rules]
+bazel = "9.2.0"

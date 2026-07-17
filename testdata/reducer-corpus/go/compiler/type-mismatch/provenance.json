@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "case": "go/compiler/type-mismatch",
+  "workspace": "examples/go",
+  "command": "build",
+  "args": [
+    "//cases:compile_failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Go compiler",
+  "tool_version": "1.23.4",
+  "rules": {
+    "rules_go": "0.61.1"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}

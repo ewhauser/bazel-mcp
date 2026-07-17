@@ -1,0 +1,61 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "bazel_mcp_reducer_cases",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/main.rs"]),
+    crate_name = "bazel_mcp_reducer_cases",
+    deps = [
+        "//crates/bazel-mcp-bep:bazel_mcp_bep",
+        "//crates/bazel-mcp-reducer:bazel_mcp_reducer",
+        "//crates/bazel-mcp-store:bazel_mcp_store",
+        "//crates/bazel-mcp-types:bazel_mcp_types",
+    ] + all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+rust_binary(
+    name = "reducer-cases",
+    srcs = ["src/main.rs"],
+    crate_name = "reducer_cases",
+    deps = [":bazel_mcp_reducer_cases"] + all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "unit_test",
+    crate = ":bazel_mcp_reducer_cases",
+    size = "small",
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "corpus_test",
+    srcs = ["tests/corpus.rs"],
+    data = [
+        "//testdata:reducer_corpus",
+        "//testdata:reducer_corpus_marker",
+    ],
+    env = {
+        "REDUCER_CORPUS_MARKER": "$(rootpath //testdata:reducer_corpus_marker)",
+    },
+    size = "small",
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/bazel-mcp-reducer-cases",
+    },
+    deps = [":bazel_mcp_reducer_cases"] + all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ),
+)

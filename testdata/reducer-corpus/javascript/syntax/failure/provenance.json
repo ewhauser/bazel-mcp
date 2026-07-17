@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "case": "javascript/syntax/failure",
+  "workspace": "examples/node",
+  "command": "test",
+  "args": [
+    "//cases:syntax_failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Node.js",
+  "tool_version": "24.12.0",
+  "rules": {
+    "aspect_rules_js": "3.2.3",
+    "rules_nodejs": "6.7.3"
+  },
+  "origin_repository": null,
+  "origin_commit": null
+}

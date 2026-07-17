@@ -1,0 +1,3 @@
+module(name = "bazel_mcp_reducer_jvm_examples")
+
+bazel_dep(name = "rules_java", version = "9.7.0")

@@ -1,0 +1,40 @@
+schema_version = 1
+id = "java/compiler/missing-symbol"
+workspace = "examples/jvm"
+command = "build"
+args = ["--java_runtime_version=remotejdk_21", "--tool_java_runtime_version=remotejdk_21", "//cases:compile_failure"]
+tags = ["java", "compiler", "fast"]
+platforms = ["linux", "macos", "windows"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "MissingInvoiceCalculator"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "compilation"
+message_contains = "MissingInvoiceCalculator"
+path = "cases/MissingSymbol.java"
+line = 5
+
+[expect.absent]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "javac"
+tool_version = "remotejdk_25"
+
+[provenance.rules]
+rules_java = "9.7.0"

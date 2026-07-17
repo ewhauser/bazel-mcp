@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "case": "starlark/loading/missing-symbol",
+  "workspace": "examples/starlark",
+  "command": "build",
+  "args": [
+    "//cases/loading:failure"
+  ],
+  "bazel_version": "9.2.0",
+  "platform": "macos",
+  "architecture": "aarch64",
+  "tool": "Bazel Starlark loader",
+  "tool_version": "9.2.0",
+  "rules": {},
+  "origin_repository": null,
+  "origin_commit": null
+}

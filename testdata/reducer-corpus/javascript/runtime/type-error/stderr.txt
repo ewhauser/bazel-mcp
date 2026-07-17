@@ -1,0 +1,13 @@
+Extracting Bazel installation...
+Starting local Bazel server (9.2.0) and connecting to it...
+DEBUG: <RUNTIME_ROOT>/bazel/feb5f1499fa827d25b9c36ce25bc0fad/external/aspect_tools_telemetry+/extension.bzl:160:14: Aspect Telemetry will begin collecting ruleset usage data on the next invocation, pursuant to the https://aspect.build/privacy-policy.
+
+See https://github.com/aspect-build/tools_telemetry for details and opt-out instructions.
+INFO: Analyzed target //cases:runtime_failure (103 packages loaded, 5943 targets configured).
+FAIL: //cases:runtime_failure (Exit 1) (see <RUNTIME_ROOT>/bazel/feb5f1499fa827d25b9c36ce25bc0fad/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/cases/runtime_failure/test.log)
+INFO: From Testing //cases:runtime_failure:
+INFO: Found 1 test target...
+INFO: Elapsed time: 13.663s, Critical Path: 1.41s
+INFO: 9 processes: 7 internal, 3 darwin-sandbox.
+INFO: Build completed, 1 test FAILED, 9 total actions
+INFO: Build Event Protocol files produced successfully.
