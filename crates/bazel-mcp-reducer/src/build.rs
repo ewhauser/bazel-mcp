@@ -569,47 +569,66 @@ pub fn reduce_invocation(input: ReductionInput<'_>) -> InvocationSummary {
     summary
 }
 
-fn deduplicate_diagnostics(diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    let mut positions = BTreeMap::<
-        (
-            Severity,
-            DiagnosticCategory,
-            String,
-            Option<(String, Option<u32>, Option<u32>)>,
-            Option<String>,
-            Option<String>,
-        ),
-        usize,
-    >::new();
-    let mut unique = Vec::<Diagnostic>::new();
-    for diagnostic in diagnostics {
+type DiagnosticKey<'a> = (
+    Severity,
+    DiagnosticCategory,
+    &'a str,
+    Option<(&'a str, Option<u32>, Option<u32>)>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+
+fn deduplicate_diagnostics(mut diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    let mut positions = BTreeMap::<DiagnosticKey<'_>, usize>::new();
+    let mut repetition_counts = vec![0_u32; diagnostics.len()];
+    let mut retained = vec![false; diagnostics.len()];
+    let mut clear_targets = vec![false; diagnostics.len()];
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
         let aggregate_actions = diagnostic.category == DiagnosticCategory::Action;
         let key = (
             diagnostic.severity,
             diagnostic.category,
-            diagnostic.message.clone(),
+            diagnostic.message.as_str(),
             diagnostic
                 .location
                 .as_ref()
-                .map(|location| (location.path.clone(), location.line, location.column)),
-            (!aggregate_actions)
-                .then(|| diagnostic.target.clone())
-                .flatten(),
-            diagnostic.action.clone(),
+                .map(|location| (location.path.as_str(), location.line, location.column)),
+            if aggregate_actions {
+                None
+            } else {
+                diagnostic.target.as_deref()
+            },
+            diagnostic.action.as_deref(),
         );
-        if let Some(index) = positions.get(&key).copied() {
-            if aggregate_actions && unique[index].target != diagnostic.target {
-                unique[index].target = None;
+        if let Some(first_index) = positions.get(&key).copied() {
+            if aggregate_actions && diagnostics[first_index].target != diagnostic.target {
+                clear_targets[first_index] = true;
             }
-            unique[index].repetition_count = unique[index]
-                .repetition_count
-                .saturating_add(diagnostic.repetition_count);
+            repetition_counts[first_index] =
+                repetition_counts[first_index].saturating_add(diagnostic.repetition_count);
         } else {
-            positions.insert(key, unique.len());
-            unique.push(diagnostic);
+            positions.insert(key, index);
+            repetition_counts[index] = diagnostic.repetition_count;
+            retained[index] = true;
         }
     }
-    unique
+    drop(positions);
+
+    let mut index = 0_usize;
+    diagnostics.retain_mut(|diagnostic| {
+        let current = index;
+        index = index.saturating_add(1);
+        if retained[current] {
+            diagnostic.repetition_count = repetition_counts[current];
+            if clear_targets[current] {
+                diagnostic.target = None;
+            }
+            true
+        } else {
+            false
+        }
+    });
+    diagnostics
 }
 
 /// Re-ranks, aggregates, and bounds diagnostics after all structured and local
@@ -3669,5 +3688,59 @@ assertion `left == right` failed\n";
             vec!["first", "second"]
         );
         assert_eq!(deduplicated[0].repetition_count, 2);
+    }
+
+    #[test]
+    fn diagnostic_deduplication_preserves_key_fields_and_saturates_counts() {
+        let action = Diagnostic {
+            severity: Severity::Error,
+            category: DiagnosticCategory::Action,
+            message: "compile failed".into(),
+            location: Some(DiagnosticLocation {
+                path: "src/main.cc".into(),
+                line: Some(7),
+                column: Some(3),
+            }),
+            target: Some("//pkg:first".into()),
+            action: Some("CppCompile".into()),
+            repetition_count: u32::MAX,
+        };
+        let mut other_target = action.clone();
+        other_target.target = Some("//pkg:second".into());
+        other_target.repetition_count = 1;
+        let mut other_action = action.clone();
+        other_action.action = Some("CppLink".into());
+        other_action.repetition_count = 1;
+        let mut other_location = action.clone();
+        other_location.location.as_mut().unwrap().line = Some(8);
+        other_location.repetition_count = 1;
+        let mut compilation = action.clone();
+        compilation.category = DiagnosticCategory::Compilation;
+        compilation.repetition_count = 1;
+        let mut compilation_other_target = compilation.clone();
+        compilation_other_target.target = Some("//pkg:second".into());
+
+        let deduplicated = deduplicate_diagnostics(vec![
+            action,
+            compilation,
+            other_target,
+            other_action,
+            other_location,
+            compilation_other_target,
+        ]);
+
+        assert_eq!(deduplicated.len(), 5);
+        assert_eq!(deduplicated[0].target, None);
+        assert_eq!(deduplicated[0].repetition_count, u32::MAX);
+        assert_eq!(deduplicated[1].target.as_deref(), Some("//pkg:first"));
+        assert_eq!(deduplicated[2].action.as_deref(), Some("CppLink"));
+        assert_eq!(
+            deduplicated[3]
+                .location
+                .as_ref()
+                .and_then(|location| location.line),
+            Some(8)
+        );
+        assert_eq!(deduplicated[4].target.as_deref(), Some("//pkg:second"));
     }
 }
