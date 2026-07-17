@@ -147,6 +147,13 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
   transformation, and serialization buffers, compare ASCII case in place, and
   transfer ownership only for selected rows. Thread:
   `019f6db7-4010-7191-8796-1c83ff2a7f42`.
+- A 1,000-match custom Starlark reduction converted the complete reducer
+  context and every diagnostic through JSON, then materialized and reparsed
+  the output JSON; DHAT measured 15.45 MB in 234,958 allocations for one
+  application. Build typed Starlark dict/list values directly, count bounded
+  output bytes without materializing JSON, decode the typed patch in place,
+  and extend the nested-schema contract test when reducer context fields
+  evolve. Thread: `019f6db7-4010-7191-8796-1c83ff2a7f42`.
 - Recorded BEP strings used fixed-length uppercase workspace markers while
   service locations used lowercase markers, complicating live/replay parity and
   leaking padding into visible messages; normalize both marker forms before

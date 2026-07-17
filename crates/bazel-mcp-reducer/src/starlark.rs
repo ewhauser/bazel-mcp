@@ -8,22 +8,30 @@ use std::{
 };
 
 use anyhow::{Context, anyhow, bail};
-use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
+use bazel_mcp_types::{
+    CoverageFile, CoverageSummary, Diagnostic, DiagnosticCategory, DiagnosticLocation,
+    InvocationSummary, QueryRow, Severity, TargetCounts, TargetResult, TestCase, TestCounts,
+    TestResult, TestStatus,
+};
 use regex::Regex;
-use serde::Deserialize;
-use serde_json::{Value as JsonValue, json};
 use starlark::{
     PrintHandler,
     environment::{FrozenModule, Globals, GlobalsBuilder, Module},
     eval::Evaluator,
     starlark_module,
     syntax::{AstModule, Dialect, DialectTypes},
-    values::{Heap, Value, none::NoneOr},
+    values::{
+        Heap, UnpackValue, Value, ValueIdentity,
+        dict::{AllocDict, DictRef},
+        list::{AllocList, ListRef},
+        none::NoneOr,
+        tuple::TupleRef,
+    },
 };
 
 use crate::{
-    CustomReducer, ReducerContext, ReducerError, ReducerMode, ReducerPatch, ReducerPipeline,
-    ReducerSelector,
+    CustomReducer, ReducerContext, ReducerError, ReducerEvent, ReducerEventKind, ReducerMode,
+    ReducerPatch, ReducerPipeline, ReducerSelector,
 };
 
 pub const REDUCER_API_VERSION: u32 = 1;
@@ -111,16 +119,12 @@ struct LoadedStarlarkReducer {
     limits: StarlarkLimits,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StarlarkPatch {
     headline: Option<String>,
     diagnostics: Vec<StarlarkDiagnostic>,
     suppress_builtin_diagnostics: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StarlarkDiagnostic {
     severity: Severity,
     category: DiagnosticCategory,
@@ -131,8 +135,6 @@ struct StarlarkDiagnostic {
     repetition_count: u32,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StarlarkDiagnosticLocation {
     path: String,
     line: Option<u32>,
@@ -263,8 +265,7 @@ impl CustomReducer for LoadedStarlarkReducer {
                 .get("reduce")
                 .context("exported reduce function disappeared")?;
             let function = module.heap().access_owned_frozen_value(&function);
-            let context = serde_json::to_value(context).context("serialize reducer context")?;
-            let context = module.heap().alloc(context);
+            let context = alloc_reducer_context(module.heap(), context);
             let no_print = NoPrint;
             let mut evaluator = Evaluator::new(&module);
             configure_evaluator(&mut evaluator, &self.limits)?;
@@ -275,28 +276,615 @@ impl CustomReducer for LoadedStarlarkReducer {
             if result.is_none() {
                 return Ok(ReducerPatch::default());
             }
-            let json = result.to_json().context("serialize reducer output")?;
-            if json.len() > self.limits.max_output_bytes {
+            let output_bytes = serialized_json_len(result).context("serialize reducer output")?;
+            if output_bytes > self.limits.max_output_bytes {
                 bail!(
                     "reducer output is {} bytes, exceeding the {}-byte limit",
-                    json.len(),
+                    output_bytes,
                     self.limits.max_output_bytes
                 );
             }
-            let patch: StarlarkPatch =
-                serde_json::from_str(&json).context("validate reducer patch")?;
-            if patch.diagnostics.len() > self.limits.max_output_items {
-                bail!(
-                    "reducer returned {} diagnostics, exceeding the {}-item limit",
-                    patch.diagnostics.len(),
-                    self.limits.max_output_items
-                );
-            }
+            let patch = parse_starlark_patch(result, self.limits.max_output_items)
+                .context("validate reducer patch")?;
             Ok(patch.into())
         })
         .map_err(|error: anyhow::Error| {
             ReducerError::new(format!("Starlark evaluation failed: {error:#}"))
         })
+    }
+}
+
+fn serialized_json_len(value: Value<'_>) -> anyhow::Result<usize> {
+    serialized_json_len_inner(value, &mut Vec::with_capacity(8))
+}
+
+fn serialized_json_len_inner<'v>(
+    value: Value<'v>,
+    ancestors: &mut Vec<ValueIdentity<'v>>,
+) -> anyhow::Result<usize> {
+    if value.is_none() {
+        return Ok(4);
+    }
+    if let Some(value) = value.unpack_bool() {
+        return Ok(if value { 4 } else { 5 });
+    }
+    if let Some(value) = value.unpack_str() {
+        return Ok(serialized_json_string_len(value));
+    }
+    if value.get_type() == "int" {
+        return Ok(match i64::unpack_value(value) {
+            Ok(Some(value)) => signed_decimal_len(value),
+            Ok(None) | Err(_) => value.to_str().len(),
+        });
+    }
+    if value.get_type() == "float" {
+        return Ok(value.to_json()?.len());
+    }
+
+    let identity = value.identity();
+    if ancestors.contains(&identity) {
+        bail!("cyclic {} value cannot be serialized", value.get_type());
+    }
+    ancestors.push(identity);
+    let result = if let Some(items) = ListRef::from_value(value) {
+        serialized_json_sequence_len(items.content(), ancestors)
+    } else if let Some(items) = TupleRef::from_value(value) {
+        serialized_json_sequence_len(items.content(), ancestors)
+    } else if let Some(dict) = DictRef::from_value(value) {
+        let mut bytes = 2_usize;
+        for (index, (key, value)) in dict.iter().enumerate() {
+            let key = key
+                .unpack_str()
+                .context("JSON object keys must be strings")?;
+            if index != 0 {
+                bytes = bytes.saturating_add(1);
+            }
+            bytes = bytes
+                .saturating_add(serialized_json_string_len(key))
+                .saturating_add(1)
+                .saturating_add(serialized_json_len_inner(value, ancestors)?);
+        }
+        Ok(bytes)
+    } else {
+        bail!("{} values cannot be serialized as JSON", value.get_type())
+    };
+    ancestors.pop();
+    result
+}
+
+fn serialized_json_sequence_len<'v>(
+    values: &[Value<'v>],
+    ancestors: &mut Vec<ValueIdentity<'v>>,
+) -> anyhow::Result<usize> {
+    let mut bytes = 2_usize;
+    for (index, value) in values.iter().copied().enumerate() {
+        if index != 0 {
+            bytes = bytes.saturating_add(1);
+        }
+        bytes = bytes.saturating_add(serialized_json_len_inner(value, ancestors)?);
+    }
+    Ok(bytes)
+}
+
+fn serialized_json_string_len(value: &str) -> usize {
+    value.bytes().fold(2_usize, |bytes, byte| {
+        bytes.saturating_add(match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+    })
+}
+
+const fn signed_decimal_len(value: i64) -> usize {
+    let sign = if value < 0 { 1 } else { 0 };
+    sign + unsigned_decimal_len(value.unsigned_abs())
+}
+
+const fn unsigned_decimal_len(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn alloc_reducer_context<'v>(heap: Heap<'v>, context: &ReducerContext) -> Value<'v> {
+    // Keep this in lockstep with ReducerContext's serialized API. The nested-context
+    // contract test covers every top-level field and representative nested values.
+    let arguments = heap.alloc(AllocList(context.arguments.iter().map(String::as_str)));
+    let events = heap.alloc(AllocList(
+        context
+            .events
+            .iter()
+            .map(|event| alloc_reducer_event(heap, event)),
+    ));
+    let baseline = alloc_invocation_summary(heap, &context.baseline);
+    heap.alloc(AllocDict([
+        ("api_version", heap.alloc(context.api_version)),
+        ("command", heap.alloc(context.command.as_str())),
+        ("arguments", arguments),
+        ("exit_code", alloc_optional_i32(heap, context.exit_code)),
+        ("elapsed_ms", heap.alloc(context.elapsed_ms)),
+        ("stdout", heap.alloc(context.stdout.as_str())),
+        ("stderr", heap.alloc(context.stderr.as_str())),
+        ("events", events),
+        ("input_truncated", heap.alloc(context.input_truncated)),
+        ("baseline", baseline),
+    ]))
+}
+
+fn alloc_reducer_event<'v>(heap: Heap<'v>, event: &ReducerEvent) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("ordinal", heap.alloc(event.ordinal)),
+        ("kind", heap.alloc(reducer_event_kind_name(event.kind))),
+        ("label", alloc_optional_str(heap, event.label.as_deref())),
+        (
+            "target_kind",
+            alloc_optional_str(heap, event.target_kind.as_deref()),
+        ),
+        (
+            "action_type",
+            alloc_optional_str(heap, event.action_type.as_deref()),
+        ),
+        ("success", alloc_optional_bool(heap, event.success)),
+        ("exit_code", alloc_optional_i32(heap, event.exit_code)),
+        (
+            "message",
+            alloc_optional_str(heap, event.message.as_deref()),
+        ),
+    ]))
+}
+
+fn alloc_invocation_summary<'v>(heap: Heap<'v>, summary: &InvocationSummary) -> Value<'v> {
+    let targets = heap.alloc(AllocList(
+        summary
+            .targets
+            .iter()
+            .map(|target| alloc_target_result(heap, target)),
+    ));
+    let diagnostics = heap.alloc(AllocList(
+        summary
+            .diagnostics
+            .iter()
+            .map(|diagnostic| alloc_diagnostic(heap, diagnostic)),
+    ));
+    let tests = heap.alloc(AllocList(
+        summary
+            .tests
+            .iter()
+            .map(|test| alloc_test_result(heap, test)),
+    ));
+    let query_sample = heap.alloc(AllocList(
+        summary
+            .query_sample
+            .iter()
+            .map(|row| alloc_query_row(heap, row)),
+    ));
+    let coverage = summary
+        .coverage
+        .as_ref()
+        .map_or_else(Value::new_none, |coverage| {
+            alloc_coverage_summary(heap, coverage)
+        });
+    heap.alloc(AllocDict([
+        ("success", heap.alloc(summary.success)),
+        ("headline", heap.alloc(summary.headline.as_str())),
+        ("targets", targets),
+        (
+            "target_counts",
+            alloc_target_counts(heap, &summary.target_counts),
+        ),
+        ("diagnostics", diagnostics),
+        ("tests", tests),
+        ("test_counts", alloc_test_counts(heap, &summary.test_counts)),
+        ("coverage", coverage),
+        ("query_sample", query_sample),
+        (
+            "query_result_count",
+            alloc_optional_u64(heap, summary.query_result_count),
+        ),
+        ("elapsed_ms", heap.alloc(summary.elapsed_ms)),
+        ("truncated", heap.alloc(summary.truncated)),
+        (
+            "inspect_hint",
+            alloc_optional_str(heap, summary.inspect_hint.as_deref()),
+        ),
+    ]))
+}
+
+fn alloc_target_result<'v>(heap: Heap<'v>, target: &TargetResult) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("label", heap.alloc(target.label.as_str())),
+        ("success", heap.alloc(target.success)),
+    ]))
+}
+
+fn alloc_target_counts<'v>(heap: Heap<'v>, counts: &TargetCounts) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("requested", heap.alloc(counts.requested)),
+        ("succeeded", heap.alloc(counts.succeeded)),
+        ("failed", heap.alloc(counts.failed)),
+    ]))
+}
+
+fn alloc_diagnostic<'v>(heap: Heap<'v>, diagnostic: &Diagnostic) -> Value<'v> {
+    let location = diagnostic
+        .location
+        .as_ref()
+        .map_or_else(Value::new_none, |location| {
+            alloc_diagnostic_location(heap, location)
+        });
+    alloc_diagnostic_fields(
+        heap,
+        severity_name(diagnostic.severity),
+        category_name(diagnostic.category),
+        &diagnostic.message,
+        location,
+        diagnostic.target.as_deref(),
+        diagnostic.action.as_deref(),
+        diagnostic.repetition_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn alloc_diagnostic_fields<'v>(
+    heap: Heap<'v>,
+    severity: &str,
+    category: &str,
+    message: &str,
+    location: Value<'v>,
+    target: Option<&str>,
+    action: Option<&str>,
+    repetition_count: u32,
+) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("severity", heap.alloc(severity)),
+        ("category", heap.alloc(category)),
+        ("message", heap.alloc(message)),
+        ("location", location),
+        ("target", alloc_optional_str(heap, target)),
+        ("action", alloc_optional_str(heap, action)),
+        ("repetition_count", heap.alloc(repetition_count)),
+    ]))
+}
+
+fn alloc_diagnostic_location<'v>(heap: Heap<'v>, location: &DiagnosticLocation) -> Value<'v> {
+    alloc_diagnostic_location_fields(heap, &location.path, location.line, location.column)
+}
+
+fn alloc_diagnostic_location_fields<'v>(
+    heap: Heap<'v>,
+    path: &str,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("path", heap.alloc(path)),
+        ("line", alloc_optional_u32(heap, line)),
+        ("column", alloc_optional_u32(heap, column)),
+    ]))
+}
+
+fn alloc_test_result<'v>(heap: Heap<'v>, test: &TestResult) -> Value<'v> {
+    let cases = heap.alloc(AllocList(
+        test.cases.iter().map(|case| alloc_test_case(heap, case)),
+    ));
+    let mut fields = Vec::with_capacity(8);
+    fields.extend([
+        ("label", heap.alloc(test.label.as_str())),
+        ("status", heap.alloc(test_status_name(test.status))),
+        ("duration_ms", alloc_optional_u64(heap, test.duration_ms)),
+        ("attempts", heap.alloc(test.attempts)),
+        ("shard", alloc_optional_u32(heap, test.shard)),
+        ("cases", cases),
+        ("test_log_available", heap.alloc(test.test_log_available)),
+    ]);
+    if let Some(reason) = test.test_log_unavailable_reason.as_deref() {
+        fields.push(("test_log_unavailable_reason", heap.alloc(reason)));
+    }
+    heap.alloc(AllocDict(fields))
+}
+
+fn alloc_test_case<'v>(heap: Heap<'v>, case: &TestCase) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("name", heap.alloc(case.name.as_str())),
+        ("status", heap.alloc(test_status_name(case.status))),
+        ("duration_ms", alloc_optional_u64(heap, case.duration_ms)),
+        ("message", alloc_optional_str(heap, case.message.as_deref())),
+    ]))
+}
+
+fn alloc_test_counts<'v>(heap: Heap<'v>, counts: &TestCounts) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("passed", heap.alloc(counts.passed)),
+        ("failed", heap.alloc(counts.failed)),
+        ("flaky", heap.alloc(counts.flaky)),
+        ("skipped", heap.alloc(counts.skipped)),
+        ("incomplete", heap.alloc(counts.incomplete)),
+    ]))
+}
+
+fn alloc_coverage_summary<'v>(heap: Heap<'v>, coverage: &CoverageSummary) -> Value<'v> {
+    let files = heap.alloc(AllocList(
+        coverage
+            .files
+            .iter()
+            .map(|file| alloc_coverage_file(heap, file)),
+    ));
+    heap.alloc(AllocDict([
+        ("lines_found", heap.alloc(coverage.lines_found)),
+        ("lines_hit", heap.alloc(coverage.lines_hit)),
+        ("coverage_percent", heap.alloc(coverage.coverage_percent)),
+        ("files", files),
+    ]))
+}
+
+fn alloc_coverage_file<'v>(heap: Heap<'v>, file: &CoverageFile) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("path", heap.alloc(file.path.as_str())),
+        ("lines_found", heap.alloc(file.lines_found)),
+        ("lines_hit", heap.alloc(file.lines_hit)),
+        ("coverage_percent", heap.alloc(file.coverage_percent)),
+    ]))
+}
+
+fn alloc_query_row<'v>(heap: Heap<'v>, row: &QueryRow) -> Value<'v> {
+    heap.alloc(AllocDict([
+        ("ordinal", heap.alloc(row.ordinal)),
+        ("value", heap.alloc(row.value.as_str())),
+    ]))
+}
+
+fn alloc_optional_str<'v>(heap: Heap<'v>, value: Option<&str>) -> Value<'v> {
+    value.map_or_else(Value::new_none, |value| heap.alloc(value))
+}
+
+fn alloc_optional_bool<'v>(heap: Heap<'v>, value: Option<bool>) -> Value<'v> {
+    value.map_or_else(Value::new_none, |value| heap.alloc(value))
+}
+
+fn alloc_optional_i32<'v>(heap: Heap<'v>, value: Option<i32>) -> Value<'v> {
+    value.map_or_else(Value::new_none, |value| heap.alloc(value))
+}
+
+fn alloc_optional_u32<'v>(heap: Heap<'v>, value: Option<u32>) -> Value<'v> {
+    value.map_or_else(Value::new_none, |value| heap.alloc(value))
+}
+
+fn alloc_optional_u64<'v>(heap: Heap<'v>, value: Option<u64>) -> Value<'v> {
+    value.map_or_else(Value::new_none, |value| heap.alloc(value))
+}
+
+const fn reducer_event_kind_name(kind: ReducerEventKind) -> &'static str {
+    match kind {
+        ReducerEventKind::Aborted => "aborted",
+        ReducerEventKind::Action => "action",
+        ReducerEventKind::Target => "target",
+        ReducerEventKind::TestSummary => "test_summary",
+    }
+}
+
+const fn severity_name(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Note => "note",
+    }
+}
+
+const fn category_name(category: DiagnosticCategory) -> &'static str {
+    match category {
+        DiagnosticCategory::Workspace => "workspace",
+        DiagnosticCategory::Loading => "loading",
+        DiagnosticCategory::Analysis => "analysis",
+        DiagnosticCategory::Visibility => "visibility",
+        DiagnosticCategory::Action => "action",
+        DiagnosticCategory::Compilation => "compilation",
+        DiagnosticCategory::Test => "test",
+        DiagnosticCategory::Bazel => "bazel",
+        DiagnosticCategory::Unknown => "unknown",
+    }
+}
+
+const fn test_status_name(status: TestStatus) -> &'static str {
+    match status {
+        TestStatus::Passed => "passed",
+        TestStatus::Failed => "failed",
+        TestStatus::Flaky => "flaky",
+        TestStatus::Skipped => "skipped",
+        TestStatus::TimedOut => "timed_out",
+        TestStatus::Incomplete => "incomplete",
+        TestStatus::Remote => "remote",
+    }
+}
+
+fn parse_starlark_patch(
+    value: Value<'_>,
+    max_output_items: usize,
+) -> anyhow::Result<StarlarkPatch> {
+    let patch = required_dict(value, "reducer patch")?;
+    validate_fields(
+        &patch,
+        &["headline", "diagnostics", "suppress_builtin_diagnostics"],
+        "reducer patch",
+    )?;
+    let diagnostics_value = required_field(&patch, "diagnostics", "reducer patch")?;
+    let diagnostic_values = sequence_items(diagnostics_value, "diagnostics")?;
+    if diagnostic_values.len() > max_output_items {
+        bail!(
+            "reducer returned {} diagnostics, exceeding the {}-item limit",
+            diagnostic_values.len(),
+            max_output_items
+        );
+    }
+    let diagnostics = diagnostic_values
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, value)| {
+            parse_starlark_diagnostic(value)
+                .with_context(|| format!("validate diagnostic at index {index}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(StarlarkPatch {
+        headline: optional_string_field(&patch, "headline", "reducer patch")?,
+        diagnostics,
+        suppress_builtin_diagnostics: required_bool_field(
+            &patch,
+            "suppress_builtin_diagnostics",
+            "reducer patch",
+        )?,
+    })
+}
+
+fn parse_starlark_diagnostic(value: Value<'_>) -> anyhow::Result<StarlarkDiagnostic> {
+    let diagnostic = required_dict(value, "diagnostic")?;
+    validate_fields(
+        &diagnostic,
+        &[
+            "severity",
+            "category",
+            "message",
+            "location",
+            "target",
+            "action",
+            "repetition_count",
+        ],
+        "diagnostic",
+    )?;
+    let severity = match required_str_field(&diagnostic, "severity", "diagnostic")? {
+        "error" => Severity::Error,
+        "warning" => Severity::Warning,
+        "note" => Severity::Note,
+        value => bail!("invalid diagnostic severity {value:?}"),
+    };
+    let category = match required_str_field(&diagnostic, "category", "diagnostic")? {
+        "workspace" => DiagnosticCategory::Workspace,
+        "loading" => DiagnosticCategory::Loading,
+        "analysis" => DiagnosticCategory::Analysis,
+        "visibility" => DiagnosticCategory::Visibility,
+        "action" => DiagnosticCategory::Action,
+        "compilation" => DiagnosticCategory::Compilation,
+        "test" => DiagnosticCategory::Test,
+        "bazel" => DiagnosticCategory::Bazel,
+        "unknown" => DiagnosticCategory::Unknown,
+        value => bail!("invalid diagnostic category {value:?}"),
+    };
+    Ok(StarlarkDiagnostic {
+        severity,
+        category,
+        message: required_str_field(&diagnostic, "message", "diagnostic")?.to_owned(),
+        location: optional_location_field(&diagnostic)?,
+        target: optional_string_field(&diagnostic, "target", "diagnostic")?,
+        action: optional_string_field(&diagnostic, "action", "diagnostic")?,
+        repetition_count: required_u32_field(&diagnostic, "repetition_count", "diagnostic")?,
+    })
+}
+
+fn optional_location_field(
+    diagnostic: &DictRef<'_>,
+) -> anyhow::Result<Option<StarlarkDiagnosticLocation>> {
+    let Some(value) = diagnostic.get_str("location") else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    let location = required_dict(value, "diagnostic location")?;
+    validate_fields(
+        &location,
+        &["path", "line", "column"],
+        "diagnostic location",
+    )?;
+    Ok(Some(StarlarkDiagnosticLocation {
+        path: required_str_field(&location, "path", "diagnostic location")?.to_owned(),
+        line: optional_u32_field(&location, "line", "diagnostic location")?,
+        column: optional_u32_field(&location, "column", "diagnostic location")?,
+    }))
+}
+
+fn required_dict<'v>(value: Value<'v>, name: &str) -> anyhow::Result<DictRef<'v>> {
+    DictRef::from_value(value).with_context(|| format!("{name} must be a dict"))
+}
+
+fn sequence_items<'v>(value: Value<'v>, name: &str) -> anyhow::Result<&'v [Value<'v>]> {
+    if let Some(list) = ListRef::from_value(value) {
+        Ok(list.content())
+    } else if let Some(tuple) = TupleRef::from_value(value) {
+        Ok(tuple.content())
+    } else {
+        bail!("{name} must be a list or tuple")
+    }
+}
+
+fn validate_fields(dict: &DictRef<'_>, allowed: &[&str], name: &str) -> anyhow::Result<()> {
+    for (key, _) in dict.iter() {
+        let key = key
+            .unpack_str()
+            .with_context(|| format!("{name} field names must be strings"))?;
+        if !allowed.contains(&key) {
+            bail!("unknown field {key:?} in {name}");
+        }
+    }
+    Ok(())
+}
+
+fn required_field<'v>(dict: &DictRef<'v>, field: &str, name: &str) -> anyhow::Result<Value<'v>> {
+    dict.get_str(field)
+        .with_context(|| format!("required field {field:?} is missing from {name}"))
+}
+
+fn required_str_field<'v>(dict: &DictRef<'v>, field: &str, name: &str) -> anyhow::Result<&'v str> {
+    required_field(dict, field, name)?
+        .unpack_str()
+        .with_context(|| format!("{name} field {field:?} must be a string"))
+}
+
+fn optional_string_field(
+    dict: &DictRef<'_>,
+    field: &str,
+    name: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(value) = dict.get_str(field) else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value
+            .unpack_str()
+            .map(|value| Some(value.to_owned()))
+            .with_context(|| format!("{name} field {field:?} must be a string or None"))
+    }
+}
+
+fn required_bool_field(dict: &DictRef<'_>, field: &str, name: &str) -> anyhow::Result<bool> {
+    required_field(dict, field, name)?
+        .unpack_bool()
+        .with_context(|| format!("{name} field {field:?} must be a bool"))
+}
+
+fn required_u32_field(dict: &DictRef<'_>, field: &str, name: &str) -> anyhow::Result<u32> {
+    u32::unpack_value_err(required_field(dict, field, name)?)
+        .map_err(|error| anyhow!(error))
+        .with_context(|| format!("{name} field {field:?} must be an unsigned 32-bit integer"))
+}
+
+fn optional_u32_field(dict: &DictRef<'_>, field: &str, name: &str) -> anyhow::Result<Option<u32>> {
+    let Some(value) = dict.get_str(field) else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        Ok(None)
+    } else {
+        u32::unpack_value_err(value)
+            .map(Some)
+            .map_err(|error| anyhow!(error))
+            .with_context(|| {
+                format!("{name} field {field:?} must be an unsigned 32-bit integer or None")
+            })
     }
 }
 
@@ -349,9 +937,9 @@ fn reducer_api(builder: &mut GlobalsBuilder) {
         message: &str,
         #[starlark(require = named, default = "error")] severity: &str,
         #[starlark(require = named, default = "unknown")] category: &str,
-        #[starlark(require = named, default = NoneOr::None)] target: NoneOr<String>,
-        #[starlark(require = named, default = NoneOr::None)] action: NoneOr<String>,
-        #[starlark(require = named, default = NoneOr::None)] path: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] target: NoneOr<&str>,
+        #[starlark(require = named, default = NoneOr::None)] action: NoneOr<&str>,
+        #[starlark(require = named, default = NoneOr::None)] path: NoneOr<&str>,
         #[starlark(require = named, default = NoneOr::None)] line: NoneOr<i32>,
         #[starlark(require = named, default = NoneOr::None)] column: NoneOr<i32>,
         #[starlark(require = named, default = 1)] repetition_count: i32,
@@ -368,36 +956,36 @@ fn reducer_api(builder: &mut GlobalsBuilder) {
         }
         let line = positive_optional(line.into_option(), "line")?;
         let column = positive_optional(column.into_option(), "column")?;
-        Ok(heap.alloc(json!({
-            "severity": severity,
-            "category": category,
-            "message": message,
-            "location": path.map(|path| json!({
-                "path": path,
-                "line": line,
-                "column": column,
-            })),
-            "target": target.into_option(),
-            "action": action.into_option(),
-            "repetition_count": repetition_count,
-        })))
+        let location = path.map_or_else(Value::new_none, |path| {
+            alloc_diagnostic_location_fields(heap, path, line, column)
+        });
+        Ok(alloc_diagnostic_fields(
+            heap,
+            severity,
+            category,
+            message,
+            location,
+            target.into_option(),
+            action.into_option(),
+            u32::try_from(repetition_count).unwrap_or(1),
+        ))
     }
 
     fn patch<'v>(
         diagnostics: Value<'v>,
-        #[starlark(require = named, default = NoneOr::None)] headline: NoneOr<String>,
+        #[starlark(require = named, default = NoneOr::None)] headline: NoneOr<&str>,
         #[starlark(require = named, default = false)] suppress_builtin_diagnostics: bool,
         heap: Heap<'v>,
     ) -> anyhow::Result<Value<'v>> {
-        let diagnostics = diagnostics.to_json_value()?;
-        if !diagnostics.is_array() {
-            bail!("diagnostics must be a list");
-        }
-        Ok(heap.alloc(json!({
-            "headline": headline.into_option(),
-            "diagnostics": diagnostics,
-            "suppress_builtin_diagnostics": suppress_builtin_diagnostics,
-        })))
+        sequence_items(diagnostics, "diagnostics")?;
+        Ok(heap.alloc(AllocDict([
+            ("headline", alloc_optional_str(heap, headline.into_option())),
+            ("diagnostics", diagnostics),
+            (
+                "suppress_builtin_diagnostics",
+                heap.alloc(suppress_builtin_diagnostics),
+            ),
+        ])))
     }
 
     fn regex_diagnostics<'v>(
@@ -426,27 +1014,30 @@ fn reducer_api(builder: &mut GlobalsBuilder) {
                         .with_context(|| format!("capture {name:?} is not a positive integer"))
                 };
                 let path = capture("path");
-                let location = path
-                    .map(|path| {
-                        Ok::<JsonValue, anyhow::Error>(json!({
-                            "path": path,
-                            "line": parse_position("line")?,
-                            "column": parse_position("column")?,
-                        }))
-                    })
-                    .transpose()?;
-                Ok(json!({
-                    "severity": severity,
-                    "category": category,
-                    "message": capture("message").unwrap_or_else(|| captures.get(0).map_or("", |value| value.as_str())),
-                    "location": location,
-                    "target": capture("target"),
-                    "action": capture("action"),
-                    "repetition_count": 1,
-                }))
+                let location = if let Some(path) = path {
+                    alloc_diagnostic_location_fields(
+                        heap,
+                        path,
+                        parse_position("line")?,
+                        parse_position("column")?,
+                    )
+                } else {
+                    Value::new_none()
+                };
+                Ok(alloc_diagnostic_fields(
+                    heap,
+                    severity,
+                    category,
+                    capture("message")
+                        .unwrap_or_else(|| captures.get(0).map_or("", |value| value.as_str())),
+                    location,
+                    capture("target"),
+                    capture("action"),
+                    1,
+                ))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(heap.alloc(JsonValue::Array(diagnostics)))
+        Ok(heap.alloc(AllocList(diagnostics)))
     }
 }
 
@@ -520,8 +1111,15 @@ fn optional_string_list(module: &FrozenModule, name: &str) -> anyhow::Result<Vec
     let Some(value) = module.get_option(name)? else {
         return Ok(Vec::new());
     };
-    serde_json::from_value(value.value().to_json_value()?)
-        .with_context(|| format!("{name} must be a list of strings"))
+    sequence_items(value.value(), name)?
+        .iter()
+        .map(|value| {
+            value
+                .unpack_str()
+                .map(str::to_owned)
+                .with_context(|| format!("{name} must be a list of strings"))
+        })
+        .collect()
 }
 
 fn optional_string_set(module: &FrozenModule, name: &str) -> anyhow::Result<BTreeSet<String>> {
@@ -550,6 +1148,24 @@ mod tests {
             input_truncated: false,
             baseline: InvocationSummary::default(),
         }
+    }
+
+    #[test]
+    fn direct_json_size_matches_starlark_serialization() {
+        Heap::temp(|heap| {
+            let items = heap.alloc(AllocList([
+                heap.alloc("quote \" slash \\ newline\n snowman ☃"),
+                heap.alloc(-42_i32),
+                heap.alloc(u64::MAX),
+                heap.alloc(12.5_f64),
+                Value::new_none(),
+            ]));
+            let value = heap.alloc(AllocDict([("items", items), ("enabled", heap.alloc(true))]));
+            assert_eq!(
+                serialized_json_len(value).unwrap(),
+                value.to_json().unwrap().len()
+            );
+        });
     }
 
     #[test]
@@ -591,6 +1207,205 @@ def reduce(ctx):
             summary.diagnostics[0].location.as_ref().unwrap().path,
             "Sources/App.swift"
         );
+    }
+
+    #[test]
+    fn exposes_the_complete_nested_context_without_json_round_trips() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("context.star");
+        fs::write(
+            &path,
+            r#"
+API_VERSION = 1
+NAME = "context"
+
+def reduce(ctx):
+    baseline = ctx["baseline"]
+    source = baseline["diagnostics"][0]
+    event = ctx["events"][0]
+    if (
+        ctx["arguments"][0] != "//app:target" or
+        ctx["exit_code"] != 1 or
+        ctx["elapsed_ms"] != 42 or
+        ctx["stdout"] != "stdout" or
+        event["kind"] != "action" or
+        event["success"] != False or
+        baseline["targets"][0]["success"] != False or
+        baseline["target_counts"]["requested"] != 3 or
+        baseline["tests"][0]["status"] != "flaky" or
+        "test_log_unavailable_reason" in baseline["tests"][0] or
+        baseline["test_counts"]["flaky"] != 1 or
+        baseline["coverage"]["coverage_percent"] != 75.0 or
+        baseline["query_sample"][0]["ordinal"] != 7 or
+        baseline["query_result_count"] != 9 or
+        baseline["inspect_hint"] != "inspect hint"
+    ):
+        return patch([diagnostic("context mismatch")])
+    return patch([
+        diagnostic(
+            source["message"],
+            severity = source["severity"],
+            category = source["category"],
+            target = event["label"],
+            action = event["action_type"],
+            path = baseline["coverage"]["files"][0]["path"],
+            line = source["location"]["line"],
+            column = source["location"]["column"],
+            repetition_count = source["repetition_count"],
+        ),
+    ], headline = baseline["headline"], suppress_builtin_diagnostics = ctx["input_truncated"])
+"#,
+        )
+        .unwrap();
+        let pipeline = load_starlark_reducers(&StarlarkReducerConfig {
+            files: vec![path],
+            limits: StarlarkLimits::default(),
+        })
+        .unwrap();
+        let context = ReducerContext {
+            api_version: REDUCER_API_VERSION,
+            command: "build".to_owned(),
+            arguments: vec!["//app:target".to_owned()],
+            exit_code: Some(1),
+            elapsed_ms: 42,
+            stdout: "stdout".to_owned(),
+            stderr: "stderr".to_owned(),
+            events: vec![ReducerEvent {
+                ordinal: 4,
+                kind: ReducerEventKind::Action,
+                label: Some("//app:target".to_owned()),
+                target_kind: Some("cc_library".to_owned()),
+                action_type: Some("CppCompile".to_owned()),
+                success: Some(false),
+                exit_code: Some(1),
+                message: Some("action failed".to_owned()),
+            }],
+            input_truncated: true,
+            baseline: InvocationSummary {
+                success: false,
+                headline: "native headline".to_owned(),
+                targets: vec![TargetResult {
+                    label: "//app:target".to_owned(),
+                    success: false,
+                }],
+                target_counts: TargetCounts {
+                    requested: 3,
+                    succeeded: 2,
+                    failed: 1,
+                },
+                diagnostics: vec![Diagnostic {
+                    severity: Severity::Warning,
+                    category: DiagnosticCategory::Test,
+                    message: "nested message".to_owned(),
+                    location: Some(DiagnosticLocation {
+                        path: "ignored/by/script".to_owned(),
+                        line: Some(12),
+                        column: Some(7),
+                    }),
+                    target: None,
+                    action: None,
+                    repetition_count: 2,
+                }],
+                tests: vec![TestResult {
+                    label: "//app:test".to_owned(),
+                    status: TestStatus::Flaky,
+                    duration_ms: Some(10),
+                    attempts: 2,
+                    shard: Some(1),
+                    cases: vec![TestCase {
+                        name: "case".to_owned(),
+                        status: TestStatus::Passed,
+                        duration_ms: Some(5),
+                        message: None,
+                    }],
+                    test_log_available: true,
+                    test_log_unavailable_reason: None,
+                }],
+                test_counts: TestCounts {
+                    flaky: 1,
+                    ..TestCounts::default()
+                },
+                coverage: Some(CoverageSummary {
+                    lines_found: 4,
+                    lines_hit: 3,
+                    coverage_percent: 75.0,
+                    files: vec![CoverageFile {
+                        path: "src/lib.rs".to_owned(),
+                        lines_found: 4,
+                        lines_hit: 3,
+                        coverage_percent: 75.0,
+                    }],
+                }),
+                query_sample: vec![QueryRow {
+                    ordinal: 7,
+                    value: "//app:target".to_owned(),
+                }],
+                query_result_count: Some(9),
+                elapsed_ms: 41,
+                truncated: false,
+                inspect_hint: Some("inspect hint".to_owned()),
+            },
+        };
+        let mut summary = InvocationSummary::default();
+        let report = pipeline.apply(&context, &mut summary);
+        assert!(report.failures.is_empty());
+        assert_eq!(summary.headline, "native headline");
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert_eq!(summary.diagnostics[0].message, "nested message");
+        assert_eq!(summary.diagnostics[0].severity, Severity::Warning);
+        assert_eq!(summary.diagnostics[0].category, DiagnosticCategory::Test);
+        assert_eq!(
+            summary.diagnostics[0].target.as_deref(),
+            Some("//app:target")
+        );
+        assert_eq!(summary.diagnostics[0].action.as_deref(), Some("CppCompile"));
+        assert_eq!(summary.diagnostics[0].repetition_count, 2);
+        assert_eq!(
+            summary.diagnostics[0].location,
+            Some(DiagnosticLocation {
+                path: "src/lib.rs".to_owned(),
+                line: Some(12),
+                column: Some(7),
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_tuple_diagnostics_and_missing_optional_patch_fields() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("tuple.star");
+        fs::write(
+            &path,
+            r#"
+API_VERSION = 1
+NAME = "tuple"
+
+def reduce(ctx):
+    return {
+        "diagnostics": ({
+            "severity": "note",
+            "category": "bazel",
+            "message": "tuple diagnostic",
+            "repetition_count": 1,
+        },),
+        "suppress_builtin_diagnostics": False,
+    }
+"#,
+        )
+        .unwrap();
+        let pipeline = load_starlark_reducers(&StarlarkReducerConfig {
+            files: vec![path],
+            limits: StarlarkLimits::default(),
+        })
+        .unwrap();
+        let mut summary = InvocationSummary::default();
+        let report = pipeline.apply(&context(""), &mut summary);
+        assert!(report.failures.is_empty());
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert_eq!(summary.diagnostics[0].message, "tuple diagnostic");
+        assert!(summary.diagnostics[0].location.is_none());
+        assert!(summary.diagnostics[0].target.is_none());
+        assert!(summary.diagnostics[0].action.is_none());
     }
 
     #[test]
