@@ -422,7 +422,9 @@ processes.
 Responsibilities:
 
 - Expose `InvocationService` with `run`, `inspect`, and `cancel` operations.
-- Queue work by known effective output-base key and enforce the global limit.
+- Queue work by known effective output-base key, acquire a per-user
+  cross-process advisory lock for every invocation, and enforce the global
+  limit.
 - Generate UUIDv7 invocation IDs.
 - Assemble validated Bazel argv without a shell.
 - Spawn the wrapper/Bazel client in a process group.
@@ -431,7 +433,8 @@ Responsibilities:
 - Enforce timeout and graceful cancellation escalation.
 - Await async store operations directly; run CPU-heavy BEP/reducer work and
   blocking filesystem work via bounded `spawn_blocking` tasks.
-- Produce concise progress snapshots.
+- Observe both advisory and native Bazel output-base waits and include their
+  combined duration in concise progress snapshots and invocation metrics.
 - Recover stored state during application startup.
 
 Suggested layout:
@@ -631,6 +634,7 @@ bazel-mcp-server
       ▼
 bazel-mcp-runner
   - scheduler and live invocation registry
+  - per-request cross-process output-base locks
   - Tokio process tasks
   - cancellation tokens
       ├────────────► bazel-mcp-policy

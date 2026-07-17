@@ -520,15 +520,28 @@ State transitions are durable and monotonic. Terminal states do not change.
 
 ### 12.2 Concurrency
 
-- Commands using the same effective Bazel output base MUST execute serially.
+- Commands using the same known effective Bazel output base MUST execute
+  serially across runner instances owned by the same operating-system user.
 - When no explicit output base is supplied, the canonical workspace is the lock
   key.
 - When an explicit output base is supplied, its canonical path is the lock key,
   including across different workspaces.
+- The cross-process advisory lock is acquired for every invocation and held
+  until that Bazel client exits. It supplements Bazel's own output-base lock;
+  it does not replace or disable Bazel's native wait-and-takeover behavior.
+- Shared output bases across workspaces are supported. The runner MUST NOT
+  reject them or silently isolate them merely because a different workspace or
+  Bazel server startup configuration may trigger a server restart after lock
+  handoff.
+- A direct Bazel client, editor integration, or output-base setting hidden in
+  bazelrc may still contend outside the advisory-lock namespace. In that case,
+  the spawned Bazel client MUST retain its normal blocking lock behavior.
 - Commands for independent lock keys MAY execute concurrently subject to a
   configurable global limit.
 - The default global running limit is four invocations.
-- Queue position and elapsed queue time may be reported as progress.
+- Output-base lock-wait phase, elapsed wait, and a bounded owner label may be
+  reported as progress. Owner details MUST exclude workspace paths and pass
+  through the normal redaction boundary.
 - The server MUST NOT create alternate output bases merely to increase
   concurrency.
 
@@ -540,7 +553,9 @@ State transitions are durable and monotonic. Terminal states do not change.
 - A progress update is sent earlier only for a meaningful state transition such
   as leaving the queue or beginning execution.
 - Progress messages contain only state, elapsed time, and concise structured BEP
-  counts or phases when available.
+  counts or phases when available. Output-base waits use the
+  `output_base_lock_wait` phase with elapsed wait milliseconds and a bounded,
+  redacted owner label when available.
 - Identical progress updates are suppressed.
 - Progress notification failures do not fail the Bazel invocation.
 
@@ -895,7 +910,7 @@ For every invocation, record:
 - Model-visible result bytes
 - Number of progress notifications
 - Number of inspect calls
-- Queue time, Bazel wall time, and reduction time
+- Queue time, output-base lock wait time, Bazel wall time, and reduction time
 - Counts of diagnostics returned, suppressed, and deduplicated
 - Parser fallback reasons
 - Bazel and reducer versions
@@ -967,6 +982,10 @@ The corpus MUST include:
 
 - Two commands for the same workspace execute serially without relying on
   Bazel's invisible output-base lock wait.
+- Independent runner instances using one explicit output base serialize before
+  spawning Bazel, and a cancelled waiter never spawns a child.
+- Native Bazel lock waits caused by direct or otherwise uncoordinated clients
+  are observable as progress and contribute to the recorded lock-wait metric.
 - Independent workspaces can run concurrently.
 - Two worktrees cannot read each other's "last" result because no such API
   exists.
@@ -1146,7 +1165,7 @@ blocking BEP and filesystem work uses bounded blocking tasks.
 | BEP schema changes across Bazel versions | Parse or semantic drift | Pin protos, ignore unknown fields, maintain cross-version golden fixtures. |
 | Remote-minimal builds reference unavailable artifacts | Test or coverage detail is missing | Report availability explicitly; add authenticated CAS/BuildBuddy adapters later. |
 | Tool results duplicate text and structured content | Token savings regress | Default to one text representation and benchmark host-specific encoding. |
-| Concurrent commands wait on the same output-base lock | Hidden latency and apparent stalls | Schedule by canonical effective output base before spawning Bazel. |
+| Concurrent commands wait on the same output-base lock | Hidden latency and apparent stalls | Acquire a per-user cross-process advisory lock for every known output-base key, preserve Bazel's native wait-and-takeover path for uncoordinated clients, and report bounded wait progress. |
 | Logs contain secrets | Sensitive data reaches model or disk | Private storage, retention, configured redaction before summaries and inspection. |
 | Retained logs consume large amounts of disk | Builds fail or machine degrades | Quotas, oldest-first eviction, and preflight storage checks. |
 | Filesystem records are interrupted during commit or deletion | Missing metadata or leaked evidence | Use atomic rename commit points, two-phase trash deletion, exclusive locking, and crash/restart tests. |

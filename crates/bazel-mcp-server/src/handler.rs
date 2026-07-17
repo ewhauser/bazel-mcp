@@ -189,13 +189,22 @@ impl BazelMcpServer {
                 }
                 () = &mut progress_delay, if progress_token.is_some() => {
                     if let Some(token) = &progress_token
-                        && let Ok(state) = self.runner.invocation_state(id).await
+                        && let Ok(progress) = self.runner.invocation_progress(id).await
                     {
                         let elapsed_ms = progress_started.elapsed().as_millis() as u64;
-                        let message = format!(
+                        let mut message = format!(
                             "state={} elapsed_ms={elapsed_ms}",
-                            format!("{state:?}").to_ascii_lowercase(),
+                            format!("{:?}", progress.state).to_ascii_lowercase(),
                         );
+                        if let Some(phase) = progress.phase {
+                            message.push_str(&format!(
+                                " phase={phase} output_base_lock_wait_ms={}",
+                                progress.output_base_lock_wait_ms,
+                            ));
+                            if let Some(owner) = progress.output_base_lock_owner {
+                                message.push_str(&format!(" owner={owner}"));
+                            }
+                        }
                         if client
                             .notify_progress(
                                 ProgressNotificationParam::new(token.clone(), elapsed_ms as f64)

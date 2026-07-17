@@ -55,6 +55,7 @@ pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
                 config.version_check_timeout_seconds,
             ),
             maximum_pending_invocations: config.maximum_pending_invocations,
+            output_base_lock_root: RunnerConfig::default().output_base_lock_root,
             bep_transport: config.bep_transport,
             starlark_reducers: config.starlark.runner_config(),
         },

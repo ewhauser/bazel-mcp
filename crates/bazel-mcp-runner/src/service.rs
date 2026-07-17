@@ -43,6 +43,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cancel::{ProcessGroupGuard, terminate_child},
     capture,
+    output_base_lock::{
+        NativeOutputBaseWaitObserver, OutputBaseLockAcquisition, OutputBaseWaitStatus,
+        acquire as acquire_output_base_lock, default_output_base_lock_root,
+    },
     version::detect_bazel_version,
 };
 
@@ -75,6 +79,7 @@ pub struct RunnerConfig {
     pub allow_unsupported_bazel_versions: bool,
     pub version_check_timeout: Duration,
     pub maximum_pending_invocations: usize,
+    pub output_base_lock_root: PathBuf,
     pub bep_transport: BepTransport,
     pub starlark_reducers: StarlarkReducerConfig,
 }
@@ -94,6 +99,7 @@ impl Default for RunnerConfig {
             allow_unsupported_bazel_versions: false,
             version_check_timeout: Duration::from_secs(30),
             maximum_pending_invocations: 256,
+            output_base_lock_root: default_output_base_lock_root(),
             bep_transport: BepTransport::Tail,
             starlark_reducers: StarlarkReducerConfig::default(),
         }
@@ -152,6 +158,7 @@ pub struct InvocationService {
     global: Arc<Semaphore>,
     pending: Arc<Semaphore>,
     workspace_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
+    output_base_waits: Arc<Mutex<HashMap<InvocationId, Arc<OutputBaseWaitStatus>>>>,
     live: Arc<Mutex<HashMap<InvocationId, CancellationToken>>>,
     version_cache: Arc<Mutex<HashMap<VersionCacheKey, u32>>>,
     bes: Option<BesServer>,
@@ -169,10 +176,19 @@ struct PreparedSubmission {
     queued: InvocationRecord,
     paths: InvocationPaths,
     lock_key: PathBuf,
+    output_base_wait: Arc<OutputBaseWaitStatus>,
     executable: PathBuf,
     cancellation: CancellationToken,
     _pending_permit: OwnedSemaphorePermit,
     deferred: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationProgress {
+    pub state: InvocationState,
+    pub phase: Option<&'static str>,
+    pub output_base_lock_wait_ms: u64,
+    pub output_base_lock_owner: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -320,6 +336,11 @@ impl InvocationService {
                 "isolated Bazel server idle timeout must be greater than zero",
             ));
         }
+        if config.output_base_lock_root.as_os_str().is_empty() {
+            return Err(RunnerError::InvalidConfiguration(
+                "output-base lock root must not be empty",
+            ));
+        }
         if !config.allow_unsupported_bazel_versions
             && config.supported_bazel_major_versions.is_empty()
         {
@@ -338,6 +359,7 @@ impl InvocationService {
             config,
             redactor,
             workspace_locks: Arc::new(Mutex::new(HashMap::new())),
+            output_base_waits: Arc::new(Mutex::new(HashMap::new())),
             live: Arc::new(Mutex::new(HashMap::new())),
             version_cache: Arc::new(Mutex::new(HashMap::new())),
             bes,
@@ -366,6 +388,7 @@ impl InvocationService {
         let id = prepared.queued.request.id;
         let result = self.run_prepared(prepared).await;
         self.live.lock().await.remove(&id);
+        self.output_base_waits.lock().await.remove(&id);
         result
     }
 
@@ -416,6 +439,7 @@ impl InvocationService {
                 }
             }
             supervisor.live.lock().await.remove(&id);
+            supervisor.output_base_waits.lock().await.remove(&id);
         });
         Ok(id)
     }
@@ -558,12 +582,18 @@ impl InvocationService {
             .store
             .create_invocation_with_deferred(&stored, deferred.as_ref())
             .await?;
+        let output_base_wait = Arc::new(OutputBaseWaitStatus::default());
         self.live.lock().await.insert(id, cancellation.clone());
+        self.output_base_waits
+            .lock()
+            .await
+            .insert(id, output_base_wait.clone());
 
         Ok(PreparedSubmission {
             queued,
             paths,
             lock_key,
+            output_base_wait,
             executable,
             cancellation,
             _pending_permit: pending_permit,
@@ -579,6 +609,7 @@ impl InvocationService {
             queued,
             paths,
             lock_key,
+            output_base_wait,
             executable,
             cancellation,
             _pending_permit,
@@ -591,6 +622,28 @@ impl InvocationService {
                 guard = workspace_lock.lock() => guard,
                 () = cancellation.cancelled() => {
                     return self.finish_cancelled(id).await;
+                }
+            };
+            let output_base_guard = match acquire_output_base_lock(
+                &self.config.output_base_lock_root,
+                &lock_key,
+                id,
+                cancellation.clone(),
+                output_base_wait.clone(),
+            )
+            .await
+            {
+                Ok(OutputBaseLockAcquisition::Acquired(guard)) => guard,
+                Ok(OutputBaseLockAcquisition::Cancelled) => {
+                    return self.finish_cancelled(id).await;
+                }
+                Err(error) => {
+                    return self
+                        .finish_start_failure(
+                            id,
+                            &format!("could not acquire output-base coordination lock: {error}"),
+                        )
+                        .await;
                 }
             };
             let permit = tokio::select! {
@@ -647,13 +700,61 @@ impl InvocationService {
                 return Err(error.into());
             }
             let result = self
-                .execute(&queued, &paths, &executable, cancellation.clone())
+                .execute(
+                    &queued,
+                    &paths,
+                    &executable,
+                    cancellation.clone(),
+                    output_base_wait,
+                )
                 .await;
             drop(workspace_guard);
+            drop(output_base_guard);
             drop(permit);
             result
         }
         .await
+    }
+
+    async fn finish_start_failure(
+        &self,
+        id: InvocationId,
+        message: &str,
+    ) -> Result<InvocationRecord, RunnerError> {
+        let message = self.redactor.redact_bounded(message, 1_000);
+        let current = self.store.get_invocation(id).await?;
+        if current.state.is_terminal() {
+            return Ok(current);
+        }
+        if current.state == InvocationState::Queued
+            && let Err(error) = self
+                .store
+                .transition(id, InvocationState::Starting, None, None)
+                .await
+            && !matches!(error, StoreError::State(_))
+        {
+            return Err(error.into());
+        }
+        let current = self.store.get_invocation(id).await?;
+        if current.state.is_terminal() {
+            return Ok(current);
+        }
+        self.store
+            .transition(
+                id,
+                InvocationState::Failed,
+                Some(Termination::SpawnFailure {
+                    message: message.clone(),
+                }),
+                Some(bazel_mcp_types::InvocationSummary {
+                    success: false,
+                    headline: format!("Could not start Bazel: {message}"),
+                    truncated: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn materialize_worker_failure(
@@ -854,6 +955,27 @@ impl InvocationService {
 
     pub async fn invocation_state(&self, id: InvocationId) -> Result<InvocationState, RunnerError> {
         Ok(self.store.get_invocation(id).await?.state)
+    }
+
+    pub async fn invocation_progress(
+        &self,
+        id: InvocationId,
+    ) -> Result<InvocationProgress, RunnerError> {
+        let state = self.store.get_invocation(id).await?.state;
+        let wait = self.output_base_waits.lock().await.get(&id).cloned();
+        let wait = wait.map(|status| status.snapshot()).unwrap_or_else(|| {
+            crate::output_base_lock::OutputBaseWaitSnapshot {
+                active: false,
+                elapsed_ms: 0,
+                owner: None,
+            }
+        });
+        Ok(InvocationProgress {
+            state,
+            phase: wait.active.then_some("output_base_lock_wait"),
+            output_base_lock_wait_ms: wait.elapsed_ms,
+            output_base_lock_owner: wait.owner,
+        })
     }
 
     pub async fn inspect(&self, request: InspectRequest) -> Result<InspectResult, RunnerError> {
@@ -1102,6 +1224,7 @@ impl InvocationService {
         paths: &InvocationPaths,
         executable: &Path,
         cancellation: CancellationToken,
+        output_base_wait: Arc<OutputBaseWaitStatus>,
     ) -> Result<InvocationRecord, RunnerError> {
         if cancellation.is_cancelled() {
             return self.finish_cancelled(queued.request.id).await;
@@ -1379,6 +1502,12 @@ impl InvocationService {
                     ))
                 })
         });
+        let native_output_base_wait = NativeOutputBaseWaitObserver::start(
+            paths.stdout.clone(),
+            paths.stderr.clone(),
+            paths.bep.clone(),
+            output_base_wait.clone(),
+        );
         let started = Instant::now();
         let timeout = queued
             .request
@@ -1409,6 +1538,8 @@ impl InvocationService {
             }
         };
         process_group.disarm();
+        native_output_base_wait.finish().await;
+        let output_base_wait_snapshot = output_base_wait.snapshot();
         let bazel_wall_ms = duration_millis(started.elapsed());
         let postprocess: Result<InvocationRecord, RunnerError> = async {
             let reduction_started = Instant::now();
@@ -1620,6 +1751,7 @@ impl InvocationService {
                 bep_bytes: capture::file_size(&paths.bep).await,
                 bep_events: u64::try_from(bep_outcome.event_count).unwrap_or(u64::MAX),
                 queue_ms,
+                output_base_lock_wait_ms: output_base_wait_snapshot.elapsed_ms,
                 bazel_wall_ms,
                 reduction_ms: duration_millis(reduction_started.elapsed()),
                 ..Default::default()
