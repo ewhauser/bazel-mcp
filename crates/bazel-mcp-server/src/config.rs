@@ -1,16 +1,22 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::Context;
 use bazel_mcp_policy::PolicyConfig;
-use bazel_mcp_runner::{BepTransport, RunnerConfig, StarlarkLimits, StarlarkReducerConfig};
+use bazel_mcp_runner::RunnerConfig;
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+
+#[cfg(test)]
+use bazel_mcp_runner::BepTransport;
+
+pub use bazel_mcp_policy::RawPolicyConfig;
+pub use bazel_mcp_runner::{RawRunnerConfig, RawStarlarkConfig};
+pub use bazel_mcp_store::{RawRetentionConfig, RetentionConfig};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,101 +37,6 @@ pub enum McpExecutionPolicy {
     TasksRequired,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RawStarlarkConfig {
-    pub files: Vec<PathBuf>,
-    pub max_source_bytes: usize,
-    pub max_input_bytes: usize,
-    pub max_events: usize,
-    pub max_output_bytes: usize,
-    pub max_output_items: usize,
-    pub max_ticks: u64,
-    pub max_heap_bytes: usize,
-    pub max_callstack_size: usize,
-    pub timeout_ms: u64,
-}
-
-impl Default for RawStarlarkConfig {
-    fn default() -> Self {
-        let limits = StarlarkLimits::default();
-        Self {
-            files: Vec::new(),
-            max_source_bytes: limits.max_source_bytes,
-            max_input_bytes: limits.max_input_bytes,
-            max_events: limits.max_events,
-            max_output_bytes: limits.max_output_bytes,
-            max_output_items: limits.max_output_items,
-            max_ticks: limits.max_ticks,
-            max_heap_bytes: limits.max_heap_bytes,
-            max_callstack_size: limits.max_callstack_size,
-            timeout_ms: u64::try_from(limits.timeout.as_millis()).unwrap_or(100),
-        }
-    }
-}
-
-impl RawStarlarkConfig {
-    #[must_use]
-    pub fn runner_config(&self) -> StarlarkReducerConfig {
-        StarlarkReducerConfig {
-            files: self.files.clone(),
-            limits: StarlarkLimits {
-                max_source_bytes: self.max_source_bytes,
-                max_input_bytes: self.max_input_bytes,
-                max_events: self.max_events,
-                max_output_bytes: self.max_output_bytes,
-                max_output_items: self.max_output_items,
-                max_ticks: self.max_ticks,
-                max_heap_bytes: self.max_heap_bytes,
-                max_callstack_size: self.max_callstack_size,
-                timeout: std::time::Duration::from_millis(self.timeout_ms),
-            },
-        }
-    }
-
-    fn canonicalize_files(&mut self, config_path: Option<&Path>) -> anyhow::Result<()> {
-        if self.max_source_bytes == 0
-            || self.max_input_bytes == 0
-            || self.max_events == 0
-            || self.max_output_bytes == 0
-            || self.max_output_items == 0
-            || self.max_ticks == 0
-            || self.max_heap_bytes == 0
-            || self.max_callstack_size == 0
-            || self.timeout_ms == 0
-        {
-            anyhow::bail!("all Starlark reducer resource limits must be greater than zero");
-        }
-        let base = config_path
-            .and_then(Path::parent)
-            .map(Path::to_owned)
-            .unwrap_or(std::env::current_dir()?);
-        let mut seen = BTreeSet::new();
-        self.files = self
-            .files
-            .iter()
-            .map(|path| {
-                let path = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    base.join(path)
-                };
-                let path = path
-                    .canonicalize()
-                    .with_context(|| format!("canonicalize Starlark reducer {}", path.display()))?;
-                if !path.is_file() {
-                    anyhow::bail!("Starlark reducer is not a regular file: {}", path.display());
-                }
-                if !seen.insert(path.clone()) {
-                    anyhow::bail!("duplicate Starlark reducer file: {}", path.display());
-                }
-                Ok(path)
-            })
-            .collect::<anyhow::Result<_>>()?;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, Parser)]
 #[command(name = "bazel-mcp", version, about)]
 pub struct Cli {
@@ -143,100 +54,107 @@ pub struct Cli {
     pub log: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RawServerConfig {
-    pub allowed_roots: Vec<PathBuf>,
-    pub cache_root: PathBuf,
-    pub bazel_executable: Option<PathBuf>,
-    pub output_user_root: Option<PathBuf>,
-    pub allowed_commands: BTreeSet<String>,
-    pub denied_commands: BTreeSet<String>,
-    pub environment_allowlist: BTreeSet<String>,
-    pub redaction_patterns: Vec<String>,
-    pub global_concurrency: usize,
-    pub default_timeout_seconds: u64,
-    pub maximum_timeout_seconds: u64,
-    pub cancellation_interrupt_grace_seconds: u64,
-    pub cancellation_terminate_grace_seconds: u64,
+/// Serializable MCP transport and task-lifecycle settings.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RawMcpConfig {
     pub progress_initial_seconds: u64,
     pub progress_interval_seconds: u64,
-    pub retention_days: u64,
-    pub maximum_storage_bytes: u64,
     pub result_encoding: ResultEncoding,
-    pub supported_bazel_major_versions: BTreeSet<u32>,
-    pub allow_unsupported_bazel_versions: bool,
-    pub version_check_timeout_seconds: u64,
-    pub maximum_pending_invocations: usize,
-    pub retention_cleanup_interval_seconds: u64,
-    pub isolated_bazel_server_idle_seconds: u64,
     pub mcp_execution_policy: McpExecutionPolicy,
     pub task_ttl_seconds: u64,
     pub task_poll_interval_ms: u64,
-    pub bep_transport: BepTransport,
-    pub starlark: RawStarlarkConfig,
 }
 
-impl Default for RawServerConfig {
+impl Default for RawMcpConfig {
     fn default() -> Self {
-        let policy = bazel_mcp_policy::PolicyConfig::default();
         Self {
-            allowed_roots: Vec::new(),
-            cache_root: default_cache_root(),
-            bazel_executable: None,
-            output_user_root: None,
-            allowed_commands: policy.allowed_commands,
-            denied_commands: policy.denied_commands,
-            environment_allowlist: policy.environment_allowlist,
-            redaction_patterns: Vec::new(),
-            global_concurrency: 4,
-            default_timeout_seconds: 30 * 60,
-            maximum_timeout_seconds: 2 * 60 * 60,
-            cancellation_interrupt_grace_seconds: 10,
-            cancellation_terminate_grace_seconds: 5,
             progress_initial_seconds: 30,
             progress_interval_seconds: 60,
-            retention_days: 7,
-            maximum_storage_bytes: 10 * 1024 * 1024 * 1024,
             result_encoding: ResultEncoding::default(),
-            supported_bazel_major_versions: [8, 9].into_iter().collect(),
-            allow_unsupported_bazel_versions: false,
-            version_check_timeout_seconds: 30,
-            maximum_pending_invocations: 256,
-            retention_cleanup_interval_seconds: 60 * 60,
-            isolated_bazel_server_idle_seconds: 60,
             mcp_execution_policy: McpExecutionPolicy::Auto,
             task_ttl_seconds: 24 * 60 * 60,
             task_poll_interval_ms: 2_000,
-            bep_transport: BepTransport::Tail,
-            starlark: RawStarlarkConfig::default(),
         }
     }
 }
 
-#[derive(Clone, Debug)]
-struct ValidatedRunnerConfig {
-    default_timeout: Duration,
-    maximum_timeout: Duration,
-    cancellation_interrupt_grace: Duration,
-    cancellation_terminate_grace: Duration,
-    global_concurrency: NonZeroUsize,
-    output_user_root: Option<PathBuf>,
-    isolated_bazel_server_idle_timeout: Duration,
-    supported_bazel_major_versions: BTreeSet<u32>,
-    allow_unsupported_bazel_versions: bool,
-    version_check_timeout: Duration,
-    maximum_pending_invocations: NonZeroUsize,
-    output_base_lock_root: PathBuf,
-    bep_transport: BepTransport,
-    starlark_reducers: StarlarkReducerConfig,
+/// Flat TOML compatibility layer composed from subsystem-owned raw settings.
+#[derive(Clone, Debug, Serialize)]
+pub struct RawServerConfig {
+    pub cache_root: PathBuf,
+    #[serde(flatten)]
+    pub policy: RawPolicyConfig,
+    #[serde(flatten)]
+    pub runner: RawRunnerConfig,
+    #[serde(flatten)]
+    pub retention: RawRetentionConfig,
+    #[serde(flatten)]
+    pub mcp: RawMcpConfig,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RetentionConfig {
-    pub maximum_age: Duration,
-    pub maximum_storage_bytes: NonZeroU64,
-    pub cleanup_interval: Duration,
+impl Default for RawServerConfig {
+    fn default() -> Self {
+        Self {
+            cache_root: default_cache_root(),
+            policy: RawPolicyConfig::default(),
+            runner: RawRunnerConfig::default(),
+            retention: RawRetentionConfig::default(),
+            mcp: RawMcpConfig::default(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawServerConfigWire {
+    cache_root: PathBuf,
+    #[serde(flatten)]
+    policy: RawPolicyConfig,
+    #[serde(flatten)]
+    runner: RawRunnerConfig,
+    #[serde(flatten)]
+    retention: RawRetentionConfig,
+    #[serde(flatten)]
+    mcp: RawMcpConfig,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
+}
+
+impl Default for RawServerConfigWire {
+    fn default() -> Self {
+        let raw = RawServerConfig::default();
+        Self {
+            cache_root: raw.cache_root,
+            policy: raw.policy,
+            runner: raw.runner,
+            retention: raw.retention,
+            mcp: raw.mcp,
+            unknown: BTreeMap::new(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RawServerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Serde cannot combine `deny_unknown_fields` with flattened structs.
+        // Collecting the unclaimed flat keys preserves the previous strict
+        // compatibility surface without duplicating subsystem fields here.
+        let raw = RawServerConfigWire::deserialize(deserializer)?;
+        if let Some(field) = raw.unknown.keys().next() {
+            return Err(D::Error::custom(format!("unknown field `{field}`")));
+        }
+        Ok(Self {
+            cache_root: raw.cache_root,
+            policy: raw.policy,
+            runner: raw.runner,
+            retention: raw.retention,
+            mcp: raw.mcp,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -249,12 +167,35 @@ pub struct McpConfig {
     pub task_poll_interval: Duration,
 }
 
+impl TryFrom<RawMcpConfig> for McpConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawMcpConfig) -> Result<Self, Self::Error> {
+        if !(100..=60_000).contains(&raw.task_poll_interval_ms) {
+            anyhow::bail!("task poll interval must be between 100 and 60000 milliseconds");
+        }
+        Ok(Self {
+            result_encoding: raw.result_encoding,
+            progress_initial: nonzero_duration(
+                raw.progress_initial_seconds,
+                "progress timing must be greater than zero",
+            )?,
+            progress_interval: nonzero_duration(
+                raw.progress_interval_seconds,
+                "progress timing must be greater than zero",
+            )?,
+            execution_policy: raw.mcp_execution_policy,
+            task_ttl: nonzero_duration(raw.task_ttl_seconds, "task TTL must be greater than zero")?,
+            task_poll_interval: Duration::from_millis(raw.task_poll_interval_ms),
+        })
+    }
+}
+
 /// Configuration that has passed path normalization and all subsystem checks.
 #[derive(Clone, Debug)]
 pub struct ValidatedServerConfig {
     cache_root: PathBuf,
-    policy: PolicyConfig,
-    runner: ValidatedRunnerConfig,
+    runner: RunnerConfig,
     retention: RetentionConfig,
     mcp: McpConfig,
 }
@@ -270,7 +211,9 @@ impl ValidatedServerConfig {
         } else {
             RawServerConfig::default()
         };
-        raw.allowed_roots.extend(cli.allowed_roots.iter().cloned());
+        raw.policy
+            .allowed_roots
+            .extend(cli.allowed_roots.iter().cloned());
         if let Some(cache_root) = &cli.cache_root {
             raw.cache_root = cache_root.clone();
         }
@@ -278,12 +221,10 @@ impl ValidatedServerConfig {
     }
 
     fn try_from_raw(mut raw: RawServerConfig, config_path: Option<&Path>) -> anyhow::Result<Self> {
-        if !(100..=60_000).contains(&raw.task_poll_interval_ms) {
-            anyhow::bail!("task poll interval must be between 100 and 60000 milliseconds");
-        }
-        raw.starlark.canonicalize_files(config_path)?;
+        canonicalize_starlark_files(&mut raw.runner.starlark.files, config_path)?;
         raw.cache_root = canonicalize_with_missing_tail(&raw.cache_root)?;
-        raw.allowed_roots = raw
+        raw.policy.allowed_roots = raw
+            .policy
             .allowed_roots
             .iter()
             .map(|root| {
@@ -291,88 +232,30 @@ impl ValidatedServerConfig {
                     .with_context(|| format!("canonicalize allowed root {}", root.display()))
             })
             .collect::<anyhow::Result<_>>()?;
-        if let Some(output_user_root) = &raw.output_user_root {
-            raw.output_user_root = Some(canonicalize_with_missing_tail(output_user_root)?);
+        if let Some(output_user_root) = &raw.runner.output_user_root {
+            raw.runner.output_user_root = Some(canonicalize_with_missing_tail(output_user_root)?);
         }
-        if let Some(executable) = &raw.bazel_executable {
-            raw.bazel_executable = Some(canonicalize_with_missing_tail(executable)?);
+        if let Some(executable) = &raw.policy.bazel_executable {
+            raw.policy.bazel_executable = Some(canonicalize_with_missing_tail(executable)?);
         }
-        for root in &raw.allowed_roots {
+        for root in &raw.policy.allowed_roots {
             if raw.cache_root.starts_with(root) {
                 anyhow::bail!("cache root must not be inside an allowed Bazel workspace root");
             }
         }
 
-        let global_concurrency = NonZeroUsize::new(raw.global_concurrency)
-            .context("global concurrency must be greater than zero")?;
-        let maximum_pending_invocations = NonZeroUsize::new(raw.maximum_pending_invocations)
-            .context("maximum pending invocations must be greater than zero")?;
-        let maximum_storage_bytes = NonZeroU64::new(raw.maximum_storage_bytes)
-            .context("maximum storage bytes must be greater than zero")?;
-
-        let retention = RetentionConfig {
-            maximum_age: Duration::from_secs(raw.retention_days.saturating_mul(24 * 60 * 60)),
-            maximum_storage_bytes,
-            cleanup_interval: nonzero_duration(
-                raw.retention_cleanup_interval_seconds,
-                "retention cleanup interval must be greater than zero",
-            )?,
-        };
-        let mcp = McpConfig {
-            result_encoding: raw.result_encoding,
-            progress_initial: nonzero_duration(
-                raw.progress_initial_seconds,
-                "progress timing must be greater than zero",
-            )?,
-            progress_interval: nonzero_duration(
-                raw.progress_interval_seconds,
-                "progress timing must be greater than zero",
-            )?,
-            execution_policy: raw.mcp_execution_policy,
-            task_ttl: nonzero_duration(raw.task_ttl_seconds, "task TTL must be greater than zero")?,
-            task_poll_interval: Duration::from_millis(raw.task_poll_interval_ms),
-        };
-        let policy = PolicyConfig {
-            allowed_roots: raw.allowed_roots,
-            allowed_commands: raw.allowed_commands,
-            denied_commands: raw.denied_commands,
-            environment_allowlist: raw.environment_allowlist,
-            redaction_patterns: raw.redaction_patterns,
-            bazel_executable: raw.bazel_executable,
-        };
-        let runner = ValidatedRunnerConfig {
-            default_timeout: Duration::from_secs(raw.default_timeout_seconds),
-            maximum_timeout: Duration::from_secs(raw.maximum_timeout_seconds),
-            cancellation_interrupt_grace: Duration::from_secs(
-                raw.cancellation_interrupt_grace_seconds,
-            ),
-            cancellation_terminate_grace: Duration::from_secs(
-                raw.cancellation_terminate_grace_seconds,
-            ),
-            global_concurrency,
-            output_user_root: raw.output_user_root,
-            isolated_bazel_server_idle_timeout: Duration::from_secs(
-                raw.isolated_bazel_server_idle_seconds,
-            ),
-            supported_bazel_major_versions: raw.supported_bazel_major_versions,
-            allow_unsupported_bazel_versions: raw.allow_unsupported_bazel_versions,
-            version_check_timeout: Duration::from_secs(raw.version_check_timeout_seconds),
-            maximum_pending_invocations,
-            output_base_lock_root: RunnerConfig::default().output_base_lock_root,
-            bep_transport: raw.bep_transport,
-            starlark_reducers: raw.starlark.runner_config(),
-        };
-        let config = Self {
+        let policy = PolicyConfig::try_from(raw.policy).context("validate policy configuration")?;
+        let runner = RunnerConfig::try_from((raw.runner, policy))
+            .context("validate runner configuration")?;
+        let retention =
+            RetentionConfig::try_from(raw.retention).context("validate retention configuration")?;
+        let mcp = McpConfig::try_from(raw.mcp).context("validate MCP configuration")?;
+        Ok(Self {
             cache_root: raw.cache_root,
-            policy,
             runner,
             retention,
             mcp,
-        };
-        RunnerConfig::from(&config)
-            .validate()
-            .context("validate runner configuration")?;
-        Ok(config)
+        })
     }
 
     #[must_use]
@@ -406,7 +289,7 @@ impl TryFrom<RawServerConfig> for ValidatedServerConfig {
 
 impl From<&ValidatedServerConfig> for PolicyConfig {
     fn from(config: &ValidatedServerConfig) -> Self {
-        config.policy.clone()
+        config.runner.policy.clone()
     }
 }
 
@@ -418,24 +301,7 @@ impl From<ValidatedServerConfig> for PolicyConfig {
 
 impl From<&ValidatedServerConfig> for RunnerConfig {
     fn from(config: &ValidatedServerConfig) -> Self {
-        let runner = &config.runner;
-        Self {
-            policy: PolicyConfig::from(config),
-            default_timeout: runner.default_timeout,
-            maximum_timeout: runner.maximum_timeout,
-            cancellation_interrupt_grace: runner.cancellation_interrupt_grace,
-            cancellation_terminate_grace: runner.cancellation_terminate_grace,
-            global_concurrency: runner.global_concurrency.get(),
-            output_user_root: runner.output_user_root.clone(),
-            isolated_bazel_server_idle_timeout: runner.isolated_bazel_server_idle_timeout,
-            supported_bazel_major_versions: runner.supported_bazel_major_versions.clone(),
-            allow_unsupported_bazel_versions: runner.allow_unsupported_bazel_versions,
-            version_check_timeout: runner.version_check_timeout,
-            maximum_pending_invocations: runner.maximum_pending_invocations.get(),
-            output_base_lock_root: runner.output_base_lock_root.clone(),
-            bep_transport: runner.bep_transport,
-            starlark_reducers: runner.starlark_reducers.clone(),
-        }
+        config.runner.clone()
     }
 }
 
@@ -467,6 +333,38 @@ impl From<ValidatedServerConfig> for McpConfig {
     fn from(config: ValidatedServerConfig) -> Self {
         Self::from(&config)
     }
+}
+
+fn canonicalize_starlark_files(
+    files: &mut Vec<PathBuf>,
+    config_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let base = config_path
+        .and_then(Path::parent)
+        .map(Path::to_owned)
+        .unwrap_or(std::env::current_dir()?);
+    let mut seen = BTreeSet::new();
+    *files = files
+        .iter()
+        .map(|path| {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                base.join(path)
+            };
+            let path = path
+                .canonicalize()
+                .with_context(|| format!("canonicalize Starlark reducer {}", path.display()))?;
+            if !path.is_file() {
+                anyhow::bail!("Starlark reducer is not a regular file: {}", path.display());
+            }
+            if !seen.insert(path.clone()) {
+                anyhow::bail!("duplicate Starlark reducer file: {}", path.display());
+            }
+            Ok(path)
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(())
 }
 
 fn nonzero_duration(seconds: u64, message: &'static str) -> anyhow::Result<Duration> {
@@ -611,7 +509,7 @@ mod tests {
 
         let config = ValidatedServerConfig::load(&cli(path)).unwrap();
 
-        assert!(config.policy.allowed_roots.is_empty());
+        assert!(config.runner.policy.allowed_roots.is_empty());
     }
 
     #[test]
@@ -724,7 +622,7 @@ mod tests {
     fn toon_is_the_default_result_encoding() {
         assert_eq!(ResultEncoding::default(), ResultEncoding::Toon);
         assert_eq!(
-            RawServerConfig::default().result_encoding,
+            RawServerConfig::default().mcp.result_encoding,
             ResultEncoding::Toon
         );
     }
@@ -732,9 +630,9 @@ mod tests {
     #[test]
     fn task_configuration_defaults_and_round_trips() {
         let config = RawServerConfig::default();
-        assert_eq!(config.mcp_execution_policy, McpExecutionPolicy::Auto);
-        assert_eq!(config.task_ttl_seconds, 86_400);
-        assert_eq!(config.task_poll_interval_ms, 2_000);
+        assert_eq!(config.mcp.mcp_execution_policy, McpExecutionPolicy::Auto);
+        assert_eq!(config.mcp.task_ttl_seconds, 86_400);
+        assert_eq!(config.mcp.task_poll_interval_ms, 2_000);
 
         for (name, expected) in [
             ("auto", McpExecutionPolicy::Auto),
@@ -750,7 +648,10 @@ mod tests {
 
     #[test]
     fn bep_transport_defaults_to_tail_and_accepts_fifo_and_bes() {
-        assert_eq!(RawServerConfig::default().bep_transport, BepTransport::Tail);
+        assert_eq!(
+            RawServerConfig::default().runner.bep_transport,
+            BepTransport::Tail
+        );
         assert_eq!(
             serde_json::from_str::<BepTransport>("\"fifo\"").unwrap(),
             BepTransport::Fifo
@@ -860,5 +761,24 @@ mod tests {
         assert_eq!(mcp.progress_interval, Duration::from_secs(13));
         assert_eq!(mcp.task_ttl, Duration::from_secs(14));
         assert_eq!(mcp.task_poll_interval, Duration::from_millis(150));
+    }
+
+    #[test]
+    fn flat_toml_round_trips_through_subsystem_raw_configs() {
+        let raw = RawServerConfig::default();
+        let encoded = toml::to_string(&raw).unwrap();
+        assert!(!encoded.contains("[policy]"));
+        assert!(!encoded.contains("[runner]"));
+        assert!(!encoded.contains("[retention]"));
+        assert!(!encoded.contains("[mcp]"));
+        assert!(encoded.contains("global_concurrency = 4"));
+        assert!(encoded.contains("retention_days = 7"));
+        assert!(encoded.contains("task_poll_interval_ms = 2000"));
+
+        let decoded: RawServerConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.policy, RawPolicyConfig::default());
+        assert_eq!(decoded.runner, RawRunnerConfig::default());
+        assert_eq!(decoded.retention, RawRetentionConfig::default());
+        assert_eq!(decoded.mcp, RawMcpConfig::default());
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,7 +12,9 @@ use bazel_mcp_policy::{
     resolve_bazel_executable, validate_arguments, validate_command, validate_query_arguments,
     validate_workspace,
 };
-use bazel_mcp_reducer::{ReducerPipeline, StarlarkReducerConfig, load_starlark_reducers};
+use bazel_mcp_reducer::{
+    RawStarlarkConfig, ReducerPipeline, StarlarkReducerConfig, load_starlark_reducers,
+};
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, Store, StoreError};
 use bazel_mcp_types::{
     DeferredFailure, DeferredFailureKind, DeferredResultRecord, DeferredResultView,
@@ -21,7 +23,7 @@ use bazel_mcp_types::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{Mutex, OwnedSemaphorePermit};
+use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -60,6 +62,46 @@ pub enum BepTransport {
     /// setup or Bazel server PID discovery is unavailable.
     Fifo,
     Bes,
+}
+
+/// Serializable invocation settings owned and validated by the runner.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RawRunnerConfig {
+    pub default_timeout_seconds: u64,
+    pub maximum_timeout_seconds: u64,
+    pub cancellation_interrupt_grace_seconds: u64,
+    pub cancellation_terminate_grace_seconds: u64,
+    pub global_concurrency: usize,
+    pub output_user_root: Option<PathBuf>,
+    pub isolated_bazel_server_idle_seconds: u64,
+    pub supported_bazel_major_versions: BTreeSet<u32>,
+    pub allow_unsupported_bazel_versions: bool,
+    pub version_check_timeout_seconds: u64,
+    pub maximum_pending_invocations: usize,
+    pub bep_transport: BepTransport,
+    pub starlark: RawStarlarkConfig,
+}
+
+impl Default for RawRunnerConfig {
+    fn default() -> Self {
+        let config = RunnerConfig::default();
+        Self {
+            default_timeout_seconds: config.default_timeout.as_secs(),
+            maximum_timeout_seconds: config.maximum_timeout.as_secs(),
+            cancellation_interrupt_grace_seconds: config.cancellation_interrupt_grace.as_secs(),
+            cancellation_terminate_grace_seconds: config.cancellation_terminate_grace.as_secs(),
+            global_concurrency: config.global_concurrency,
+            output_user_root: config.output_user_root,
+            isolated_bazel_server_idle_seconds: config.isolated_bazel_server_idle_timeout.as_secs(),
+            supported_bazel_major_versions: config.supported_bazel_major_versions,
+            allow_unsupported_bazel_versions: config.allow_unsupported_bazel_versions,
+            version_check_timeout_seconds: config.version_check_timeout.as_secs(),
+            maximum_pending_invocations: config.maximum_pending_invocations,
+            bep_transport: config.bep_transport,
+            starlark: RawStarlarkConfig::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +197,48 @@ impl RunnerConfig {
     }
 }
 
+impl TryFrom<(RawRunnerConfig, PolicyConfig)> for RunnerConfig {
+    type Error = RunnerError;
+
+    fn try_from((raw, policy): (RawRunnerConfig, PolicyConfig)) -> Result<Self, Self::Error> {
+        let starlark_reducers = StarlarkReducerConfig::try_from(raw.starlark)
+            .map_err(|error| RunnerError::ReducerConfiguration(error.to_string()))?;
+        let config = Self {
+            policy,
+            default_timeout: Duration::from_secs(raw.default_timeout_seconds),
+            maximum_timeout: Duration::from_secs(raw.maximum_timeout_seconds),
+            cancellation_interrupt_grace: Duration::from_secs(
+                raw.cancellation_interrupt_grace_seconds,
+            ),
+            cancellation_terminate_grace: Duration::from_secs(
+                raw.cancellation_terminate_grace_seconds,
+            ),
+            global_concurrency: raw.global_concurrency,
+            output_user_root: raw.output_user_root,
+            isolated_bazel_server_idle_timeout: Duration::from_secs(
+                raw.isolated_bazel_server_idle_seconds,
+            ),
+            supported_bazel_major_versions: raw.supported_bazel_major_versions,
+            allow_unsupported_bazel_versions: raw.allow_unsupported_bazel_versions,
+            version_check_timeout: Duration::from_secs(raw.version_check_timeout_seconds),
+            maximum_pending_invocations: raw.maximum_pending_invocations,
+            output_base_lock_root: default_output_base_lock_root(),
+            bep_transport: raw.bep_transport,
+            starlark_reducers,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+impl TryFrom<RawRunnerConfig> for RunnerConfig {
+    type Error = RunnerError;
+
+    fn try_from(raw: RawRunnerConfig) -> Result<Self, Self::Error> {
+        Self::try_from((raw, PolicyConfig::default()))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunnerError {
     #[error(transparent)]
@@ -205,7 +289,7 @@ pub struct InvocationService {
     pub(crate) config: RunnerConfig,
     pub(crate) redactor: Redactor,
     scheduler: InvocationScheduler,
-    version_cache: Arc<Mutex<HashMap<VersionCacheKey, u32>>>,
+    version_cache: Arc<Mutex<HashMap<VersionCacheKey, Arc<VersionProbe>>>>,
     pub(crate) bes: Option<BesServer>,
     pub(crate) reducers: ReducerPipeline,
 }
@@ -216,6 +300,8 @@ struct VersionCacheKey {
     workspace: PathBuf,
     environment: Vec<(String, String)>,
 }
+
+type VersionProbe = OnceCell<Result<u32, String>>;
 
 struct PreparedSubmission {
     queued: InvocationRecord,
@@ -816,24 +902,41 @@ impl InvocationService {
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
         };
-        let mut version_cache = self.version_cache.lock().await;
-        let major = if let Some(major) = version_cache.get(&key).copied() {
-            major
-        } else {
-            let version = detect_bazel_version(
-                executable,
-                workspace,
-                &environment,
-                self.config.version_check_timeout,
-                self.config.cancellation_interrupt_grace,
-                self.config.cancellation_terminate_grace,
-            )
-            .await
-            .map_err(|error| RunnerError::VersionCheck(error.to_string()))?;
-            version_cache.insert(key, version.major);
-            version.major
+        let probe = {
+            let mut version_cache = self.version_cache.lock().await;
+            version_cache
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
         };
-        drop(version_cache);
+        let result = probe
+            .get_or_init(|| async {
+                detect_bazel_version(
+                    executable,
+                    workspace,
+                    &environment,
+                    self.config.version_check_timeout,
+                    self.config.cancellation_interrupt_grace,
+                    self.config.cancellation_terminate_grace,
+                )
+                .await
+                .map(|version| version.major)
+                .map_err(|error| error.to_string())
+            })
+            .await;
+        let major = match result {
+            Ok(major) => *major,
+            Err(error) => {
+                let mut version_cache = self.version_cache.lock().await;
+                if version_cache
+                    .get(&key)
+                    .is_some_and(|cached| Arc::ptr_eq(cached, &probe))
+                {
+                    version_cache.remove(&key);
+                }
+                return Err(RunnerError::VersionCheck(error.clone()));
+            }
+        };
         if self.config.supported_bazel_major_versions.contains(&major) {
             Ok(())
         } else {
@@ -1039,6 +1142,25 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn raw_runner_defaults_project_to_runtime_defaults() {
+        let expected = RunnerConfig::default();
+        let actual = RunnerConfig::try_from(RawRunnerConfig::default()).unwrap();
+        assert_eq!(actual.default_timeout, expected.default_timeout);
+        assert_eq!(actual.maximum_timeout, expected.maximum_timeout);
+        assert_eq!(actual.global_concurrency, expected.global_concurrency);
+        assert_eq!(
+            actual.maximum_pending_invocations,
+            expected.maximum_pending_invocations
+        );
+        assert_eq!(
+            actual.supported_bazel_major_versions,
+            expected.supported_bazel_major_versions
+        );
+        assert_eq!(actual.bep_transport, expected.bep_transport);
+        assert_eq!(actual.starlark_reducers, expected.starlark_reducers);
+    }
 
     #[test]
     fn skips_eager_failure_evidence_only_for_successful_queries() {

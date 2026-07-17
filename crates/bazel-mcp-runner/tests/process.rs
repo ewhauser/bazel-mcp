@@ -1671,6 +1671,109 @@ async fn rejects_unsupported_bazel_versions_before_creating_evidence() {
 }
 
 #[tokio::test]
+async fn version_probes_are_singleflight_per_key_without_cross_key_serialization() {
+    let root = tempfile::tempdir().unwrap();
+    let first_workspace = root.path().join("first-workspace");
+    let second_workspace = root.path().join("second-workspace");
+    tokio::fs::create_dir(&first_workspace).await.unwrap();
+    tokio::fs::create_dir(&second_workspace).await.unwrap();
+    tokio::fs::write(
+        second_workspace.join("MODULE.bazel"),
+        "module(name='second')\n",
+    )
+    .await
+    .unwrap();
+    let service = configured_service(
+        &root,
+        &first_workspace,
+        r#"#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  mkdir "$PWD/version-probe" 2>/dev/null || touch "$PWD/duplicate-version-probe"
+  touch "$PWD/version-started"
+  i=0
+  while [ ! -f "$PWD/release-version" ] && [ "$i" -lt 500 ]; do
+    i=$((i+1))
+    sleep 0.01
+  done
+  echo 'bazel 9.1.0'
+  exit 0
+fi
+exit 0
+"#,
+        |_| {},
+    )
+    .await;
+
+    let first = tokio::spawn({
+        let service = service.clone();
+        let workspace = first_workspace.clone();
+        async move {
+            service
+                .run(InvocationRequest::new(
+                    workspace,
+                    BazelCommand::Build,
+                    vec!["//:first".into()],
+                ))
+                .await
+        }
+    });
+    wait_for_path(&first_workspace.join("version-started")).await;
+
+    let identical = tokio::spawn({
+        let service = service.clone();
+        let workspace = first_workspace.clone();
+        async move {
+            service
+                .run(InvocationRequest::new(
+                    workspace,
+                    BazelCommand::Build,
+                    vec!["//:identical".into()],
+                ))
+                .await
+        }
+    });
+    let unrelated = tokio::spawn({
+        let service = service.clone();
+        let workspace = second_workspace.clone();
+        async move {
+            service
+                .run(InvocationRequest::new(
+                    workspace,
+                    BazelCommand::Build,
+                    vec!["//:unrelated".into()],
+                ))
+                .await
+        }
+    });
+
+    let unrelated_started = tokio::time::timeout(
+        Duration::from_millis(500),
+        wait_for_path(&second_workspace.join("version-started")),
+    )
+    .await
+    .is_ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::fs::write(first_workspace.join("release-version"), "")
+        .await
+        .unwrap();
+    tokio::fs::write(second_workspace.join("release-version"), "")
+        .await
+        .unwrap();
+
+    for result in [first.await, identical.await, unrelated.await] {
+        assert_eq!(result.unwrap().unwrap().state, InvocationState::Succeeded);
+    }
+    assert!(
+        unrelated_started,
+        "an unrelated version probe was serialized behind the first key"
+    );
+    assert!(
+        !first_workspace.join("duplicate-version-probe").exists(),
+        "identical version probes were not coalesced"
+    );
+}
+
+#[tokio::test]
 async fn queued_cancellation_returns_a_complete_terminal_summary() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

@@ -1,5 +1,6 @@
 //! Database-free, crash-recoverable invocation evidence storage.
 
+mod config;
 mod coordination;
 mod cursor;
 mod deferred_repository;
@@ -17,6 +18,7 @@ mod retention;
 mod storage;
 mod telemetry;
 
+pub use config::{RawRetentionConfig, RetentionConfig, RetentionConfigError};
 pub use files::InvocationPaths;
 pub use record::{
     CoverageHeader, HydratedInvocation, InvocationDetails, InvocationHeader,

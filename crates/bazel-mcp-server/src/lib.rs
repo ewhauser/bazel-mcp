@@ -8,8 +8,9 @@ mod tasks;
 
 pub use bazel_mcp_runner::BepTransport;
 pub use config::{
-    Cli, McpConfig, McpExecutionPolicy, RawServerConfig, RawStarlarkConfig, ResultEncoding,
-    RetentionConfig, ValidatedServerConfig,
+    Cli, McpConfig, McpExecutionPolicy, RawMcpConfig, RawPolicyConfig, RawRetentionConfig,
+    RawRunnerConfig, RawServerConfig, RawStarlarkConfig, ResultEncoding, RetentionConfig,
+    ValidatedServerConfig,
 };
 pub use handler::BazelMcpServer;
 
