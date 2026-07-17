@@ -14,9 +14,12 @@ use bazel_mcp_store::Store;
 use rmcp::RoleServer;
 
 pub async fn serve(config: ServerConfig) -> anyhow::Result<()> {
-    let store = Store::open(&config.cache_root)
-        .await
-        .context("open invocation store")?;
+    let store = Store::open(&config.cache_root).await.with_context(|| {
+        format!(
+            "open shared invocation store at {}",
+            config.cache_root.display()
+        )
+    })?;
     store
         .enforce_retention(
             std::time::Duration::from_secs(config.retention_days.saturating_mul(24 * 60 * 60)),

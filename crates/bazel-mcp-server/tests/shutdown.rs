@@ -8,7 +8,7 @@ use nix::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
+    process::{Child, Command},
 };
 
 async fn wait_for_path(path: &Path) {
@@ -19,6 +19,95 @@ async fn wait_for_path(path: &Path) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("timed out waiting for {}", path.display());
+}
+
+async fn initialize(server: &mut Child, client_name: &str) {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": client_name, "version": "1"}
+        }
+    });
+    let stdin = server.stdin.as_mut().unwrap();
+    stdin
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        BufReader::new(server.stdout.as_mut().unwrap()).read_line(&mut line),
+    )
+    .await
+    .expect("server did not initialize before timeout")
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line)
+            .unwrap()
+            .get("id"),
+        Some(&serde_json::json!(1))
+    );
+}
+
+#[tokio::test]
+async fn two_servers_start_with_one_shared_cache_root() {
+    let root = tempfile::tempdir().unwrap();
+    let cache_root = root.path().join("store");
+    let fake_bazel = root.path().join("fake-bazel");
+    tokio::fs::write(
+        &fake_bazel,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nexit 0\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::set_permissions(&fake_bazel, std::fs::Permissions::from_mode(0o700))
+        .await
+        .unwrap();
+
+    let mut configs = Vec::new();
+    for name in ["a", "b"] {
+        let workspace = root.path().join(format!("worktree-{name}"));
+        tokio::fs::create_dir(&workspace).await.unwrap();
+        tokio::fs::write(
+            workspace.join("MODULE.bazel"),
+            format!("module(name='{name}')\n"),
+        )
+        .await
+        .unwrap();
+        let config = root.path().join(format!("config-{name}.toml"));
+        tokio::fs::write(
+            &config,
+            format!(
+                "allowed_roots = [{workspace:?}]\ncache_root = {cache_root:?}\nbazel_executable = {fake_bazel:?}\n"
+            ),
+        )
+        .await
+        .unwrap();
+        configs.push(config);
+    }
+
+    let spawn = |config: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_bazel-mcp"))
+            .args(["--config", config.to_str().unwrap(), "--log", "error"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    };
+    let mut first = spawn(&configs[0]);
+    initialize(&mut first, "shared-cache-a").await;
+    let mut second = spawn(&configs[1]);
+    initialize(&mut second, "shared-cache-b").await;
+    assert!(first.try_wait().unwrap().is_none());
+    assert!(second.try_wait().unwrap().is_none());
+    first.start_kill().unwrap();
+    second.start_kill().unwrap();
+    let _ = first.wait().await;
+    let _ = second.wait().await;
 }
 
 #[tokio::test]
