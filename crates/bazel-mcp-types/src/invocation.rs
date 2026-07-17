@@ -173,6 +173,8 @@ pub struct InvocationMetrics {
     pub progress_notifications: u64,
     pub inspect_calls: u64,
     pub queue_ms: u64,
+    #[serde(default)]
+    pub output_base_lock_wait_ms: u64,
     pub bazel_wall_ms: u64,
     pub reduction_ms: u64,
 }

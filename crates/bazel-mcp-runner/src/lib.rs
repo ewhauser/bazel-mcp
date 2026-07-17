@@ -2,11 +2,12 @@
 
 mod cancel;
 mod capture;
+mod output_base_lock;
 mod service;
 mod version;
 
 pub use bazel_mcp_reducer::{StarlarkLimits, StarlarkReducerConfig};
 pub use service::{
-    BepTransport, CancelResult, InspectRequest, InspectResult, InspectView, InvocationService,
-    RunnerConfig, RunnerError,
+    BepTransport, CancelResult, InspectRequest, InspectResult, InspectView, InvocationProgress,
+    InvocationService, RunnerConfig, RunnerError,
 };

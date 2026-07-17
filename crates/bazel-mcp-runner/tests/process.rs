@@ -13,7 +13,7 @@ use bazel_mcp_bep::proto::{
 use bazel_mcp_bep::{encode_event_id, encode_frame};
 use bazel_mcp_policy::PolicyConfig;
 use bazel_mcp_runner::{
-    BepTransport, InspectRequest, InspectView, InvocationService, RunnerConfig,
+    BepTransport, InspectRequest, InspectView, InvocationProgress, InvocationService, RunnerConfig,
     StarlarkReducerConfig,
 };
 use bazel_mcp_store::Store;
@@ -92,6 +92,22 @@ async fn wait_for_invocation(service: &InvocationService, id: bazel_mcp_types::I
     panic!("timed out waiting for invocation {id}");
 }
 
+async fn wait_for_output_base_wait(
+    service: &InvocationService,
+    id: bazel_mcp_types::InvocationId,
+) -> InvocationProgress {
+    for _ in 0..500 {
+        if let Ok(progress) = service.invocation_progress(id).await
+            && progress.phase == Some("output_base_lock_wait")
+            && progress.output_base_lock_wait_ms > 0
+        {
+            return progress;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for output-base lock progress for {id}");
+}
+
 async fn service(root: &TempDir, workspace: &Path, script: &str) -> InvocationService {
     service_with_redaction(root, workspace, script, Vec::new()).await
 }
@@ -166,6 +182,34 @@ async fn configured_service(
         config,
     )
     .await
+    .unwrap()
+}
+
+async fn shared_executable_service(
+    root: &TempDir,
+    workspace: &Path,
+    executable: &Path,
+    store_name: &str,
+    output_base_lock_root: &Path,
+) -> InvocationService {
+    tokio::fs::write(workspace.join("MODULE.bazel"), "module(name='test')\n")
+        .await
+        .unwrap();
+    let policy = PolicyConfig {
+        allowed_roots: vec![root.path().to_owned()],
+        bazel_executable: Some(executable.to_owned()),
+        ..PolicyConfig::default()
+    };
+    InvocationService::new(
+        Store::open(root.path().join(store_name)).await.unwrap(),
+        RunnerConfig {
+            policy,
+            cancellation_interrupt_grace: Duration::from_millis(100),
+            cancellation_terminate_grace: Duration::from_millis(100),
+            output_base_lock_root: output_base_lock_root.to_owned(),
+            ..RunnerConfig::default()
+        },
+    )
     .unwrap()
 }
 
@@ -1621,6 +1665,240 @@ exit 0\n",
     for run in same_workspace {
         run.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn independent_services_serialize_each_request_by_explicit_output_base() {
+    let root = tempfile::tempdir().unwrap();
+    let first_workspace = root.path().join("first-workspace");
+    let second_workspace = root.path().join("second-workspace");
+    let first_started = root.path().join("first-started");
+    let first_release = root.path().join("first-release");
+    let second_started = root.path().join("second-started");
+    tokio::fs::create_dir(&first_workspace).await.unwrap();
+    tokio::fs::create_dir(&second_workspace).await.unwrap();
+    let executable = root.path().join("shared-fake-bazel");
+    let script = format!(
+        "#!/bin/sh\n\
+if [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n\
+for arg in \"$@\"; do\n\
+  case \"$arg\" in\n\
+    //:first)\n\
+      touch '{}'\n\
+      while [ ! -f '{}' ]; do sleep 0.01; done\n\
+      exit 0\n\
+      ;;\n\
+    //:second) touch '{}'; exit 0 ;;\n\
+  esac\n\
+done\n\
+exit 0\n",
+        first_started.display(),
+        first_release.display(),
+        second_started.display(),
+    );
+    tokio::fs::write(&executable, script).await.unwrap();
+    tokio::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .await
+        .unwrap();
+    let lock_root = root.path().join("shared-output-base-locks");
+    let first_service = shared_executable_service(
+        &root,
+        &first_workspace,
+        &executable,
+        "first-store",
+        &lock_root,
+    )
+    .await;
+    let second_service = shared_executable_service(
+        &root,
+        &second_workspace,
+        &executable,
+        "second-store",
+        &lock_root,
+    )
+    .await;
+    let output_base = root.path().join("shared-output-base");
+    let startup_argument = format!("--output_base={}", output_base.display());
+    let mut first_request = InvocationRequest::new(
+        first_workspace,
+        BazelCommand::Build,
+        vec!["//:first".to_owned()],
+    );
+    first_request.startup_arguments = vec![startup_argument.clone()];
+    let first_run = tokio::spawn({
+        let service = first_service.clone();
+        async move { service.run(first_request).await.unwrap() }
+    });
+    wait_for_path(&first_started).await;
+
+    let mut second_request = InvocationRequest::new(
+        second_workspace,
+        BazelCommand::Build,
+        vec!["//:second".to_owned()],
+    );
+    second_request.startup_arguments = vec![startup_argument];
+    let second_id = second_request.id;
+    let second_run = tokio::spawn({
+        let service = second_service.clone();
+        async move { service.run(second_request).await.unwrap() }
+    });
+    wait_for_invocation(&second_service, second_id).await;
+    let progress = wait_for_output_base_wait(&second_service, second_id).await;
+
+    assert!(
+        progress
+            .output_base_lock_owner
+            .as_deref()
+            .is_some_and(|owner| owner.starts_with("bazel_mcp:pid="))
+    );
+    assert!(
+        !second_started.exists(),
+        "the second Bazel client started before the first released the shared output base"
+    );
+    tokio::fs::write(&first_release, b"release").await.unwrap();
+    let first_record = first_run.await.unwrap();
+    let second_record = second_run.await.unwrap();
+
+    assert_eq!(first_record.state, InvocationState::Succeeded);
+    assert_eq!(second_record.state, InvocationState::Succeeded);
+    assert!(second_started.exists());
+    assert!(second_record.metrics.output_base_lock_wait_ms > 0);
+}
+
+#[tokio::test]
+async fn cancellation_while_waiting_for_cross_process_output_base_lock_never_spawns_bazel() {
+    let root = tempfile::tempdir().unwrap();
+    let first_workspace = root.path().join("first-workspace");
+    let second_workspace = root.path().join("second-workspace");
+    let first_started = root.path().join("first-started");
+    let first_release = root.path().join("first-release");
+    let second_started = root.path().join("second-started");
+    tokio::fs::create_dir(&first_workspace).await.unwrap();
+    tokio::fs::create_dir(&second_workspace).await.unwrap();
+    let executable = root.path().join("cancellable-fake-bazel");
+    let script = format!(
+        "#!/bin/sh\n\
+if [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n\
+for arg in \"$@\"; do\n\
+  case \"$arg\" in\n\
+    //:first)\n\
+      touch '{}'\n\
+      while [ ! -f '{}' ]; do sleep 0.01; done\n\
+      exit 0\n\
+      ;;\n\
+    //:second) touch '{}'; exit 0 ;;\n\
+  esac\n\
+done\n\
+exit 0\n",
+        first_started.display(),
+        first_release.display(),
+        second_started.display(),
+    );
+    tokio::fs::write(&executable, script).await.unwrap();
+    tokio::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .await
+        .unwrap();
+    let lock_root = root.path().join("shared-output-base-locks");
+    let first_service = shared_executable_service(
+        &root,
+        &first_workspace,
+        &executable,
+        "first-store",
+        &lock_root,
+    )
+    .await;
+    let second_service = shared_executable_service(
+        &root,
+        &second_workspace,
+        &executable,
+        "second-store",
+        &lock_root,
+    )
+    .await;
+    let output_base = root.path().join("shared-output-base");
+    let startup_argument = format!("--output_base={}", output_base.display());
+    let mut first_request = InvocationRequest::new(
+        first_workspace,
+        BazelCommand::Build,
+        vec!["//:first".to_owned()],
+    );
+    first_request.startup_arguments = vec![startup_argument.clone()];
+    let first_run = tokio::spawn({
+        let service = first_service.clone();
+        async move { service.run(first_request).await.unwrap() }
+    });
+    wait_for_path(&first_started).await;
+
+    let mut second_request = InvocationRequest::new(
+        second_workspace,
+        BazelCommand::Build,
+        vec!["//:second".to_owned()],
+    );
+    second_request.startup_arguments = vec![startup_argument];
+    let second_id = second_request.id;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let second_run = tokio::spawn({
+        let service = second_service.clone();
+        async move {
+            service
+                .run_with_cancellation(second_request, run_cancellation)
+                .await
+                .unwrap()
+        }
+    });
+    wait_for_invocation(&second_service, second_id).await;
+    wait_for_output_base_wait(&second_service, second_id).await;
+    cancellation.cancel();
+    let second_record = second_run.await.unwrap();
+
+    assert_eq!(second_record.state, InvocationState::Cancelled);
+    assert!(!second_started.exists());
+    tokio::fs::write(&first_release, b"release").await.unwrap();
+    assert_eq!(first_run.await.unwrap().state, InvocationState::Succeeded);
+}
+
+#[tokio::test]
+async fn native_bazel_output_base_wait_is_reported_and_included_in_metrics() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let wait_started = root.path().join("native-wait-started");
+    let release = root.path().join("native-wait-release");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let script = format!(
+        "#!/bin/sh\n\
+if [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n\
+echo 'WARNING: Running Bazel server needs to be killed, because startup options are different:' >&2\n\
+echo 'Another command holds the output base lock:' >&2\n\
+echo 'owner=client' >&2\n\
+echo 'Waiting for it to complete...' >&2\n\
+touch '{}'\n\
+while [ ! -f '{}' ]; do sleep 0.01; done\n\
+echo 'Starting local Bazel server and connecting to it...' >&2\n\
+exit 0\n",
+        wait_started.display(),
+        release.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+    let request =
+        InvocationRequest::new(workspace, BazelCommand::Build, vec!["//:target".to_owned()]);
+    let id = request.id;
+    let run = tokio::spawn({
+        let service = service.clone();
+        async move { service.run(request).await.unwrap() }
+    });
+    wait_for_path(&wait_started).await;
+    let progress = wait_for_output_base_wait(&service, id).await;
+
+    assert_eq!(
+        progress.output_base_lock_owner.as_deref(),
+        Some("bazel_client")
+    );
+    tokio::fs::write(&release, b"release").await.unwrap();
+    let record = run.await.unwrap();
+
+    assert_eq!(record.state, InvocationState::Succeeded);
+    assert!(record.metrics.output_base_lock_wait_ms > 0);
 }
 
 #[tokio::test]

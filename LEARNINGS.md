@@ -19,6 +19,12 @@ unrelated to MCP efficiency. Do not include secrets or raw sensitive output.
 
 ### 2026-07-16
 
+- Separate bazel-mcp processes sharing an output base bypassed the in-memory
+  scheduler, while direct Bazel contention remained an opaque portion of wall
+  time; coordinate every known output-base request with a user-scoped advisory
+  lock, preserve Bazel's native wait-and-takeover behavior, and expose only a
+  bounded owner label plus the combined wait duration. Thread:
+  `019f6db5-c3bf-77c1-9524-4fed404237c0`.
 - Listing full durable invocation records exhausted 8 KiB and destructive byte
   shrinking erased IDs and states; keep ledger rows compact and direct users to
   per-invocation views for canonical arguments and detailed diagnostics.

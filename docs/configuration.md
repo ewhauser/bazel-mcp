@@ -227,6 +227,22 @@ the native result and add a bounded note. See the
 | `starlark.max_callstack_size` | `100` | Maximum Starlark call-stack depth. |
 | `starlark.timeout_ms` | `100` | Best-effort wall-clock evaluation limit per reducer. |
 
+## Shared output bases
+
+Every Bazel request participates in user-scoped, cross-process coordination
+using the known effective output-base key. An explicit `--output_base` is keyed
+by its canonical path; otherwise the canonical workspace is the conservative
+key. The lock is request-scoped, so separate bazel-mcp processes that share an
+explicit output base wait before spawning their Bazel clients.
+
+This coordination does not change Bazel startup arguments and does not reject a
+shared output base across workspaces. Direct Bazel clients, editor integrations,
+and output-base choices hidden in bazelrc still use Bazel's native blocking lock
+and normal server takeover/restart behavior. While either wait is active,
+synchronous MCP progress reports `phase=output_base_lock_wait`; completed
+invocations expose the combined duration as `output_base_lock_wait_ms` in the
+metrics view. Owner labels are deliberately bounded and omit workspace paths.
+
 ## CLI options
 
 Run `bazel-mcp --help` for the authoritative command-line reference:
