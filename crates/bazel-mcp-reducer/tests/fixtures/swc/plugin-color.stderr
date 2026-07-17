@@ -1,0 +1,9 @@
+[31m  x styled-components transform panicked[0m
+   ╭─[[36m/private/tmp/plugin.runfiles/__main__/pkg/component.tsx:5:1[0m]
+ 5 │ export const Price = styled.div`color: red`;
+   :                      ^^^^^^^^^^
+   ╰────
+Caused by:
+    0: failed to invoke plugin on 'pkg/component.tsx'
+    1: failed to handle: plugin `@swc/plugin-styled-components` panicked
+ERROR: Build did NOT complete successfully

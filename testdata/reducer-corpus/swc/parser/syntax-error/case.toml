@@ -1,0 +1,45 @@
+schema_version = 1
+id = "swc/parser/syntax-error"
+workspace = "examples/node"
+command = "build"
+args = ["//cases:swc_syntax_failure"]
+tags = ["swc", "parser", "fast"]
+platforms = ["linux", "macos"]
+timeout_seconds = 300
+bazel_version = "9.2.0"
+
+[evidence]
+
+[replay]
+max_items = 20
+max_bytes = 4096
+
+[expect]
+state = "failed"
+exit_code = 1
+headline_contains = "Expression expected"
+max_visible_bytes = 8192
+max_diagnostics = 20
+
+[[expect.diagnostics]]
+rank = 0
+severity = "error"
+category = "compilation"
+message_contains = "Expression expected"
+path = "cases/swc_syntax_failure.ts"
+line = 2
+
+[expect.absent]
+message_contains = [
+    "Build did NOT complete successfully",
+    "error executing Genrule command",
+]
+raw_contains = ["token=", "authorization:"]
+
+[provenance]
+tool = "@swc/wasm"
+tool_version = "1.15.43"
+
+[provenance.rules]
+aspect_rules_js = "3.2.3"
+rules_nodejs = "6.7.3"

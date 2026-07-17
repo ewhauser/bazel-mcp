@@ -820,6 +820,9 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> String {
 
 fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
+    let swc = parse_swc_diagnostics(&normalized);
+    let has_swc_diagnostics = !swc.diagnostics.is_empty();
+    diagnostics.extend(swc.diagnostics);
     let mut cpp_linker_parser = CppLinkerDiagnosticParser::default();
     for line in normalized.lines() {
         if let Some(diagnostic) = cpp_linker_parser.observe_line(line) {
@@ -881,6 +884,11 @@ fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
         .count();
 
     for (line, count) in candidates {
+        if swc.consumed_lines.contains(line.trim())
+            || (has_swc_diagnostics && is_swc_action_wrapper(&line))
+        {
+            continue;
+        }
         if has_strict_dependency_block
             && let Some(mut diagnostic) = strict_dependency_diagnostic(&line)
         {
@@ -1174,6 +1182,261 @@ fn compact_cpp_path(path: &str) -> String {
         return relative.to_owned();
     }
     path.strip_prefix("./").unwrap_or(&path).to_owned()
+}
+
+#[derive(Debug, Default)]
+struct SwcParseOutput {
+    diagnostics: Vec<Diagnostic>,
+    consumed_lines: BTreeSet<String>,
+}
+
+fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
+    const MAX_HEADER_DISTANCE: usize = 3;
+    const MAX_FRAME_LINES: usize = 8;
+
+    let lines = input.lines().collect::<Vec<_>>();
+    let mut output = SwcParseOutput::default();
+    for (location_index, line) in lines.iter().enumerate() {
+        let Some(location) = parse_swc_source_frame_location(line) else {
+            continue;
+        };
+        let Some((header_index, severity, message)) = lines[..location_index]
+            .iter()
+            .enumerate()
+            .rev()
+            .take(MAX_HEADER_DISTANCE)
+            .find_map(|(index, line)| {
+                parse_swc_message_header(line).map(|(severity, message)| (index, severity, message))
+            })
+        else {
+            continue;
+        };
+
+        let mut frame_end = location_index;
+        let mut source_line = None;
+        let mut first_source_line = None;
+        let mut caret_line = None;
+        for (index, frame_line) in lines
+            .iter()
+            .enumerate()
+            .skip(location_index + 1)
+            .take(MAX_FRAME_LINES)
+        {
+            if parse_swc_message_header(frame_line).is_some()
+                || parse_swc_source_frame_location(frame_line).is_some()
+            {
+                break;
+            }
+            frame_end = index;
+            output.consumed_lines.insert(frame_line.trim().to_owned());
+            if let Some(line_number) = swc_source_line_number(frame_line) {
+                let bounded = bounded_text(frame_line.trim(), 256);
+                first_source_line.get_or_insert_with(|| bounded.clone());
+                if location.line == Some(line_number) {
+                    source_line = Some(bounded);
+                }
+            } else if caret_line.is_none() && is_swc_caret_line(frame_line) {
+                caret_line = Some(bounded_text(frame_line.trim(), 256));
+            }
+            if is_swc_frame_terminator(frame_line) {
+                break;
+            }
+        }
+
+        output
+            .consumed_lines
+            .insert(lines[header_index].trim().to_owned());
+        output
+            .consumed_lines
+            .insert(lines[location_index].trim().to_owned());
+        let (context, context_lines) = swc_failure_context(&lines, header_index, frame_end);
+        for context_line in context_lines {
+            output
+                .consumed_lines
+                .insert(lines[context_line].trim().to_owned());
+        }
+
+        let mut message = bounded_text(message, 1_024);
+        if let Some(context) = context {
+            message.push_str("\nSWC context: ");
+            message.push_str(&bounded_text(&context, 512));
+        }
+        if let Some(source_line) = source_line.or(first_source_line) {
+            message.push('\n');
+            message.push_str(&source_line);
+        }
+        if let Some(caret_line) = caret_line {
+            message.push('\n');
+            message.push_str(&caret_line);
+        }
+        output.diagnostics.push(Diagnostic {
+            severity,
+            category: DiagnosticCategory::Compilation,
+            message,
+            location: Some(location),
+            target: None,
+            action: None,
+            repetition_count: 1,
+        });
+    }
+    output
+}
+
+fn parse_swc_message_header(line: &str) -> Option<(Severity, &str)> {
+    let line = line.trim();
+    let (severity, message) = if let Some(message) = line.strip_prefix("error:") {
+        (Severity::Error, message)
+    } else if let Some(message) = line.strip_prefix("warning:") {
+        (Severity::Warning, message)
+    } else if let Some(message) = strip_swc_icon(line, 'x').or_else(|| strip_swc_icon(line, '×')) {
+        (Severity::Error, message)
+    } else {
+        (Severity::Warning, strip_swc_icon(line, '!')?)
+    };
+    let message = message.trim();
+    (!message.is_empty()).then_some((severity, message))
+}
+
+fn strip_swc_icon(line: &str, icon: char) -> Option<&str> {
+    let remainder = line.strip_prefix(icon)?;
+    remainder
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then(|| remainder.trim_start())
+}
+
+fn parse_swc_source_frame_location(line: &str) -> Option<DiagnosticLocation> {
+    let line = line.trim();
+    let opening = line.find('[')?;
+    let marker = line[..opening].trim_end();
+    if !marker.ends_with(",-") && !marker.ends_with("╭─") {
+        return None;
+    }
+    let closing = line[opening + 1..].find(']')? + opening + 1;
+    let coordinates = &line[opening + 1..closing];
+    let (path_and_line, column) = coordinates.rsplit_once(':')?;
+    let (path, line_number) = path_and_line.rsplit_once(':')?;
+    if path.trim().is_empty() {
+        return None;
+    }
+    Some(DiagnosticLocation {
+        path: compact_javascript_path(path.trim()),
+        line: Some(line_number.parse::<u32>().ok()?),
+        column: Some(column.parse::<u32>().ok()?),
+    })
+}
+
+fn swc_source_line_number(line: &str) -> Option<u32> {
+    let line = line.trim();
+    let (line_number, _) = line.split_once('|').or_else(|| line.split_once('│'))?;
+    let line_number = line_number.trim();
+    (!line_number.is_empty() && line_number.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| line_number.parse::<u32>().ok())
+        .flatten()
+}
+
+fn is_swc_caret_line(line: &str) -> bool {
+    let line = line.trim();
+    line.contains('^')
+        && (line.starts_with(':')
+            || line
+                .split_once('|')
+                .is_some_and(|(prefix, _)| prefix.trim().is_empty()))
+}
+
+fn is_swc_frame_terminator(line: &str) -> bool {
+    let line = line.trim();
+    (line.starts_with('`') && line.contains("---")) || (line.starts_with('╰') && line.contains('─'))
+}
+
+fn swc_failure_context(
+    lines: &[&str],
+    header_index: usize,
+    frame_end: usize,
+) -> (Option<String>, Vec<usize>) {
+    const MAX_CONTEXT_DISTANCE: usize = 12;
+    const MAX_CONTEXT_ITEMS: usize = 2;
+
+    let mut contexts = Vec::new();
+    let mut consumed = Vec::new();
+    let preceding_start = header_index.saturating_sub(MAX_CONTEXT_DISTANCE);
+    for (index, line) in lines
+        .iter()
+        .enumerate()
+        .take(header_index)
+        .skip(preceding_start)
+    {
+        if let Some(context) = parse_swc_context_line(line)
+            && !contexts.contains(&context)
+        {
+            contexts.push(context);
+            consumed.push(index);
+        }
+        if contexts.len() >= MAX_CONTEXT_ITEMS {
+            break;
+        }
+    }
+    for (index, line) in lines
+        .iter()
+        .enumerate()
+        .skip(frame_end + 1)
+        .take(MAX_CONTEXT_DISTANCE)
+    {
+        if parse_swc_message_header(line).is_some()
+            || parse_swc_source_frame_location(line).is_some()
+        {
+            break;
+        }
+        if let Some(context) = parse_swc_context_line(line)
+            && !contexts.contains(&context)
+        {
+            contexts.push(context);
+            consumed.push(index);
+        }
+        if contexts.len() >= MAX_CONTEXT_ITEMS {
+            break;
+        }
+    }
+    contexts.truncate(MAX_CONTEXT_ITEMS);
+    (
+        (!contexts.is_empty()).then(|| contexts.join("; ")),
+        consumed,
+    )
+}
+
+fn parse_swc_context_line(line: &str) -> Option<String> {
+    if parse_swc_message_header(line).is_some() {
+        return None;
+    }
+    let mut line = line.trim();
+    if let Some(remainder) = line.strip_prefix("Caused by:") {
+        line = remainder.trim();
+    }
+    if let Some((number, remainder)) = line.split_once(": ")
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        line = remainder.trim();
+    }
+    let lower = line.to_ascii_lowercase();
+    let is_context = lower.starts_with("failed to process")
+        || lower.starts_with("failed to parse")
+        || lower.starts_with("failed to transform")
+        || lower.starts_with("failed to invoke plugin")
+        || lower.starts_with("failed to handle")
+        || (lower.contains("plugin") && lower.contains("failed"));
+    (is_context && !line.is_empty()).then(|| line.to_owned())
+}
+
+fn is_swc_action_wrapper(line: &str) -> bool {
+    let line = line.trim();
+    let lower = line.to_ascii_lowercase();
+    line.starts_with("ERROR:")
+        && (lower.contains("build did not complete successfully")
+            || lower.contains("failed: error executing")
+            || (lower.contains("swc")
+                && (lower.contains("failed:") || lower.contains("action failed"))))
 }
 
 fn parse_typescript_diagnostic(line: &str) -> Option<Diagnostic> {
@@ -2526,6 +2789,192 @@ mcp/js_fixture/syntax_failure.ts(9,1): error TS1005: '}' expected.
                 .filter_map(|diagnostic| diagnostic.location.as_ref()?.column)
                 .collect::<Vec<_>>(),
             vec![8, 21, 1]
+        );
+    }
+
+    #[test]
+    fn structures_plain_swc_parser_failures_without_terminal_action_duplicates() {
+        let event = BuildEvent {
+            payload: Some(owned_build_event::Payload::Action(Box::new(
+                ActionExecuted {
+                    success: false,
+                    exit_code: 1,
+                    r#type: "SwcCompile".into(),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        let event = BepEvent::from_owned(&event).unwrap();
+        let summary = reduce_invocation(ReductionInput {
+            events: &[event],
+            stdout: b"",
+            stderr: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/swc/parser-plain.stderr"
+            )),
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.category, DiagnosticCategory::Compilation);
+        assert_eq!(
+            diagnostic.message,
+            "Expected ',', got 'identifier'\n3 | const total = invoice lines;\n:                       ^^^^^"
+        );
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "pkg/parser.ts".into(),
+                line: Some(3),
+                column: Some(1),
+            })
+        );
+        assert_eq!(
+            summary
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.category == DiagnosticCategory::Action)
+                .count(),
+            1
+        );
+        assert!(summary.diagnostics.iter().all(|diagnostic| {
+            !diagnostic
+                .message
+                .contains("error executing SwcCompile command")
+                && !diagnostic
+                    .message
+                    .contains("Build did NOT complete successfully")
+        }));
+    }
+
+    #[test]
+    fn normalizes_colorized_swc_target_diagnostics_and_runfiles_paths() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/swc/target-color.stderr"
+            )),
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 1);
+        let diagnostic = &summary.diagnostics[0];
+        assert!(
+            diagnostic
+                .message
+                .starts_with("Big integer literals are not available")
+        );
+        assert!(
+            diagnostic
+                .message
+                .contains("SWC context: failed to transform module for target es5")
+        );
+        assert!(!diagnostic.message.contains('\u{1b}'));
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "pkg/target.js".into(),
+                line: Some(1),
+                column: Some(1),
+            })
+        );
+    }
+
+    #[test]
+    fn captures_swc_transform_phase_context() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/swc/transform-plain.stderr"
+            )),
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 1);
+        assert!(
+            summary.diagnostics[0]
+                .message
+                .contains("SWC context: failed to process JavaScript transform")
+        );
+        assert_eq!(
+            summary.diagnostics[0].location.as_ref().unwrap().path,
+            "pkg/transform.mjs"
+        );
+    }
+
+    #[test]
+    fn captures_colorized_swc_plugin_failures_and_plugin_context() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/swc/plugin-color.stderr"
+            )),
+            exit_code: Some(1),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+
+        assert_eq!(summary.diagnostics.len(), 1);
+        let diagnostic = &summary.diagnostics[0];
+        assert!(diagnostic.message.contains("failed to invoke plugin"));
+        assert!(diagnostic.message.contains("@swc/plugin-styled-components"));
+        assert!(diagnostic.message.contains("5 │ export const Price"));
+        assert_eq!(
+            diagnostic.location.as_ref().unwrap().path,
+            "pkg/component.tsx"
+        );
+    }
+
+    #[test]
+    fn bounds_swc_source_frames() {
+        let source = "x".repeat(2_000);
+        let input = format!(
+            "  x Expression expected\n   ,-[/tmp/output/execroot/_main/pkg/large.ts:1:1]\n 1 | {source}\n   : ^\n   `----"
+        );
+        let parsed = parse_swc_diagnostics(&input);
+
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(parsed.diagnostics[0].message.len() < 600);
+        assert!(parsed.diagnostics[0].message.contains('…'));
+    }
+
+    #[test]
+    fn selects_the_located_line_from_multiline_swc_source_frames() {
+        let input = r#"  x Expression expected
+   ,-[cases/swc_syntax_failure.ts:2:1]
+ 1 | export const invoice = {
+ 2 |   total: ,
+   :          ^
+ 3 | };
+   `----
+Caused by:
+    0: failed to process js file
+    1: Syntax Error"#;
+        let parsed = parse_swc_diagnostics(input);
+
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(parsed.diagnostics[0].message.contains("2 |   total: ,"));
+        assert!(!parsed.diagnostics[0].message.contains("1 | export"));
+        assert_eq!(
+            parsed.diagnostics[0].location,
+            Some(DiagnosticLocation {
+                path: "cases/swc_syntax_failure.ts".into(),
+                line: Some(2),
+                column: Some(1),
+            })
         );
     }
 

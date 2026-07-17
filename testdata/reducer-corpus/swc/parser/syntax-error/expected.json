@@ -1,0 +1,58 @@
+{
+  "event_count": 103,
+  "terminal_error": null,
+  "summary": {
+    "success": false,
+    "headline": "Bazel failed: Expression expected\nSWC context: failed to process js file\n2 |   total: ,\n:          ^",
+    "targets": [
+      {
+        "label": "//cases:swc_syntax_failure",
+        "success": false
+      }
+    ],
+    "target_counts": {
+      "requested": 1,
+      "succeeded": 0,
+      "failed": 1
+    },
+    "diagnostics": [
+      {
+        "severity": "error",
+        "category": "compilation",
+        "message": "Expression expected\nSWC context: failed to process js file\n2 |   total: ,\n:          ^",
+        "location": {
+          "path": "cases/swc_syntax_failure.ts",
+          "line": 2,
+          "column": 1
+        },
+        "target": null,
+        "action": null,
+        "repetition_count": 1
+      },
+      {
+        "severity": "error",
+        "category": "action",
+        "message": "Genrule action failed with exit code 1",
+        "location": null,
+        "target": "//cases:swc_syntax_failure",
+        "action": "Genrule",
+        "repetition_count": 1
+      }
+    ],
+    "tests": [],
+    "test_counts": {
+      "passed": 0,
+      "failed": 0,
+      "flaky": 0,
+      "skipped": 0,
+      "incomplete": 0
+    },
+    "coverage": null,
+    "query_sample": [],
+    "query_result_count": null,
+    "elapsed_ms": 0,
+    "truncated": false,
+    "inspect_hint": null
+  },
+  "artifacts": []
+}
