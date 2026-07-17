@@ -10,7 +10,7 @@ use bazel_mcp_types::{ArtifactKind, DiagnosticCategory, TestStatus};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::{
-    evidence::set_private_file,
+    evidence::create_private_file,
     inspection::EvidenceRecord,
     service::{InvocationService, bounded_text},
 };
@@ -52,16 +52,10 @@ impl InvocationService {
             return;
         }
 
-        let raw = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&raw_temporary)
-            .await;
-        let evidence = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&evidence_temporary)
-            .await;
+        let (raw, evidence) = tokio::join!(
+            create_private_file(&raw_temporary),
+            create_private_file(&evidence_temporary)
+        );
         let (Ok(mut raw), Ok(mut evidence)) = (raw, evidence) else {
             let _ = tokio::fs::remove_file(&raw_temporary).await;
             let _ = tokio::fs::remove_file(&evidence_temporary).await;
@@ -229,8 +223,6 @@ impl InvocationService {
         drop(evidence);
         let committed = if copied_any {
             flushed
-                && set_private_file(&raw_temporary).await.is_ok()
-                && set_private_file(&evidence_temporary).await.is_ok()
                 && tokio::fs::rename(&raw_temporary, &paths.test_logs_raw)
                     .await
                     .is_ok()

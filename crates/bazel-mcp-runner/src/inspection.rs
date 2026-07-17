@@ -368,7 +368,7 @@ impl InvocationService {
             serde_json::to_writer(&mut bytes, &record)?;
             bytes.push(b'\n');
         }
-        write_private_atomic(&paths.evidence, &bytes).await?;
+        write_private_atomic(&paths.evidence, bytes).await?;
         Ok(())
     }
 
