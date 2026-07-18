@@ -36,6 +36,7 @@ pub struct BepAccumulator {
     artifact_roots: Vec<String>,
     direct_artifacts: Vec<Artifact>,
     canonical_arguments: Option<Vec<String>>,
+    run_bep_outcome: RunBepOutcome,
     retained_items: usize,
     retained_bytes: usize,
     truncated: bool,
@@ -55,6 +56,13 @@ pub struct StreamReductionOutput {
     pub canonical_arguments: Option<Vec<String>>,
     pub reducer_events: Vec<ReducerEvent>,
     pub reducer_input_truncated: bool,
+    pub run_bep_outcome: RunBepOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RunBepOutcome {
+    pub build_success: Option<bool>,
+    pub exec_request_should_execute: Option<bool>,
 }
 
 struct ExtensionEventCollector {
@@ -251,6 +259,12 @@ impl BepAccumulator {
                     self.canonical_arguments = Some(std::mem::take(&mut arguments));
                 }
             }
+            Some(build_event::Payload::Finished(finished)) => {
+                self.run_bep_outcome.build_success = Some(finished.overall_success);
+            }
+            Some(build_event::Payload::ExecRequest(exec_request)) => {
+                self.run_bep_outcome.exec_request_should_execute = Some(exec_request.should_exec);
+            }
             _ => {}
         }
     }
@@ -327,6 +341,7 @@ impl BepAccumulator {
             canonical_arguments: self.canonical_arguments,
             reducer_events,
             reducer_input_truncated,
+            run_bep_outcome: self.run_bep_outcome,
         }
     }
 

@@ -92,6 +92,8 @@ When `aspect.executable` is omitted, the server resolves `aspect` from its
 `PATH`. The underlying Bazel executable still follows the normal discovery
 rules and is passed to Aspect through `BAZEL_REAL`; commands not listed in
 `aspect.commands` continue to invoke Bazel directly.
+The `run` command cannot be routed through Aspect CLI; its privacy controls
+require the direct Bazel driver.
 
 For build-like Aspect commands (`build`, `test`, and `lint`), bazel-mcp starts
 its loopback BES even when `bep_transport = "tail"`. Aspect keeps ownership of
@@ -132,6 +134,47 @@ redaction_patterns = [
 ```
 
 Raw evidence remains local and should still be treated as sensitive.
+
+### Enable Bazel run
+
+The Bazel `run` command is denied by default because it executes a built target.
+To opt in, add `run` to `allowed_commands` and remove it from
+`denied_commands`. Configuration arrays replace the defaults, so retain every
+other command your clients need:
+
+```toml
+allowed_commands = [
+  "aquery", "build", "coverage", "cquery", "help", "info", "mod",
+  "query", "run", "test", "version",
+]
+denied_commands = ["clean", "fetch", "mobile-install", "shutdown", "sync"]
+```
+
+A run request uses separate Bazel and program argument fields:
+
+```json
+{
+  "workspace": "/src/project",
+  "command": "run",
+  "args": ["--config=dev"],
+  "target": "//cmd/example",
+  "program_args": ["--format=json", "input.txt"],
+  "timeout_seconds": 300
+}
+```
+
+`target` is required and singular. `args` may contain Bazel flags only; valued
+options use `--flag=value`. `program_args` is passed after a server-owned `--`
+delimiter and is always replaced by placeholders in stored metadata, canonical
+arguments, reducer input, and telemetry projections. The server also reserves
+run options that could bypass this boundary, including `--script_path`,
+`--run_under`, `--run_env`, subcommand logging, and the BEP residue controls.
+
+Run support is Unix-only and non-interactive: stdin is connected to null, no
+PTY is allocated, and the invocation keeps Bazel's native output-base lock for
+the lifetime of the foreground program. Use it for finite commands rather than
+long-lived servers. The combined raw stdout and stderr ceiling defaults to 256
+MiB and is configured with `maximum_run_output_bytes`.
 
 ### Choose BEP transport
 
@@ -234,11 +277,11 @@ the native result and add a bounded note. See the
 | `cache_root` | Platform user cache under `bazel-mcp` | Shared directory for metadata, logs, and BEP evidence. Multiple server processes may use the same root concurrently. |
 | `bep_transport` | `tail` | BEP ingestion path: portable private binary file (`tail`), opt-in POSIX named pipe with file fallback (`fifo`), or loopback Build Event Service (`bes`). |
 | `bazel_executable` | unset | Explicit Bazel or Bazelisk executable. |
-| `aspect.commands` | `[]` | Commands routed through Aspect CLI. Each must also be present in `allowed_commands`. |
+| `aspect.commands` | `[]` | Commands routed through Aspect CLI. Each must also be present in `allowed_commands`; `run` is not supported. |
 | `aspect.executable` | unset | Explicit Aspect CLI executable. When unset and Aspect routing is enabled, resolves `aspect` from `PATH`. |
 | `aspect.allow_workspace_mutation` | `false` | Permit known mutation arguments such as `aspect lint --fix`; configured tasks themselves remain operator-trusted. |
 | `output_user_root` | unset | Isolated Bazel output user root managed by the server. |
-| `allowed_commands` | build, test, coverage, query commands, and selected informational commands | Commands eligible to run. |
+| `allowed_commands` | build, test, coverage, query commands, and selected informational commands | Commands eligible to run. Add `run` explicitly to opt in. |
 | `denied_commands` | `clean`, `fetch`, `mobile-install`, `run`, `shutdown`, `sync` | Commands rejected even if also present in `allowed_commands`. |
 | `environment_allowlist` | `[]` | Additional environment variables passed to Bazel. |
 | `redaction_patterns` | `[]` | Regular expressions removed from model-visible and persisted text fields. |
@@ -246,6 +289,7 @@ the native result and add a bounded note. See the
 | `maximum_pending_invocations` | `256` | Maximum queued and running invocations. Must be at least `global_concurrency`. |
 | `default_timeout_seconds` | `1800` | Timeout used when a request omits one. |
 | `maximum_timeout_seconds` | `7200` | Maximum timeout accepted from a request. |
+| `maximum_run_output_bytes` | `268435456` | Combined raw stdout and stderr ceiling for a Bazel run invocation. |
 | `cancellation_interrupt_grace_seconds` | `10` | Time allowed after the initial interrupt. |
 | `cancellation_terminate_grace_seconds` | `5` | Additional time allowed after termination. |
 | `progress_initial_seconds` | `30` | Delay before the first MCP progress notification. |

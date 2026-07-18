@@ -24,12 +24,37 @@ const RESERVED_FLAGS: &[&str] = &[
     "--invocation_id",
     "--show_progress",
     "--show_result",
+    "--subcommands",
+    "--nosubcommands",
+    "-s",
+    "--run",
+    "--norun",
+    "--script_path",
+    "--omit_run_args",
+    "--noomit_run_args",
+    "--experimental_run_bep_event_include_residue",
+    "--noexperimental_run_bep_event_include_residue",
+    "--run_under",
+    "--run_env",
     "--test_output",
     "--test_summary",
     "--tool_tag",
 ];
 
 pub fn validate_arguments(arguments: &[String]) -> Result<(), PolicyError> {
+    validate_argument_shape(arguments)?;
+    for argument in arguments {
+        if let Some(flag) = RESERVED_FLAGS
+            .iter()
+            .find(|flag| argument == **flag || argument.starts_with(&format!("{flag}=")))
+        {
+            return Err(PolicyError::ReservedFlag((*flag).to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_argument_shape(arguments: &[String]) -> Result<(), PolicyError> {
     if arguments.len() > MAX_ARGUMENT_COUNT {
         return Err(PolicyError::TooManyArguments {
             maximum_count: MAX_ARGUMENT_COUNT,
@@ -50,12 +75,6 @@ pub fn validate_arguments(arguments: &[String]) -> Result<(), PolicyError> {
             return Err(PolicyError::ArgumentsTooLarge {
                 maximum_bytes: MAX_ARGUMENTS_BYTES,
             });
-        }
-        if let Some(flag) = RESERVED_FLAGS
-            .iter()
-            .find(|flag| argument == **flag || argument.starts_with(&format!("{flag}=")))
-        {
-            return Err(PolicyError::ReservedFlag((*flag).to_owned()));
         }
     }
     Ok(())
@@ -124,6 +143,49 @@ pub fn validate_aspect_arguments(
         }
     }
     Ok(())
+}
+
+/// Validates the fields that are meaningful only for `bazel run`.
+///
+/// Bazel command options must use their flag or `--flag=value` form. This keeps
+/// an untrusted positional value from being interpreted as a second run target
+/// or silently crossing the program-argument boundary.
+pub fn validate_run_arguments(
+    command: &BazelCommand,
+    arguments: &[String],
+    target: Option<&str>,
+    program_arguments: &[String],
+) -> Result<(), PolicyError> {
+    if command != &BazelCommand::Run {
+        if target.is_some() || !program_arguments.is_empty() {
+            return Err(PolicyError::RunFieldsOnNonRunCommand);
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (arguments, target, program_arguments);
+        Err(PolicyError::RunUnsupportedPlatform)
+    }
+
+    #[cfg(unix)]
+    {
+        let target = target
+            .filter(|target| !target.trim().is_empty())
+            .ok_or(PolicyError::RunTargetRequired)?;
+        validate_argument_shape(&[target.to_owned()])?;
+        if target.starts_with('-') || target == "--" {
+            return Err(PolicyError::InvalidRunTarget);
+        }
+        if arguments
+            .iter()
+            .any(|argument| argument == "--" || !argument.starts_with('-'))
+        {
+            return Err(PolicyError::RunArgumentsMustBeFlags);
+        }
+        validate_argument_shape(program_arguments)
+    }
 }
 
 pub fn validate_query_arguments(
@@ -343,6 +405,36 @@ mod tests {
                 false,
             ),
             Err(PolicyError::AspectReservedArgument(_))
+        ));
+    }
+
+    #[test]
+    fn validates_run_only_fields_and_argument_boundary() {
+        assert!(
+            validate_run_arguments(
+                &BazelCommand::Run,
+                &["--config=dev".to_owned()],
+                Some("//cmd:example"),
+                &["--format=json".to_owned(), "input.txt".to_owned()],
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_run_arguments(&BazelCommand::Run, &[], None, &[]),
+            Err(PolicyError::RunTargetRequired)
+        ));
+        assert!(matches!(
+            validate_run_arguments(
+                &BazelCommand::Run,
+                &["//other:target".to_owned()],
+                Some("//cmd:example"),
+                &[],
+            ),
+            Err(PolicyError::RunArgumentsMustBeFlags)
+        ));
+        assert!(matches!(
+            validate_run_arguments(&BazelCommand::Build, &[], Some("//cmd:example"), &[],),
+            Err(PolicyError::RunFieldsOnNonRunCommand)
         ));
     }
 }

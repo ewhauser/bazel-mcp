@@ -169,6 +169,12 @@ message BuildFinished {
   bytes failure_detail = 6;
 }
 
+// Intentionally retain only the launch decision. Bazel's complete message also
+// carries the executable argv and environment, which can contain secrets.
+message ExecRequestConstructed {
+  bool should_exec = 5;
+}
+
 message BuildEvent {
   bytes id = 1;
   repeated bytes children = 2;
@@ -197,7 +203,7 @@ message BuildEvent {
     bytes build_metadata = 26;
     bytes convenience_symlinks_identified = 27;
     bytes target_summary = 28;
-    bytes exec_request = 29;
+    ExecRequestConstructed exec_request = 29;
     bytes test_progress = 30;
   }
 }

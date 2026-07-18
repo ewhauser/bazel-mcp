@@ -15,14 +15,14 @@ use bazel_mcp_bep::StreamOutcome;
 use bazel_mcp_bes::CAPTURE_ID_HEADER;
 use bazel_mcp_policy::filtered_environment;
 use bazel_mcp_reducer::{
-    BepAccumulator, Budget, REDUCER_API_VERSION, ReducerContext, StreamReductionOutput,
-    finalize_diagnostics, normalize_terminal_text,
+    BepAccumulator, Budget, REDUCER_API_VERSION, ReducerContext, RunBepOutcome,
+    StreamReductionOutput, finalize_diagnostics, normalize_terminal_text,
 };
 use bazel_mcp_store::{InvocationCompletion, InvocationPaths, StoreError};
 use bazel_mcp_types::{
     BazelCommand, CommandClass, Diagnostic, DiagnosticCategory, InspectHint, InvocationId,
     InvocationMetrics, InvocationRecord, InvocationRequest, InvocationState, InvocationSummary,
-    PageRequest, QueryRow, Severity, Termination, TestStatus,
+    PageRequest, QueryRow, RunOutcome, RunSummary, Severity, Termination, TestStatus,
 };
 use tokio::{
     process::{Child, Command},
@@ -220,6 +220,7 @@ impl TerminalCommit {
                 state: InvocationState::Failed,
                 termination,
                 summary,
+                run: None,
                 metrics: InvocationMetrics {
                     queue_ms,
                     ..Default::default()
@@ -238,6 +239,7 @@ impl TerminalCommit {
                 state: InvocationState::Cancelled,
                 termination: Termination::Cancelled,
                 summary: cancelled_summary(),
+                run: None,
                 metrics: InvocationMetrics {
                     queue_ms,
                     ..Default::default()
@@ -350,7 +352,7 @@ impl InvocationService {
         )
         .await;
         #[cfg(unix)]
-        let mut prepared_fifo = if command_class == CommandClass::BuildLike
+        let mut prepared_fifo = if captures_bep(command_class)
             && !driver.is_aspect()
             && bep_transport == BepTransport::Fifo
         {
@@ -387,9 +389,7 @@ impl InvocationService {
             None
         };
         #[cfg(not(unix))]
-        if command_class == CommandClass::BuildLike
-            && !driver.is_aspect()
-            && bep_transport == BepTransport::Fifo
+        if captures_bep(command_class) && !driver.is_aspect() && bep_transport == BepTransport::Fifo
         {
             tracing::debug!(
                 invocation_id = %queued.request.id,
@@ -402,9 +402,7 @@ impl InvocationService {
             )));
         }
         let extension_limits = plan.extension_limits;
-        let bes_bep = if command_class == CommandClass::BuildLike
-            && bep_transport == BepTransport::Bes
-        {
+        let bes_bep = if captures_bep(command_class) && bep_transport == BepTransport::Bes {
             match &self.bes {
                 Some(server) => Some(capture::LiveBepCapture::Bes(capture::BesBepCapture::start(
                     server.register(queued.request.id.to_string())?,
@@ -434,7 +432,7 @@ impl InvocationService {
                 command
                     .args(&queued.request.startup_arguments)
                     .arg(queued.request.command.as_str());
-                if command_class == CommandClass::BuildLike {
+                if captures_bep(command_class) {
                     command.arg(format!("--invocation_id={}", queued.request.id));
                     match bep_transport {
                         BepTransport::Tail => {
@@ -479,8 +477,30 @@ impl InvocationService {
                     ) {
                         command.args(["--test_output=errors", "--test_summary=none"]);
                     }
+                    if queued.request.command == BazelCommand::Run {
+                        // Command-line values override bazelrc defaults. Keep execution
+                        // enabled while preventing terminal and BEP residue disclosure.
+                        command.args([
+                            "--run=true",
+                            "--omit_run_args=true",
+                            "--noexperimental_run_bep_event_include_residue",
+                            "--subcommands=false",
+                        ]);
+                    }
                 }
                 command.args(&queued.request.arguments);
+                if queued.request.command == BazelCommand::Run {
+                    command
+                        .arg(
+                            queued
+                                .request
+                                .target
+                                .as_deref()
+                                .expect("validated run target"),
+                        )
+                        .arg("--")
+                        .args(&queued.request.program_arguments);
+                }
             }
             ExecutionDriver::Aspect {
                 bazel_executable, ..
@@ -540,7 +560,11 @@ impl InvocationService {
                 command.args(&queued.request.arguments);
             }
         }
-        command.stdout(stdout).stderr(stderr).kill_on_drop(true);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .kill_on_drop(true);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -610,25 +634,21 @@ impl InvocationService {
         }
         #[cfg(unix)]
         let incremental_bep = fifo_bep.or(bes_bep).or_else(|| {
-            (command_class == CommandClass::BuildLike && bep_transport != BepTransport::Bes).then(
-                || {
-                    capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
-                        paths.bep.clone(),
-                        extension_limits,
-                    ))
-                },
-            )
+            (captures_bep(command_class) && bep_transport != BepTransport::Bes).then(|| {
+                capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
+                    paths.bep.clone(),
+                    extension_limits,
+                ))
+            })
         });
         #[cfg(not(unix))]
         let incremental_bep = bes_bep.or_else(|| {
-            (command_class == CommandClass::BuildLike && bep_transport != BepTransport::Bes).then(
-                || {
-                    capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
-                        paths.bep.clone(),
-                        extension_limits,
-                    ))
-                },
-            )
+            (captures_bep(command_class) && bep_transport != BepTransport::Bes).then(|| {
+                capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
+                    paths.bep.clone(),
+                    extension_limits,
+                ))
+            })
         });
         Ok(StartExecution::Running(Box::new(RunningInvocation {
             plan,
@@ -656,7 +676,15 @@ impl InvocationService {
         let timeout = plan.timeout;
         let timeout_sleep = tokio::time::sleep(timeout);
         tokio::pin!(timeout_sleep);
-        let (status, termination, state) = tokio::select! {
+        let output_limit_stdout = plan.paths.stdout.clone();
+        let output_limit_stderr = plan.paths.stderr.clone();
+        let output_limit = wait_for_run_output_limit(
+            &output_limit_stdout,
+            &output_limit_stderr,
+            self.config.maximum_run_output_bytes,
+        );
+        tokio::pin!(output_limit);
+        let (mut status, mut termination, mut state) = tokio::select! {
             result = child.wait() => finish_from_status(result?),
             () = cancellation.cancelled() => {
                 let status = terminate_child(
@@ -674,7 +702,37 @@ impl InvocationService {
                 ).await?;
                 (Some(status), Termination::Timeout, InvocationState::TimedOut)
             }
+            () = &mut output_limit, if plan.request.command == BazelCommand::Run => {
+                let status = terminate_child(
+                    &mut child,
+                    self.config.cancellation_interrupt_grace,
+                    self.config.cancellation_terminate_grace,
+                ).await?;
+                (
+                    Some(status),
+                    Termination::OutputLimit {
+                        maximum_bytes: self.config.maximum_run_output_bytes,
+                    },
+                    InvocationState::Failed,
+                )
+            }
         };
+        if plan.request.command == BazelCommand::Run
+            && !matches!(
+                termination,
+                Termination::Cancelled | Termination::Timeout | Termination::OutputLimit { .. }
+            )
+            && capture::file_size(&plan.paths.stdout)
+                .await
+                .saturating_add(capture::file_size(&plan.paths.stderr).await)
+                > self.config.maximum_run_output_bytes
+        {
+            termination = Termination::OutputLimit {
+                maximum_bytes: self.config.maximum_run_output_bytes,
+            };
+            state = InvocationState::Failed;
+            status = None;
+        }
         process_group.disarm();
         native_output_base_wait.finish().await;
         let bazel_wall_ms = duration_millis(started.elapsed());
@@ -815,6 +873,7 @@ impl InvocationService {
             canonical_arguments,
             reducer_events,
             reducer_input_truncated,
+            run_bep_outcome,
         } = reduced.unwrap_or_else(|_| {
             tracing::warn!(
                 invocation_id = %queued.request.id,
@@ -826,9 +885,25 @@ impl InvocationService {
                 canonical_arguments: None,
                 reducer_events: Vec::new(),
                 reducer_input_truncated: false,
+                run_bep_outcome: RunBepOutcome::default(),
             }
         });
-        let canonical_arguments = canonical_arguments.map(|mut arguments| {
+        let canonical_arguments = if queued.request.command == BazelCommand::Run {
+            let mut arguments = queued.request.startup_arguments.clone();
+            arguments.push("run".to_owned());
+            arguments.extend(queued.request.arguments.iter().cloned());
+            arguments.extend(queued.request.target.iter().cloned());
+            if !queued.request.program_arguments.is_empty() {
+                arguments.push(format!(
+                    "[REDACTED_PROGRAM_ARGS:{}]",
+                    queued.request.program_arguments.len()
+                ));
+            }
+            Some(arguments)
+        } else {
+            canonical_arguments
+        }
+        .map(|mut arguments| {
             let workspace = queued.request.workspace.to_string_lossy();
             for argument in &mut arguments {
                 *argument = self.redactor.redact_bounded(
@@ -859,6 +934,51 @@ impl InvocationService {
                 if excerpt.len() > 1_000 {
                     summary.truncated = true;
                     summary.inspect_hint = Some(InspectHint::Log);
+                }
+            }
+        }
+        let run = self.build_run_summary(
+            &queued.request,
+            exit_code,
+            &exited.termination,
+            run_bep_outcome,
+            &stdout,
+            &stderr,
+        );
+        if let Some(run) = &run {
+            match run.outcome {
+                RunOutcome::BuildFailed => {}
+                RunOutcome::NotLaunched => {
+                    summary.headline = format!("{} was built but not launched", run.target);
+                }
+                RunOutcome::Succeeded => {
+                    summary.headline = format!("{} exited successfully", run.target);
+                }
+                RunOutcome::ProgramFailed => {
+                    summary.headline = run.program_exit_code.map_or_else(
+                        || format!("{} terminated without an exit code", run.target),
+                        |code| format!("{} exited with code {code}", run.target),
+                    );
+                }
+                RunOutcome::CancelledDuringBuild => {
+                    summary.headline = format!("{} was cancelled while building", run.target);
+                }
+                RunOutcome::CancelledDuringProgram => {
+                    summary.headline = format!("{} was cancelled while running", run.target);
+                }
+                RunOutcome::TimedOutDuringBuild => {
+                    summary.headline = format!("{} timed out while building", run.target);
+                }
+                RunOutcome::TimedOutDuringProgram => {
+                    summary.headline = format!("{} timed out while running", run.target);
+                }
+                RunOutcome::OutputLimitDuringBuild => {
+                    summary.headline =
+                        format!("{} exceeded the output limit while building", run.target);
+                }
+                RunOutcome::OutputLimitDuringProgram => {
+                    summary.headline =
+                        format!("{} exceeded the output limit while running", run.target);
                 }
             }
         }
@@ -973,6 +1093,7 @@ impl InvocationService {
                 state: exited.state,
                 termination: exited.termination,
                 summary,
+                run,
                 metrics,
                 canonical_arguments,
                 artifacts,
@@ -1052,6 +1173,7 @@ impl InvocationService {
                     inspect_hint: Some(InspectHint::Log),
                     ..Default::default()
                 },
+                run: None,
                 metrics: InvocationMetrics::default(),
                 canonical_arguments: None,
                 artifacts: Vec::new(),
@@ -1117,6 +1239,70 @@ impl InvocationService {
                 file.path = sanitize(&file.path, 1_000);
             }
         }
+    }
+
+    fn build_run_summary(
+        &self,
+        request: &InvocationRequest,
+        exit_code: Option<i32>,
+        termination: &Termination,
+        bep: RunBepOutcome,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Option<RunSummary> {
+        if request.command != BazelCommand::Run {
+            return None;
+        }
+        let launched = bep.exec_request_should_execute == Some(true);
+        let outcome = match termination {
+            Termination::OutputLimit { .. } if launched => RunOutcome::OutputLimitDuringProgram,
+            Termination::OutputLimit { .. } => RunOutcome::OutputLimitDuringBuild,
+            Termination::Cancelled if launched => RunOutcome::CancelledDuringProgram,
+            Termination::Cancelled => RunOutcome::CancelledDuringBuild,
+            Termination::Timeout if launched => RunOutcome::TimedOutDuringProgram,
+            Termination::Timeout => RunOutcome::TimedOutDuringBuild,
+            _ if bep.build_success == Some(false) => RunOutcome::BuildFailed,
+            _ if !launched => RunOutcome::NotLaunched,
+            _ if exit_code == Some(0) => RunOutcome::Succeeded,
+            _ => RunOutcome::ProgramFailed,
+        };
+        let program_exit_code = launched.then_some(exit_code).flatten();
+        let output_excerpt = if launched {
+            self.run_output_excerpt(&request.workspace, stdout, stderr)
+        } else {
+            Vec::new()
+        };
+        Some(RunSummary {
+            target: self.redactor.redact_bounded(
+                request.target.as_deref().unwrap_or("<missing target>"),
+                1_000,
+            ),
+            outcome,
+            program_exit_code,
+            output_excerpt,
+        })
+    }
+
+    fn run_output_excerpt(&self, workspace: &Path, stdout: &[u8], stderr: &[u8]) -> Vec<String> {
+        let normalized_stdout = normalize_terminal_text(stdout);
+        let text = if normalized_stdout.trim().is_empty() {
+            normalize_terminal_text(stderr)
+        } else {
+            normalized_stdout
+        };
+        let workspace = workspace.to_string_lossy();
+        let mut lines = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(8)
+            .map(|line| {
+                self.redactor
+                    .redact_bounded(&line.replace(workspace.as_ref(), "<workspace>"), 512)
+            })
+            .collect::<Vec<_>>();
+        lines.reverse();
+        lines
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1380,6 +1566,22 @@ pub(crate) fn finish_from_status(
         #[cfg(not(unix))]
         {
             (Some(status), Termination::Exit { code: -1 }, state)
+        }
+    }
+}
+
+fn captures_bep(command_class: CommandClass) -> bool {
+    matches!(command_class, CommandClass::BuildLike | CommandClass::Run)
+}
+
+async fn wait_for_run_output_limit(stdout: &Path, stderr: &Path, maximum_bytes: u64) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let bytes = capture::file_size(stdout)
+            .await
+            .saturating_add(capture::file_size(stderr).await);
+        if bytes > maximum_bytes {
+            return;
         }
     }
 }

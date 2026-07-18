@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
     Artifact, BazelCommand, CoverageFile, Diagnostic, InspectHint, InvocationId, InvocationMetrics,
-    InvocationState, QueryRow, TargetCounts, Termination, TestCounts, TestResult,
+    InvocationState, QueryRow, RunSummary, TargetCounts, Termination, TestCounts, TestResult,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -115,6 +115,8 @@ pub struct InspectSummary {
     pub coverage: Option<InspectCoverageSummary>,
     pub query_result_count: Option<u64>,
     pub query_sample: Vec<QueryRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunSummary>,
     pub elapsed_ms: u64,
     pub truncated: bool,
     pub inspect_hint: Option<InspectHint>,
