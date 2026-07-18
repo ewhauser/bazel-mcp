@@ -33,6 +33,7 @@ use crate::{
 };
 
 const SERVICE_NAME: &str = "google.devtools.build.v1.PublishBuildEvent";
+pub const CAPTURE_ID_HEADER: &str = "x-bazel-mcp-invocation-id";
 const LIFECYCLE_PATH: &str = "/google.devtools.build.v1.PublishBuildEvent/PublishLifecycleEvent";
 const BUILD_TOOL_STREAM_PATH: &str =
     "/google.devtools.build.v1.PublishBuildEvent/PublishBuildToolEventStream";
@@ -310,9 +311,18 @@ where
                         request: Request<Streaming<PublishBuildToolEventStreamRequestOwnedView>>,
                     ) -> Self::Future {
                         let captures = self.captures.clone();
+                        let capture_id = match capture_id_from_metadata(request.metadata()) {
+                            Ok(capture_id) => capture_id,
+                            Err(status) => return Box::pin(async move { Err(status) }),
+                        };
                         Box::pin(async move {
                             let (responses, receiver) = tokio::sync::mpsc::channel(32);
-                            tokio::spawn(ingest_stream(captures, request.into_inner(), responses));
+                            tokio::spawn(ingest_stream(
+                                captures,
+                                request.into_inner(),
+                                responses,
+                                capture_id,
+                            ));
                             Ok(Response::new(ReceiverStream::new(receiver)))
                         })
                     }
@@ -347,18 +357,23 @@ async fn ingest_stream(
     captures: Captures,
     mut input: Streaming<PublishBuildToolEventStreamRequestOwnedView>,
     responses: tokio::sync::mpsc::Sender<Result<PublishBuildToolEventStreamResponse, Status>>,
+    capture_id: Option<String>,
 ) {
     let Some(first) = recv_request(&mut input, &responses).await else {
         return;
     };
-    let state_result = {
-        match request_invocation_id(&first) {
+    let state_result = match capture_id {
+        Some(capture_id) => match captures.lock() {
+            Ok(captures) => Ok(captures.get(&capture_id).cloned()),
+            Err(_) => Err(Status::internal("BES capture registry lock was poisoned")),
+        },
+        None => match request_invocation_id(&first) {
             Ok(invocation_id) => match captures.lock() {
                 Ok(captures) => Ok(captures.get(invocation_id).cloned()),
                 Err(_) => Err(Status::internal("BES capture registry lock was poisoned")),
             },
             Err(error) => Err(error),
-        }
+        },
     };
     let state = match state_result {
         Ok(state) => state,
@@ -386,6 +401,23 @@ async fn ingest_stream(
         let _ = responses.send(Err(Status::internal(error.clone()))).await;
     }
     complete(&state, result);
+}
+
+fn capture_id_from_metadata(
+    metadata: &tonic::metadata::MetadataMap,
+) -> Result<Option<String>, Status> {
+    let Some(value) = metadata.get(CAPTURE_ID_HEADER) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| Status::invalid_argument("BES capture metadata was not valid ASCII"))?;
+    if value.is_empty() || value.len() > MAX_STREAM_ID_FIELD_BYTES {
+        return Err(Status::invalid_argument(
+            "BES capture metadata omitted a valid invocation id",
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 async fn capture_stream(
@@ -947,6 +979,88 @@ mod tests {
             .await
             .expect("stop-and-wait client deadlocked")
             .unwrap();
+        let stats = capture.finish(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(stats.event_count, 1);
+        sink.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn routes_a_stream_by_capture_metadata_when_the_client_owns_its_invocation_id() {
+        let server = BesServer::start().await.unwrap();
+        let capture_id = "019f6b1e-dbf1-7090-9290-aspect-capture";
+        let mut capture = server.register(capture_id).unwrap();
+        let mut events = capture.take_events().unwrap();
+        let sink = tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                let finished = event.is_finished();
+                event.acknowledge(Ok(()));
+                if finished {
+                    break;
+                }
+            }
+        });
+        let stream_id = StreamId {
+            build_id: "aspect-build".to_owned(),
+            invocation_id: "aspect-generated-invocation-id".to_owned(),
+            component: 3,
+        };
+        let requests = vec![
+            stream_request(
+                stream_id.clone(),
+                1,
+                Event::BazelEvent(Box::new(Any {
+                    type_url: "type.googleapis.com/build_event_stream.BuildEvent".to_owned(),
+                    value: bazel_mcp_bep::proto::BuildEvent::default().encode_to_vec(),
+                })),
+            ),
+            stream_request(
+                stream_id,
+                2,
+                Event::ComponentStreamFinished(Box::new(BuildComponentStreamFinished {
+                    r#type: 1,
+                })),
+            ),
+        ];
+        let uri = server.endpoint().replacen("grpc://", "http://", 1);
+        let channel = Endpoint::from_shared(uri).unwrap().connect().await.unwrap();
+        let mut client = ClientGrpc::new(channel);
+        client.ready().await.unwrap();
+        let mut request = Request::new(tokio_stream::iter(requests));
+        request
+            .metadata_mut()
+            .insert(CAPTURE_ID_HEADER, capture_id.parse().unwrap());
+
+        let response = client
+            .streaming(
+                request,
+                PathAndQuery::from_static(BUILD_TOOL_STREAM_PATH),
+                BuffaCodec::<
+                    PublishBuildToolEventStreamResponseOwnedView,
+                    PublishBuildToolEventStreamRequest,
+                >::default(),
+            )
+            .await
+            .unwrap();
+        let mut acknowledgements = response.into_inner();
+        assert_eq!(
+            acknowledgements
+                .message()
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence_number(),
+            1
+        );
+        assert_eq!(
+            acknowledgements
+                .message()
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence_number(),
+            2
+        );
+
         let stats = capture.finish(Duration::from_secs(1)).await.unwrap();
         assert_eq!(stats.event_count, 1);
         sink.await.unwrap();

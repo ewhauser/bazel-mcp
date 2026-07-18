@@ -12,6 +12,7 @@ use std::{
 use std::io;
 
 use bazel_mcp_bep::StreamOutcome;
+use bazel_mcp_bes::CAPTURE_ID_HEADER;
 use bazel_mcp_policy::filtered_environment;
 use bazel_mcp_reducer::{
     BepAccumulator, Budget, REDUCER_API_VERSION, ReducerContext, StreamReductionOutput,
@@ -32,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cancel::{ProcessGroupGuard, terminate_child},
     capture,
+    driver::ExecutionDriver,
     inspection::should_persist_failure_evidence,
     output_base_lock::{NativeOutputBaseWaitObserver, OutputBaseWaitStatus},
     service::{
@@ -50,7 +52,7 @@ use crate::service::RunnerConfig;
 struct ExecutionPlan {
     request: InvocationRequest,
     paths: InvocationPaths,
-    executable: PathBuf,
+    driver: ExecutionDriver,
     cancellation: CancellationToken,
     explicit_output_base: Option<PathBuf>,
     output_base_wait: Arc<OutputBaseWaitStatus>,
@@ -127,7 +129,7 @@ impl ExecutionPlan {
         service: &InvocationService,
         queued: &InvocationRecord,
         paths: &InvocationPaths,
-        executable: &Path,
+        driver: &ExecutionDriver,
         cancellation: CancellationToken,
         explicit_output_base: Option<&Path>,
         output_base_wait: Arc<OutputBaseWaitStatus>,
@@ -150,7 +152,7 @@ impl ExecutionPlan {
         Self {
             request: queued.request.clone(),
             paths: paths.clone(),
-            executable: executable.to_owned(),
+            driver: driver.clone(),
             cancellation,
             explicit_output_base: explicit_output_base.map(Path::to_owned),
             output_base_wait,
@@ -253,7 +255,7 @@ impl InvocationService {
         &self,
         queued: &InvocationRecord,
         paths: &InvocationPaths,
-        executable: &Path,
+        driver: &ExecutionDriver,
         cancellation: CancellationToken,
         explicit_output_base: Option<&Path>,
         output_base_wait: Arc<OutputBaseWaitStatus>,
@@ -262,7 +264,7 @@ impl InvocationService {
             self,
             queued,
             paths,
-            executable,
+            driver,
             cancellation,
             explicit_output_base,
             output_base_wait,
@@ -302,7 +304,13 @@ impl InvocationService {
     async fn start_execution(&self, plan: ExecutionPlan) -> Result<StartExecution, RunnerError> {
         let queued = &plan;
         let paths = &plan.paths;
-        let executable = plan.executable.as_path();
+        let driver = plan.driver.clone();
+        let command_class = driver.command_class(&queued.request.command);
+        let bep_transport = if driver.is_aspect() {
+            BepTransport::Bes
+        } else {
+            self.config.bep_transport
+        };
         let cancellation = plan.cancellation.clone();
         let explicit_output_base = plan.explicit_output_base.as_deref();
         let output_base_wait = plan.output_base_wait.clone();
@@ -342,12 +350,13 @@ impl InvocationService {
         )
         .await;
         #[cfg(unix)]
-        let mut prepared_fifo = if queued.request.command.class() == CommandClass::BuildLike
-            && self.config.bep_transport == BepTransport::Fifo
+        let mut prepared_fifo = if command_class == CommandClass::BuildLike
+            && !driver.is_aspect()
+            && bep_transport == BepTransport::Fifo
         {
             match capture::PreparedFifoBepCapture::prepare(&paths.bep) {
                 Ok(prepared) => match probe_bazel_server_pid(
-                    executable,
+                    driver.bazel_executable(),
                     &queued.request.workspace,
                     &queued.request.startup_arguments,
                     &self.config,
@@ -378,8 +387,9 @@ impl InvocationService {
             None
         };
         #[cfg(not(unix))]
-        if queued.request.command.class() == CommandClass::BuildLike
-            && self.config.bep_transport == BepTransport::Fifo
+        if command_class == CommandClass::BuildLike
+            && !driver.is_aspect()
+            && bep_transport == BepTransport::Fifo
         {
             tracing::debug!(
                 invocation_id = %queued.request.id,
@@ -392,7 +402,9 @@ impl InvocationService {
             )));
         }
         let extension_limits = plan.extension_limits;
-        let bes_bep = if queued.request.command.class() == CommandClass::BuildLike {
+        let bes_bep = if command_class == CommandClass::BuildLike
+            && bep_transport == BepTransport::Bes
+        {
             match &self.bes {
                 Some(server) => Some(capture::LiveBepCapture::Bes(capture::BesBepCapture::start(
                     server.register(queued.request.id.to_string())?,
@@ -404,69 +416,130 @@ impl InvocationService {
         } else {
             None
         };
-        let mut command = Command::new(executable);
+        let mut command = Command::new(driver.executable());
         command
             .current_dir(&queued.request.workspace)
             .env_clear()
             .envs(filtered_environment(&self.config.policy));
-        if let Some(output_user_root) = &self.config.output_user_root {
-            command
-                .arg(format!("--output_user_root={}", output_user_root.display()))
-                .arg(format!(
-                    "--max_idle_secs={}",
-                    self.config.isolated_bazel_server_idle_timeout.as_secs()
-                ));
-        }
-        command
-            .args(&queued.request.startup_arguments)
-            .arg(queued.request.command.as_str());
-        if queued.request.command.class() == CommandClass::BuildLike {
-            command.arg(format!("--invocation_id={}", queued.request.id));
-            match self.config.bep_transport {
-                BepTransport::Tail => {
+        match &driver {
+            ExecutionDriver::Bazel { .. } => {
+                if let Some(output_user_root) = &self.config.output_user_root {
                     command
-                        .arg(format!("--build_event_binary_file={}", paths.bep.display()))
-                        .arg("--build_event_binary_file_path_conversion=false");
+                        .arg(format!("--output_user_root={}", output_user_root.display()))
+                        .arg(format!(
+                            "--max_idle_secs={}",
+                            self.config.isolated_bazel_server_idle_timeout.as_secs()
+                        ));
                 }
-                BepTransport::Fifo => {
-                    #[cfg(unix)]
-                    let output = prepared_fifo
-                        .as_ref()
-                        .map_or(paths.bep.as_path(), |(prepared, _)| prepared.path());
-                    #[cfg(not(unix))]
-                    let output = paths.bep.as_path();
+                command
+                    .args(&queued.request.startup_arguments)
+                    .arg(queued.request.command.as_str());
+                if command_class == CommandClass::BuildLike {
+                    command.arg(format!("--invocation_id={}", queued.request.id));
+                    match bep_transport {
+                        BepTransport::Tail => {
+                            command
+                                .arg(format!("--build_event_binary_file={}", paths.bep.display()))
+                                .arg("--build_event_binary_file_path_conversion=false");
+                        }
+                        BepTransport::Fifo => {
+                            #[cfg(unix)]
+                            let output = prepared_fifo
+                                .as_ref()
+                                .map_or(paths.bep.as_path(), |(prepared, _)| prepared.path());
+                            #[cfg(not(unix))]
+                            let output = paths.bep.as_path();
+                            command
+                                .arg(format!("--build_event_binary_file={}", output.display()))
+                                .arg("--build_event_binary_file_path_conversion=false");
+                        }
+                        BepTransport::Bes => {
+                            let endpoint = self
+                                .bes
+                                .as_ref()
+                                .ok_or(RunnerError::InvalidConfiguration(
+                                    "BES transport was not initialized",
+                                ))?
+                                .endpoint();
+                            command
+                                .arg(format!("--bes_backend={endpoint}"))
+                                .arg("--bes_upload_mode=wait_for_upload_complete");
+                        }
+                    }
+                    command.args([
+                        "--tool_tag=bazel-mcp",
+                        "--color=no",
+                        "--curses=no",
+                        "--show_progress=false",
+                        "--show_result=0",
+                    ]);
+                    if matches!(
+                        queued.request.command,
+                        BazelCommand::Test | BazelCommand::Coverage
+                    ) {
+                        command.args(["--test_output=errors", "--test_summary=none"]);
+                    }
+                }
+                command.args(&queued.request.arguments);
+            }
+            ExecutionDriver::Aspect {
+                bazel_executable, ..
+            } => {
+                command
+                    .env("BAZEL_REAL", bazel_executable)
+                    .arg(format!("--task:id={}", queued.request.id))
+                    .arg("--task:timing-summary=none")
+                    .arg(queued.request.command.as_str());
+                if let Some(output_user_root) = &self.config.output_user_root {
                     command
-                        .arg(format!("--build_event_binary_file={}", output.display()))
-                        .arg("--build_event_binary_file_path_conversion=false");
+                        .arg(format!(
+                            "--bazel-startup-flag=--output_user_root={}",
+                            output_user_root.display()
+                        ))
+                        .arg(format!(
+                            "--bazel-startup-flag=--max_idle_secs={}",
+                            self.config.isolated_bazel_server_idle_timeout.as_secs()
+                        ));
                 }
-                BepTransport::Bes => {
+                for argument in &queued.request.startup_arguments {
+                    command.arg(format!("--bazel-startup-flag={argument}"));
+                }
+                if command_class == CommandClass::BuildLike {
+                    for argument in [
+                        format!("--invocation_id={}", queued.request.id),
+                        "--tool_tag=bazel-mcp".to_owned(),
+                        "--color=no".to_owned(),
+                        "--curses=no".to_owned(),
+                        "--show_progress=false".to_owned(),
+                        "--show_result=0".to_owned(),
+                    ] {
+                        command.arg(format!("--bazel-flag={argument}"));
+                    }
+                    if matches!(
+                        queued.request.command,
+                        BazelCommand::Test | BazelCommand::Coverage
+                    ) {
+                        command
+                            .arg("--bazel-flag=--test_output=errors")
+                            .arg("--bazel-flag=--test_summary=none");
+                    }
                     let endpoint = self
                         .bes
                         .as_ref()
                         .ok_or(RunnerError::InvalidConfiguration(
-                            "BES transport was not initialized",
+                            "Aspect capture BES was not initialized",
                         ))?
                         .endpoint();
                     command
-                        .arg(format!("--bes_backend={endpoint}"))
-                        .arg("--bes_upload_mode=wait_for_upload_complete");
+                        .arg(format!("--bes-backend={endpoint}"))
+                        .arg(format!(
+                            "--bes-header={CAPTURE_ID_HEADER}={}",
+                            queued.request.id
+                        ));
                 }
-            }
-            command.args([
-                "--tool_tag=bazel-mcp",
-                "--color=no",
-                "--curses=no",
-                "--show_progress=false",
-                "--show_result=0",
-            ]);
-            if matches!(
-                queued.request.command,
-                BazelCommand::Test | BazelCommand::Coverage
-            ) {
-                command.args(["--test_output=errors", "--test_summary=none"]);
+                command.args(&queued.request.arguments);
             }
         }
-        command.args(&queued.request.arguments);
         command.stdout(stdout).stderr(stderr).kill_on_drop(true);
         #[cfg(unix)]
         {
@@ -480,7 +553,7 @@ impl InvocationService {
                 let message = self.redactor.redact_bounded(&error.to_string(), 1_000);
                 let summary = InvocationSummary {
                     success: false,
-                    headline: format!("Could not start Bazel: {message}"),
+                    headline: format!("Could not start {}: {message}", driver.display_name()),
                     ..Default::default()
                 };
                 return Ok(StartExecution::Terminal(Box::new(TerminalCommit::failure(
@@ -537,25 +610,25 @@ impl InvocationService {
         }
         #[cfg(unix)]
         let incremental_bep = fifo_bep.or(bes_bep).or_else(|| {
-            (queued.request.command.class() == CommandClass::BuildLike
-                && self.config.bep_transport != BepTransport::Bes)
-                .then(|| {
+            (command_class == CommandClass::BuildLike && bep_transport != BepTransport::Bes).then(
+                || {
                     capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
                         paths.bep.clone(),
                         extension_limits,
                     ))
-                })
+                },
+            )
         });
         #[cfg(not(unix))]
         let incremental_bep = bes_bep.or_else(|| {
-            (queued.request.command.class() == CommandClass::BuildLike
-                && self.config.bep_transport != BepTransport::Bes)
-                .then(|| {
+            (command_class == CommandClass::BuildLike && bep_transport != BepTransport::Bes).then(
+                || {
                     capture::LiveBepCapture::Tail(capture::IncrementalBepCapture::start(
                         paths.bep.clone(),
                         extension_limits,
                     ))
-                })
+                },
+            )
         });
         Ok(StartExecution::Running(Box::new(RunningInvocation {
             plan,
@@ -622,6 +695,7 @@ impl InvocationService {
     ) -> Result<CapturedEvidence, RunnerError> {
         let queued = &exited.plan;
         let paths = &exited.plan.paths;
+        let command_class = queued.driver.command_class(&queued.request.command);
         let status = &exited.status;
         let reduction_started = Instant::now();
         let incremental_reduction = match exited.live_bep.take() {
@@ -639,28 +713,27 @@ impl InvocationService {
             }
             None => None,
         };
-        let (query_row_count, query_sample) =
-            if queued.request.command.class() == CommandClass::Query {
-                let query_row_count = self.store.count_query_rows(queued.request.id).await?;
-                let redactor = self.redactor.clone();
-                let page = self
-                    .store
-                    .page_query_rows_mapped_into(
-                        queued.request.id,
-                        None,
-                        PageRequest {
-                            scan_limit: 3,
-                            ..PageRequest::new(None, 3)
-                        },
-                        move |value, output| {
-                            redactor.redact_bounded_into(value, 4 * 1024, output);
-                        },
-                    )
-                    .await?;
-                (query_row_count, page.items)
-            } else {
-                (0, Vec::new())
-            };
+        let (query_row_count, query_sample) = if command_class == CommandClass::Query {
+            let query_row_count = self.store.count_query_rows(queued.request.id).await?;
+            let redactor = self.redactor.clone();
+            let page = self
+                .store
+                .page_query_rows_mapped_into(
+                    queued.request.id,
+                    None,
+                    PageRequest {
+                        scan_limit: 3,
+                        ..PageRequest::new(None, 3)
+                    },
+                    move |value, output| {
+                        redactor.redact_bounded_into(value, 4 * 1024, output);
+                    },
+                )
+                .await?;
+            (query_row_count, page.items)
+        } else {
+            (0, Vec::new())
+        };
         let (bep, bep_outcome) = match incremental_reduction {
             Some(reduction) => (reduction.accumulator, reduction.outcome),
             None => capture::reduce_bep(paths.bep.clone(), exited.plan.extension_limits).await?,
@@ -718,6 +791,7 @@ impl InvocationService {
         } = captured;
         let queued = &exited.plan;
         let paths = &exited.plan.paths;
+        let command_class = queued.driver.command_class(&queued.request.command);
         let exit_code = exited.status.as_ref().and_then(ExitStatus::code);
         let bazel_wall_ms = exited.bazel_wall_ms;
         let reduced = catch_unwind(AssertUnwindSafe(|| {
@@ -768,13 +842,13 @@ impl InvocationService {
             artifact.name = self.redactor.redact_bounded(&artifact.name, 1_000);
             artifact.uri = self.redactor.redact_bounded(&artifact.uri, 1_000);
         }
-        if queued.request.command.class() == CommandClass::Query && exit_code == Some(0) {
+        if command_class == CommandClass::Query && exit_code == Some(0) {
             summary.headline = format!("Bazel query returned {query_row_count} rows");
             summary.inspect_hint = (query_row_count > 0).then_some(InspectHint::QueryResults);
             summary.query_result_count = Some(query_row_count);
             summary.query_sample = query_sample;
         } else if matches!(
-            queued.request.command.class(),
+            command_class,
             CommandClass::Informational | CommandClass::Unknown
         ) && exit_code == Some(0)
         {
@@ -846,6 +920,27 @@ impl InvocationService {
         finalize_with_custom_notices(&mut summary, custom_notices);
         if let Some(headline) = custom_headline {
             summary.headline = headline;
+        } else if queued.driver.is_aspect() {
+            if !summary.success
+                && let Some(first) = summary.diagnostics.first()
+            {
+                summary.headline = format!(
+                    "Aspect {} failed: {}",
+                    queued.request.command, first.message
+                );
+            } else if summary.success && command_class == CommandClass::BuildLike {
+                summary.headline = format!(
+                    "Aspect {} completed successfully in {bazel_wall_ms} ms",
+                    queued.request.command
+                );
+            } else if !summary.success
+                && (summary.headline.is_empty() || summary.headline.starts_with("Bazel "))
+            {
+                summary.headline = format!(
+                    "Aspect {} failed with exit code {exit_code:?}",
+                    queued.request.command
+                );
+            }
         }
         if !summary.success && summary.inspect_hint.is_none() {
             let hint = if summary

@@ -1,4 +1,5 @@
 mod arbitration;
+mod aspect;
 mod common;
 mod cpp;
 mod go;
@@ -90,6 +91,11 @@ const TEXT_DIAGNOSTIC_REDUCERS: &[TextDiagnosticReducer] = &[
 ];
 
 const LINE_DIAGNOSTIC_REDUCERS: &[LineDiagnosticReducer] = &[
+    LineDiagnosticReducer {
+        name: "aspect-lint",
+        enabled: always,
+        parse: aspect::parse_diagnostic,
+    },
     LineDiagnosticReducer {
         name: "go-strict-dependency",
         enabled: strict_dependencies_only,
@@ -243,6 +249,7 @@ mod tests {
                 .map(|reducer| reducer.name)
                 .collect::<Vec<_>>(),
             [
+                "aspect-lint",
                 "go-strict-dependency",
                 "cpp",
                 "typescript",

@@ -10,4 +10,6 @@ pub mod proto {
     buffa::include_proto!("google.devtools.build.v1");
 }
 
-pub use server::{BesCapture, BesError, BesServer, BesStreamEvent, CaptureStats};
+pub use server::{
+    BesCapture, BesError, BesServer, BesStreamEvent, CAPTURE_ID_HEADER, CaptureStats,
+};

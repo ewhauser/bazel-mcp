@@ -9,10 +9,11 @@ available as evidence**.
 ## The evidence lifecycle
 
 1. **The client submits structured arguments.** The server accepts a workspace,
-   an allowed Bazel command, and an argument array. It never constructs a shell
+   an allowed command and an argument array. It never constructs a shell
    command.
-2. **Bazel runs locally.** Existing workspace credentials, toolchains, remote
-   execution settings, and caches continue to apply.
+2. **Bazel or a configured Aspect command runs locally.** Existing workspace
+   credentials, toolchains, remote execution settings, and caches continue to
+   apply.
 3. **Evidence is captured privately.** Output and Build Event Protocol data are
    retained under the local invocation cache.
 4. **Deterministic reducers find the useful result.** Concrete root causes,
@@ -25,7 +26,7 @@ available as evidence**.
 agent request
      │
      ▼
-policy ──► local Bazel process ──► private evidence
+policy ──► local Bazel/Aspect process ──► private evidence
                                       │
                                       ▼
                                deterministic reducer

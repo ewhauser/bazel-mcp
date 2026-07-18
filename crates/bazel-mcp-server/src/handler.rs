@@ -54,9 +54,9 @@ pub struct RunParams {
     /// Bazel startup arguments placed before the command.
     #[serde(default)]
     pub startup_args: Vec<String>,
-    /// Bazel command such as build, test, coverage, query, cquery, or aquery.
+    /// Bazel command or a configured Aspect command such as lint.
     pub command: String,
-    /// Arguments placed after the Bazel command.
+    /// Arguments placed after the selected command.
     #[serde(default)]
     pub args: Vec<String>,
     /// Optional timeout in seconds.
@@ -139,7 +139,7 @@ impl BazelMcpServer {
 impl BazelMcpServer {
     #[tool(
         name = "bazel.run",
-        description = "Execute one Bazel command silently and return a bounded actionable summary."
+        description = "Execute one allowed Bazel or configured Aspect command silently and return a bounded actionable summary."
     )]
     async fn bazel_run(
         &self,

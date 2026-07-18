@@ -22,8 +22,9 @@ The default path is used only when the file already exists. Command-line
 `--allow-root` values are added to roots read from the file, and `--cache-root`
 overrides the configured cache directory.
 
-Unknown top-level settings and unknown keys in the `[starlark]` table are
-rejected so misspelled controls cannot silently fall back to defaults.
+Unknown top-level settings and unknown keys in the `[aspect]` and `[starlark]`
+tables are rejected so misspelled controls cannot silently fall back to
+defaults.
 
 Start with the repository's [example configuration](../examples/config.toml):
 
@@ -68,6 +69,40 @@ Set an explicit executable to bypass discovery:
 ```toml
 bazel_executable = "/usr/local/bin/bazelisk"
 ```
+
+### Route commands through Aspect CLI
+
+Aspect support is disabled by default. To run `aspect lint` for a `lint`
+request, add the command to both the normal command allowlist and the Aspect
+route list:
+
+```toml
+allowed_commands = [
+  "aquery", "build", "coverage", "cquery", "help", "info", "lint", "mod",
+  "query", "test", "version",
+]
+
+[aspect]
+commands = ["lint"]
+# executable = "/opt/homebrew/bin/aspect"
+allow_workspace_mutation = false
+```
+
+When `aspect.executable` is omitted, the server resolves `aspect` from its
+`PATH`. The underlying Bazel executable still follows the normal discovery
+rules and is passed to Aspect through `BAZEL_REAL`; commands not listed in
+`aspect.commands` continue to invoke Bazel directly.
+
+For build-like Aspect commands (`build`, `test`, and `lint`), bazel-mcp starts
+its loopback BES even when `bep_transport = "tail"`. Aspect keeps ownership of
+its internal BEP stream and forwards a copy to the private local capture. Any
+additional Aspect `--bes-backend` argument remains available for a remote sink.
+Startup arguments use the ordinary `startup_args` request field; callers cannot
+inject Aspect's `--bazel-startup-flag`, task identity, or local capture header.
+
+`aspect lint --fix` is rejected unless `allow_workspace_mutation = true`.
+Configured Aspect tasks are operator-trusted code and may have other side
+effects that bazel-mcp cannot infer from their names.
 
 ### Pass environment variables
 
@@ -195,6 +230,9 @@ the native result and add a bounded note. See the
 | `cache_root` | Platform user cache under `bazel-mcp` | Shared directory for metadata, logs, and BEP evidence. Multiple server processes may use the same root concurrently. |
 | `bep_transport` | `tail` | BEP ingestion path: portable private binary file (`tail`), opt-in POSIX named pipe with file fallback (`fifo`), or loopback Build Event Service (`bes`). |
 | `bazel_executable` | unset | Explicit Bazel or Bazelisk executable. |
+| `aspect.commands` | `[]` | Commands routed through Aspect CLI. Each must also be present in `allowed_commands`. |
+| `aspect.executable` | unset | Explicit Aspect CLI executable. When unset and Aspect routing is enabled, resolves `aspect` from `PATH`. |
+| `aspect.allow_workspace_mutation` | `false` | Permit known mutation arguments such as `aspect lint --fix`; configured tasks themselves remain operator-trusted. |
 | `output_user_root` | unset | Isolated Bazel output user root managed by the server. |
 | `allowed_commands` | build, test, coverage, query commands, and selected informational commands | Commands eligible to run. |
 | `denied_commands` | `clean`, `fetch`, `mobile-install`, `run`, `shutdown`, `sync` | Commands rejected even if also present in `allowed_commands`. |

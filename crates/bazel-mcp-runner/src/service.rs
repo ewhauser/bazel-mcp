@@ -9,8 +9,8 @@ use std::{
 use bazel_mcp_bes::{BesError, BesServer};
 use bazel_mcp_policy::{
     PolicyConfig, PolicyError, Redactor, effective_output_base, filtered_environment,
-    resolve_bazel_executable, validate_arguments, validate_command, validate_query_arguments,
-    validate_workspace,
+    resolve_aspect_executable, resolve_bazel_executable, validate_arguments,
+    validate_aspect_arguments, validate_command, validate_query_arguments, validate_workspace,
 };
 use bazel_mcp_reducer::{
     RawStarlarkConfig, ReducerPipeline, StarlarkReducerConfig, load_starlark_reducers,
@@ -27,6 +27,7 @@ use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    driver::{AspectConfig, ExecutionDriver, RawAspectConfig},
     execution::cancelled_summary,
     output_base_lock::{
         OutputBaseLockAcquisition, OutputBaseWaitStatus, acquire as acquire_output_base_lock,
@@ -80,6 +81,7 @@ pub struct RawRunnerConfig {
     pub version_check_timeout_seconds: u64,
     pub maximum_pending_invocations: usize,
     pub bep_transport: BepTransport,
+    pub aspect: RawAspectConfig,
     pub starlark: RawStarlarkConfig,
 }
 
@@ -99,6 +101,7 @@ impl Default for RawRunnerConfig {
             version_check_timeout_seconds: config.version_check_timeout.as_secs(),
             maximum_pending_invocations: config.maximum_pending_invocations,
             bep_transport: config.bep_transport,
+            aspect: config.aspect.into(),
             starlark: RawStarlarkConfig::default(),
         }
     }
@@ -120,6 +123,7 @@ pub struct RunnerConfig {
     pub maximum_pending_invocations: usize,
     pub output_base_lock_root: PathBuf,
     pub bep_transport: BepTransport,
+    pub aspect: AspectConfig,
     pub starlark_reducers: StarlarkReducerConfig,
 }
 
@@ -140,6 +144,7 @@ impl Default for RunnerConfig {
             maximum_pending_invocations: 256,
             output_base_lock_root: default_output_base_lock_root(),
             bep_transport: BepTransport::Tail,
+            aspect: AspectConfig::default(),
             starlark_reducers: StarlarkReducerConfig::default(),
         }
     }
@@ -187,6 +192,19 @@ impl RunnerConfig {
                 "output-base lock root must not be empty",
             ));
         }
+        if self.aspect.has_invalid_command() {
+            return Err(RunnerError::InvalidConfiguration(
+                "Aspect routes must be non-empty command names without whitespace or a leading dash",
+            ));
+        }
+        if self.aspect.commands.iter().any(|command| {
+            !self.policy.allowed_commands.contains(command)
+                || self.policy.denied_commands.contains(command)
+        }) {
+            return Err(RunnerError::InvalidConfiguration(
+                "every Aspect route must also be allowed by command policy",
+            ));
+        }
         if !self.allow_unsupported_bazel_versions && self.supported_bazel_major_versions.is_empty()
         {
             return Err(RunnerError::InvalidConfiguration(
@@ -201,6 +219,7 @@ impl TryFrom<(RawRunnerConfig, PolicyConfig)> for RunnerConfig {
     type Error = RunnerError;
 
     fn try_from((raw, policy): (RawRunnerConfig, PolicyConfig)) -> Result<Self, Self::Error> {
+        let aspect = AspectConfig::from(raw.aspect);
         let starlark_reducers = StarlarkReducerConfig::try_from(raw.starlark)
             .map_err(|error| RunnerError::ReducerConfiguration(error.to_string()))?;
         let config = Self {
@@ -224,6 +243,7 @@ impl TryFrom<(RawRunnerConfig, PolicyConfig)> for RunnerConfig {
             maximum_pending_invocations: raw.maximum_pending_invocations,
             output_base_lock_root: default_output_base_lock_root(),
             bep_transport: raw.bep_transport,
+            aspect,
             starlark_reducers,
         };
         config.validate()?;
@@ -309,7 +329,7 @@ struct PreparedSubmission {
     lock_key: PathBuf,
     explicit_output_base: Option<PathBuf>,
     output_base_wait: Arc<OutputBaseWaitStatus>,
-    executable: PathBuf,
+    driver: ExecutionDriver,
     cancellation: CancellationToken,
     _pending_permit: OwnedSemaphorePermit,
     deferred: bool,
@@ -378,16 +398,16 @@ pub struct CancelResult {
 
 impl InvocationService {
     pub fn new(store: Store, config: RunnerConfig) -> Result<Self, RunnerError> {
-        if config.bep_transport == BepTransport::Bes {
+        if config.bep_transport == BepTransport::Bes || config.aspect.enabled() {
             return Err(RunnerError::InvalidConfiguration(
-                "BES transport requires asynchronous InvocationService::start",
+                "BES or Aspect capture requires asynchronous InvocationService::start",
             ));
         }
         Self::new_with_bes(store, config, None)
     }
 
     pub async fn start(store: Store, config: RunnerConfig) -> Result<Self, RunnerError> {
-        let bes = if config.bep_transport == BepTransport::Bes {
+        let bes = if config.bep_transport == BepTransport::Bes || config.aspect.enabled() {
             Some(BesServer::start().await?)
         } else {
             None
@@ -607,8 +627,18 @@ impl InvocationService {
         validate_command(&self.config.policy, &request.command)?;
         validate_arguments(&request.startup_arguments)?;
         validate_arguments(&request.arguments)?;
-        validate_query_arguments(&request.command, &request.arguments)?;
-        if self.config.bep_transport == BepTransport::Bes
+        let uses_aspect = self.config.aspect.routes(&request.command);
+        if uses_aspect {
+            validate_aspect_arguments(
+                &request.command,
+                &request.arguments,
+                self.config.aspect.allow_workspace_mutation,
+            )?;
+        } else {
+            validate_query_arguments(&request.command, &request.arguments)?;
+        }
+        if !uses_aspect
+            && self.config.bep_transport == BepTransport::Bes
             && request
                 .arguments
                 .iter()
@@ -616,7 +646,8 @@ impl InvocationService {
         {
             return Err(RunnerError::BesBackendConflict);
         }
-        if self.config.bep_transport == BepTransport::Bes
+        if !uses_aspect
+            && self.config.bep_transport == BepTransport::Bes
             && request
                 .arguments
                 .iter()
@@ -635,8 +666,19 @@ impl InvocationService {
         let lock_key = explicit_output_base
             .clone()
             .unwrap_or_else(|| workspace.clone());
-        let executable = resolve_bazel_executable(&workspace, &self.config.policy)?;
-        self.validate_bazel_version(&executable, &workspace).await?;
+        let bazel_executable = resolve_bazel_executable(&workspace, &self.config.policy)?;
+        self.validate_bazel_version(&bazel_executable, &workspace)
+            .await?;
+        let driver = if uses_aspect {
+            ExecutionDriver::Aspect {
+                executable: resolve_aspect_executable(self.config.aspect.executable.as_deref())?,
+                bazel_executable,
+            }
+        } else {
+            ExecutionDriver::Bazel {
+                executable: bazel_executable,
+            }
+        };
         if cancellation.is_cancelled() {
             return Err(RunnerError::CancelledBeforeAcceptance);
         }
@@ -677,7 +719,7 @@ impl InvocationService {
             lock_key,
             explicit_output_base,
             output_base_wait,
-            executable,
+            driver,
             cancellation,
             _pending_permit: pending_permit,
             deferred: deferred.is_some(),
@@ -694,7 +736,7 @@ impl InvocationService {
             lock_key,
             explicit_output_base,
             output_base_wait,
-            executable,
+            driver,
             cancellation,
             _pending_permit,
             deferred: _,
@@ -785,7 +827,7 @@ impl InvocationService {
                 .execute(
                     &queued,
                     &paths,
-                    &executable,
+                    &driver,
                     cancellation.clone(),
                     explicit_output_base.as_deref(),
                     output_base_wait,
@@ -1159,6 +1201,7 @@ mod tests {
             expected.supported_bazel_major_versions
         );
         assert_eq!(actual.bep_transport, expected.bep_transport);
+        assert_eq!(actual.aspect, expected.aspect);
         assert_eq!(actual.starlark_reducers, expected.starlark_reducers);
     }
 

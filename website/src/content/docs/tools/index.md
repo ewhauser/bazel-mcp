@@ -8,7 +8,8 @@ when negotiated, use MCP protocol methods rather than additional tools.
 
 ## `bazel.run`
 
-Run an allowed Bazel command and receive a bounded result.
+Run an allowed Bazel command, or an operator-configured Aspect CLI command, and
+receive a bounded result.
 
 ```json
 {
@@ -20,8 +21,9 @@ Run an allowed Bazel command and receive a bounded result.
 
 Supported command classes include `build`, `test`, `coverage`, `query`,
 `cquery`, `aquery`, and selected informational commands. The exact policy is
-configurable. Request arguments remain an array and are never concatenated into
-a shell command.
+configurable. Operators can opt specific commands such as `lint` into Aspect
+CLI routing without adding another MCP tool. Request arguments remain an array
+and are never concatenated into a shell command.
 
 The result includes the invocation lifecycle state, command outcome, a bounded
 headline and diagnostics, and an `invocation_id` when evidence can be inspected.

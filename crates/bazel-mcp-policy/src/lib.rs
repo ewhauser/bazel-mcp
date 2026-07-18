@@ -11,9 +11,10 @@ mod workspace;
 pub use command::validate_command;
 pub use config::{PolicyConfig, RawPolicyConfig};
 pub use environment::filtered_environment;
-pub use executable::resolve_bazel_executable;
+pub use executable::{resolve_aspect_executable, resolve_bazel_executable};
 pub use flags::{
-    INTERNAL_BEP_FLAG, effective_output_base, validate_arguments, validate_query_arguments,
+    INTERNAL_BEP_FLAG, effective_output_base, validate_arguments, validate_aspect_arguments,
+    validate_query_arguments,
 };
 pub use redaction::Redactor;
 pub use workspace::validate_workspace;
@@ -52,6 +53,12 @@ pub enum PolicyError {
     RepeatedOutputBase,
     #[error("could not resolve a Bazel executable for {0}")]
     ExecutableNotFound(PathBuf),
+    #[error("could not resolve the Aspect CLI executable: {0}")]
+    AspectExecutableNotFound(PathBuf),
+    #[error("Aspect command argument overrides a server-owned setting: {0}")]
+    AspectReservedArgument(String),
+    #[error("Aspect lint --fix is disabled; set aspect.allow_workspace_mutation = true to opt in")]
+    AspectWorkspaceMutationDenied,
     #[error("invalid redaction expression {pattern:?}: {source}")]
     InvalidRedaction {
         pattern: String,

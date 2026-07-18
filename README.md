@@ -110,14 +110,16 @@ The server exposes three tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `bazel.run` | Run an allowed Bazel command and return a bounded summary. |
+| `bazel.run` | Run an allowed Bazel or configured Aspect command and return a bounded summary. |
 | `bazel.inspect` | Read filtered diagnostics, tests, coverage, artifacts, query results, or logs from an invocation. |
 | `bazel.cancel` | Cancel a queued or running invocation. |
 
 `bazel.run` supports `build`, `test`, `coverage`, `query`, `cquery`, `aquery`,
-and selected informational commands. Successful results are limited to 2 KiB
-and unsuccessful results to 8 KiB. Follow-up `bazel.inspect` calls are also
-bounded and paginated, so an agent only retrieves the evidence it needs.
+and selected informational commands. Operators may also route explicitly
+allowed commands such as `lint` through Aspect CLI. Successful results are
+limited to 2 KiB and unsuccessful results to 8 KiB. Follow-up `bazel.inspect`
+calls are also bounded and paginated, so an agent only retrieves the evidence
+it needs.
 
 Failure results rank concrete root causes before aggregated action failures.
 Equivalent fanout failures are represented once with `target: null` and a
@@ -381,7 +383,7 @@ guidance.
 
 The built-in defaults cover personal local use. For workspace restrictions,
 retention limits, timeouts, command policy, result encoding, BEP transport,
-custom redaction, or custom reducers, start with
+optional Aspect CLI routing, custom redaction, or custom reducers, start with
 [`examples/config.toml`](examples/config.toml).
 
 BEP capture defaults to the private binary-file (`tail`) path so existing
