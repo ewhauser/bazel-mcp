@@ -10,7 +10,7 @@ rust_library(
     deps = all_crate_deps(
         cargo_only = True,
         normal = True,
-    ),
+    ) + ["//crates/diagnostic-reducer-core:diagnostic_reducer_core"],
     visibility = ["//visibility:public"],
 )
 

@@ -952,7 +952,25 @@ dependencies = [
 
 [[package]]
 name = "diagnostic-reducer"
-version = "0.6.0"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "diagnostic-reducer-core",
+ "serde_json",
+]
+
+[[package]]
+name = "diagnostic-reducer-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "diagnostic-reducer",
+ "serde_json",
+]
+
+[[package]]
+name = "diagnostic-reducer-core"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

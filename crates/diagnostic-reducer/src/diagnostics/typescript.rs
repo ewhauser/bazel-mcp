@@ -36,6 +36,7 @@ pub(crate) fn parse_diagnostic(line: &str) -> Option<Diagnostic> {
             line: Some(line_number),
             column: Some(column),
         }),
+        quality: crate::EvidenceQuality::Located,
         repetition_count: 1,
     })
 }

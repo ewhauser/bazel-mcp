@@ -1,6 +1,6 @@
 use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
-use super::common::{bounded_text, split_u32_prefix, strip_workspace_marker};
+use super::common::{bounded_text, normalize_path, split_u32_prefix};
 
 pub(super) fn reduce_linker(input: &str, diagnostics: &mut Vec<Diagnostic>) {
     let mut parser = CppLinkerDiagnosticParser::default();
@@ -33,6 +33,7 @@ pub(crate) fn parse_diagnostic(line: &str) -> Option<Diagnostic> {
             line: Some(line_number),
             column,
         }),
+        quality: crate::EvidenceQuality::Located,
         repetition_count: 1,
     })
 }
@@ -210,16 +211,11 @@ fn linker_diagnostic(message: String, location: Option<Location>) -> Diagnostic 
         provenance: None,
         message,
         location,
+        quality: crate::EvidenceQuality::Structured,
         repetition_count: 1,
     }
 }
 
 fn compact_path(path: &str) -> String {
-    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
-        && let Some((_, relative)) = after_execroot.split_once('/')
-    {
-        return relative.to_owned();
-    }
-    path.strip_prefix("./").unwrap_or(&path).to_owned()
+    normalize_path(path)
 }

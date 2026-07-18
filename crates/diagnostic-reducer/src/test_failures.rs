@@ -654,16 +654,6 @@ fn gtest_failure_location(line: &str) -> Option<Option<Location>> {
 
 fn compact_test_path(path: &str) -> String {
     let path = path.trim_matches('"').replace('\\', "/");
-    for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
-        if let Some((_, relative)) = path.rsplit_once(marker) {
-            return relative.to_owned();
-        }
-    }
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
-        && let Some((_, relative)) = after_execroot.split_once('/')
-    {
-        return relative.to_owned();
-    }
     path.strip_prefix("./").unwrap_or(&path).to_owned()
 }
 

@@ -17,9 +17,7 @@ pub(super) fn split_u32_prefix(value: &str) -> Option<(u32, &str)> {
         .flatten()
 }
 
-pub(super) fn strip_workspace_marker(path: String) -> String {
-    path.strip_prefix("<WORKSPACE>/")
-        .or_else(|| path.strip_prefix("<workspace>/"))
-        .unwrap_or(&path)
-        .to_owned()
+pub(super) fn normalize_path(path: &str) -> String {
+    let path = path.trim_matches('"').replace('\\', "/");
+    path.strip_prefix("./").unwrap_or(&path).to_owned()
 }

@@ -1,6 +1,6 @@
 use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
-use super::common::{bounded_text, strip_workspace_marker};
+use super::common::{bounded_text, normalize_path};
 
 const MAX_MESSAGE_BYTES: usize = 1_024;
 
@@ -61,12 +61,13 @@ impl PendingDiagnostic {
             provenance: None,
             message: bounded_text(&message, MAX_MESSAGE_BYTES),
             location: Some(location),
+            quality: crate::EvidenceQuality::Located,
             repetition_count: 1,
         })
     }
 }
 
-fn parse_error_header(line: &str) -> Option<String> {
+pub(super) fn parse_error_header(line: &str) -> Option<String> {
     let line = line.trim().strip_prefix("ERROR: ").unwrap_or(line.trim());
     let remainder = line.strip_prefix("error[")?;
     let (code, message) = remainder.split_once("]: ")?;
@@ -100,13 +101,7 @@ fn parse_detail(line: &str) -> Option<&str> {
 }
 
 fn compact_path(path: &str) -> String {
-    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
-        && let Some((_, relative)) = after_execroot.split_once('/')
-    {
-        return relative.to_owned();
-    }
-    path.strip_prefix("./").unwrap_or(&path).to_owned()
+    normalize_path(path)
 }
 
 #[cfg(test)]

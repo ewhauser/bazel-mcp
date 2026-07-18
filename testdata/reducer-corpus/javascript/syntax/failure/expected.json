@@ -32,15 +32,6 @@
       {
         "severity": "error",
         "category": "test",
-        "message": "SyntaxError: missing ) after argument list",
-        "location": null,
-        "target": "//cases:syntax_failure",
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "test",
         "message": "Test failed: //cases:syntax_failure",
         "location": null,
         "target": "//cases:syntax_failure",

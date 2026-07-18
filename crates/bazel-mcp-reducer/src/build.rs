@@ -1035,12 +1035,16 @@ mod tests {
                 elapsed_ms: 1,
                 budget: Budget::result_default(),
             });
-            assert!(summary.diagnostics.iter().any(|diagnostic| {
-                diagnostic.category == category
-                    && (diagnostic.message.contains("ROOT_CAUSE")
-                        || diagnostic.message.contains("no such target")
-                        || diagnostic.message.contains("visibility"))
-            }));
+            assert!(
+                summary.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.category == category
+                        && (diagnostic.message.contains("ROOT_CAUSE")
+                            || diagnostic.message.contains("no such target")
+                            || diagnostic.message.contains("visibility"))
+                }),
+                "line {line:?} reduced to {:?}",
+                summary.diagnostics
+            );
         }
     }
 
@@ -2032,10 +2036,14 @@ assertion `left == right` failed\n";
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("assertion"))
         );
-        assert!(summary.diagnostics.iter().all(|diagnostic| {
-            !diagnostic.message.contains("successful_root_cause_test")
-                && diagnostic.message != "failures:"
-        }));
+        assert!(
+            summary.diagnostics.iter().all(|diagnostic| {
+                !diagnostic.message.contains("successful_root_cause_test")
+                    && diagnostic.message != "failures:"
+            }),
+            "unexpected framework noise: {:#?}",
+            summary.diagnostics
+        );
     }
 
     #[test]

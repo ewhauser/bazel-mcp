@@ -1,17 +1,32 @@
-//! Streaming, deterministic reduction of normalized failed-test evidence.
+//! Bazel adapter for provider-neutral streaming test-log reduction.
 
-use bazel_mcp_types::{
-    Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity, TestCase, TestStatus,
-};
-use diagnostic_reducer::{
-    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
-    parse_go_diagnostic,
-};
+use bazel_mcp_types::{Diagnostic, DiagnosticCategory, TestCase, TestStatus};
+use diagnostic_reducer::{Provenance, TestLogReducer};
 
-use crate::{TestFailureAccumulator, TestFailureEvidence, diagnostics::map_diagnostic};
+use crate::diagnostics::{map_diagnostic, map_path_for_bazel};
 
 const MAX_FAILURES: usize = 20;
-const MAX_MESSAGE_BYTES: usize = 1_000;
+
+pub type TestFailureEvidence = diagnostic_reducer::TestFailureEvidence;
+
+/// Backward-compatible Bazel projection over the provider-neutral accumulator.
+#[derive(Default)]
+pub struct TestFailureAccumulator(diagnostic_reducer::TestFailureAccumulator);
+
+impl TestFailureAccumulator {
+    pub fn observe_line(&mut self, line: &str) {
+        self.0.observe_line(line);
+    }
+
+    #[must_use]
+    pub fn finish(self) -> Vec<TestFailureEvidence> {
+        self.0
+            .finish()
+            .into_iter()
+            .map(map_failure_evidence)
+            .collect()
+    }
+}
 
 /// Stable context for one failed Bazel test target's evidence stream.
 pub struct TestEvidenceInput<'a> {
@@ -25,18 +40,10 @@ pub struct TestEvidenceResult {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Streaming reducer for language-specific and framework-specific test output.
-///
-/// Acquisition stays in the runner so raw logs can be durably retained before
-/// this reducer sees normalized, redacted lines.
+/// Thin Bazel projection over the reusable test-log state machine.
 pub struct TestEvidenceReducer {
     label: String,
-    javascript: JavaScriptTestDiagnosticParser,
-    java: JavaTestDiagnosticParser,
-    python: PythonDiagnosticParser,
-    failures: TestFailureAccumulator,
-    extracted_failures: Vec<TestFailureEvidence>,
-    fallback: Option<(u8, Diagnostic)>,
+    reducer: TestLogReducer,
 }
 
 impl TestEvidenceReducer {
@@ -44,126 +51,39 @@ impl TestEvidenceReducer {
     pub fn new(input: TestEvidenceInput<'_>) -> Self {
         Self {
             label: input.label.to_owned(),
-            javascript: JavaScriptTestDiagnosticParser::default(),
-            java: JavaTestDiagnosticParser::default(),
-            python: PythonDiagnosticParser::default(),
-            failures: TestFailureAccumulator::default(),
-            extracted_failures: Vec::new(),
-            fallback: None,
+            reducer: TestLogReducer::default(),
         }
     }
 
     pub fn observe_line(&mut self, line: &str) {
-        let label = &self.label;
-        self.failures.observe_line(line);
-        let javascript_diagnostic = self.javascript.observe_line(line);
-        let java_diagnostic = self.java.observe_line(line);
-        let candidate = if let Some(diagnostic) = parse_go_diagnostic(line) {
-            let mut diagnostic = map_diagnostic(diagnostic);
-            diagnostic.category = DiagnosticCategory::Test;
-            diagnostic.target = Some(label.to_owned());
-            diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
-            Some((0, diagnostic))
-        } else if let Some(diagnostic) = javascript_diagnostic {
-            let mut diagnostic = map_diagnostic(diagnostic);
-            diagnostic.target = Some(label.to_owned());
-            diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
-            Some((0, diagnostic))
-        } else if let Some(diagnostic) = java_diagnostic {
-            let mut diagnostic = map_diagnostic(diagnostic);
-            diagnostic.target = Some(label.to_owned());
-            diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
-            Some((0, diagnostic))
-        } else if let Some(diagnostic) = self.python.observe_line(line) {
-            let mut diagnostic = map_diagnostic(diagnostic);
-            diagnostic.category = DiagnosticCategory::Test;
-            diagnostic.target = Some(label.to_owned());
-            diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
-            Some((0, diagnostic))
-        } else {
-            failure_evidence_priority(line).map(|priority| {
-                (
-                    priority,
-                    Diagnostic {
-                        severity: Severity::Error,
-                        category: DiagnosticCategory::Test,
-                        message: bounded_text(line, MAX_MESSAGE_BYTES),
-                        location: None,
-                        target: Some(label.to_owned()),
-                        action: None,
-                        repetition_count: 1,
-                    },
-                )
-            })
-        };
-        if let Some((priority, diagnostic)) = candidate
-            && self
-                .fallback
-                .as_ref()
-                .is_none_or(|(current, current_diagnostic)| {
-                    priority < *current
-                        || (priority == *current
-                            && diagnostic.location.is_some()
-                            && current_diagnostic.location.is_none())
-                })
-        {
-            self.fallback = Some((priority, diagnostic));
-        }
+        let provenance = Provenance::new("test-log").with_label(self.label.clone());
+        self.reducer.observe_line(line, &provenance);
     }
 
-    /// Completes the current log. Incomplete logs do not contribute structured
-    /// failures, matching the runner's durable snapshot semantics.
     pub fn finish_log(&mut self, complete: bool) {
-        if complete {
-            for diagnostic in [self.javascript.finish(), self.java.finish()]
-                .into_iter()
-                .flatten()
-            {
-                let mut diagnostic = map_diagnostic(diagnostic);
-                diagnostic.target = Some(self.label.clone());
-                diagnostic.message = bounded_text(&diagnostic.message, MAX_MESSAGE_BYTES);
-                if self.fallback.as_ref().is_none_or(|(priority, current)| {
-                    *priority > 0
-                        || (*priority == 0
-                            && diagnostic.location.is_some()
-                            && current.location.is_none())
-                }) {
-                    self.fallback = Some((0, diagnostic));
-                }
-            }
-            for failure in std::mem::take(&mut self.failures).finish() {
-                if self.extracted_failures.len() >= MAX_FAILURES {
-                    break;
-                }
-                if !self.extracted_failures.iter().any(|current| {
-                    current.name == failure.name && current.message == failure.message
-                }) {
-                    self.extracted_failures.push(failure);
-                }
-            }
-        } else {
-            self.failures = TestFailureAccumulator::default();
-        }
-        self.javascript = JavaScriptTestDiagnosticParser::default();
-        self.java = JavaTestDiagnosticParser::default();
-        self.python = PythonDiagnosticParser::default();
+        self.reducer.finish_log(complete);
     }
 
     #[must_use]
     pub fn finish(self) -> TestEvidenceResult {
-        if self.extracted_failures.is_empty() {
+        let reduced = self.reducer.finish();
+        let failures = reduced
+            .failures
+            .into_iter()
+            .map(map_test_failure)
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
             return TestEvidenceResult {
-                diagnostics: self
-                    .fallback
-                    .map(|(_, diagnostic)| diagnostic)
+                diagnostics: reduced
+                    .diagnostics
                     .into_iter()
+                    .map(|diagnostic| map_test_diagnostic(diagnostic, &self.label))
                     .collect(),
                 ..TestEvidenceResult::default()
             };
         }
 
-        let cases = self
-            .extracted_failures
+        let cases = failures
             .iter()
             .take(MAX_FAILURES)
             .map(|failure| TestCase {
@@ -173,19 +93,20 @@ impl TestEvidenceReducer {
                 message: Some(failure.message.clone()),
             })
             .collect();
-        let diagnostics = self
-            .extracted_failures
+        let diagnostics = failures
             .into_iter()
             .take(MAX_FAILURES)
             .map(|failure| Diagnostic {
-                severity: Severity::Error,
+                severity: bazel_mcp_types::Severity::Error,
                 category: DiagnosticCategory::Test,
                 message: failure.message,
-                location: failure.location.map(|location| DiagnosticLocation {
-                    path: location.path,
-                    line: location.line,
-                    column: location.column,
-                }),
+                location: failure
+                    .location
+                    .map(|location| bazel_mcp_types::DiagnosticLocation {
+                        path: location.path,
+                        line: location.line,
+                        column: location.column,
+                    }),
                 target: Some(self.label.clone()),
                 action: None,
                 repetition_count: 1,
@@ -195,52 +116,40 @@ impl TestEvidenceReducer {
     }
 }
 
-pub(crate) fn failure_evidence_priority(line: &str) -> Option<u8> {
-    let line = line.trim();
-    let lower = line.to_ascii_lowercase();
-    let base = lower
-        .split_once(" [repeated ")
-        .map_or(lower.as_str(), |(base, _)| base);
-    if matches!(base, "failure:" | "failures:")
-        || (line.starts_with("test ") && base.ends_with(" ... ok"))
-    {
-        return None;
+fn map_failure_evidence(mut failure: TestFailureEvidence) -> TestFailureEvidence {
+    if let Some(location) = &mut failure.location {
+        let original = location.path.clone();
+        let mapped = map_path_for_bazel(&original);
+        if mapped != original {
+            failure.message = failure.message.replace(&original, &mapped);
+            location.path = mapped;
+        }
     }
-    if lower.contains("root_cause")
-        || lower.contains("panicked at")
-        || (lower.contains("assertion") && lower.contains(" failed"))
-    {
-        Some(0)
-    } else if lower.contains("error:")
-        || lower.starts_with("error ")
-        || lower.contains("fatal:")
-        || lower.contains("no such target")
-        || lower.contains("no such package")
-        || lower.contains("undefined reference")
-        || lower.contains("missing strict dependencies")
-        || (lower.contains(".go: import of \"") && lower.ends_with('"'))
-    {
-        Some(1)
-    } else if lower.contains("failed:")
-        || lower.contains("failure")
-        || lower.starts_with("test result: failed")
-        || (line.starts_with("test ") && line.ends_with(" ... FAILED"))
-    {
-        Some(2)
-    } else {
-        None
-    }
+    failure
 }
 
-fn bounded_text(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_owned();
+fn map_test_failure(
+    mut failure: diagnostic_reducer::TestFailure,
+) -> diagnostic_reducer::TestFailure {
+    if let Some(location) = &mut failure.location {
+        let original = location.path.clone();
+        let mapped = map_path_for_bazel(&original);
+        if mapped != original {
+            failure.message = failure.message.replace(&original, &mapped);
+            location.path = mapped;
+        }
     }
-    let mut boundary = maximum_bytes;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
+    failure
+}
+
+fn map_test_diagnostic(diagnostic: diagnostic_reducer::Diagnostic, label: &str) -> Diagnostic {
+    let mut diagnostic = map_diagnostic(diagnostic);
+    diagnostic.category = DiagnosticCategory::Test;
+    diagnostic.target = Some(label.to_owned());
+    if let Some(location) = &mut diagnostic.location {
+        location.path = map_path_for_bazel(&location.path);
     }
-    format!("{}…", &value[..boundary])
+    diagnostic
 }
 
 #[cfg(test)]

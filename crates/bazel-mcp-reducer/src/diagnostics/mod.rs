@@ -1,24 +1,42 @@
+mod bazel;
+
+use bazel::add_bazel_diagnostics;
+
 use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
 use diagnostic_reducer::{
-    Budget as CoreBudget, Diagnostic as CoreDiagnostic, DiagnosticClass, NoRedaction,
-    ReductionOptions, TextInput, normalize_terminal_text,
+    Budget as CoreBudget, Diagnostic as CoreDiagnostic, DiagnosticClass, GenericRanker,
+    NoRedaction, OutputPolicy, ReductionOptions, TextInput, normalize_terminal_text,
+    reduce_with_policy,
 };
 
 pub(crate) fn add_text_diagnostics(input: &[u8], diagnostics: &mut Vec<Diagnostic>) {
     let normalized = normalize_terminal_text(input);
+    let mut bazel_diagnostics = Vec::new();
+    add_bazel_diagnostics(&normalized, &mut bazel_diagnostics);
     let generic_input = normalized
         .lines()
-        .filter(|line| !is_bazel_status_line(line))
+        .filter(|line| !bazel::is_bazel_owned_line(line))
         .collect::<Vec<_>>()
         .join("\n");
-    let reduction = diagnostic_reducer::reduce(
+    let reduction = reduce_with_policy(
         &[TextInput::new(generic_input.as_bytes())],
         &ReductionOptions {
             budget: CoreBudget::unbounded(),
             ..ReductionOptions::default()
         },
-        &NoRedaction,
+        OutputPolicy::new(&NoRedaction, &bazel::BazelPathMapper, &GenericRanker),
     );
+    if reduction
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.as_deref() == Some("swc.parser"))
+    {
+        bazel_diagnostics.retain(|diagnostic| {
+            let lower = diagnostic.message.to_ascii_lowercase();
+            !(lower.contains("error executing ") && lower.contains(" command"))
+        });
+    }
+    diagnostics.extend(bazel_diagnostics);
     diagnostics.extend(reduction.diagnostics.into_iter().map(map_diagnostic));
 }
 
@@ -30,7 +48,10 @@ pub fn map_diagnostic(diagnostic: CoreDiagnostic) -> Diagnostic {
         _ => match diagnostic.class {
             DiagnosticClass::Compiler => DiagnosticCategory::Compilation,
             DiagnosticClass::Test => DiagnosticCategory::Test,
+            DiagnosticClass::Lint => DiagnosticCategory::Compilation,
+            DiagnosticClass::Infrastructure => DiagnosticCategory::Unknown,
             DiagnosticClass::Tool => DiagnosticCategory::Unknown,
+            _ => DiagnosticCategory::Unknown,
         },
     };
     Diagnostic {
@@ -42,7 +63,7 @@ pub fn map_diagnostic(diagnostic: CoreDiagnostic) -> Diagnostic {
         category,
         message: diagnostic.message,
         location: diagnostic.location.map(|location| DiagnosticLocation {
-            path: location.path,
+            path: bazel::compact_bazel_path(&location.path),
             line: location.line,
             column: location.column,
         }),
@@ -50,11 +71,6 @@ pub fn map_diagnostic(diagnostic: CoreDiagnostic) -> Diagnostic {
         action: None,
         repetition_count: diagnostic.repetition_count,
     }
-}
-
-fn is_bazel_status_line(line: &str) -> bool {
-    let lower = line.trim().to_ascii_lowercase();
-    lower.starts_with("info:") || lower == "error: build did not complete successfully"
 }
 
 pub(crate) fn bounded_text(value: &str, maximum_bytes: usize) -> String {
@@ -66,6 +82,10 @@ pub(crate) fn bounded_text(value: &str, maximum_bytes: usize) -> String {
         boundary -= 1;
     }
     format!("{}…", &value[..boundary])
+}
+
+pub(crate) fn map_path_for_bazel(path: &str) -> String {
+    bazel::compact_bazel_path(path)
 }
 #[cfg(test)]
 pub(crate) fn parse_cpp_diagnostic(input: &str) -> Option<Diagnostic> {
@@ -104,7 +124,7 @@ pub(crate) fn parse_protobuf_diagnostic(input: &str) -> Option<Diagnostic> {
 
 #[cfg(test)]
 pub(crate) fn parse_starlark_inline_diagnostic(input: &str) -> Option<Diagnostic> {
-    diagnostic_reducer::__parse_starlark_inline_diagnostic(input).map(map_diagnostic)
+    bazel::parse_starlark_inline(input)
 }
 
 #[cfg(test)]

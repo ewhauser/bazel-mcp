@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
-use super::common::{split_u32_prefix, strip_workspace_marker};
+use super::common::{normalize_path, split_u32_prefix};
 
 pub(super) fn reduce_compiler(input: &str, diagnostics: &mut Vec<Diagnostic>) {
     diagnostics.extend(parse_compiler_diagnostics(input));
@@ -91,6 +91,7 @@ pub(super) fn parse_compiler_diagnostic(line: &str) -> Option<Diagnostic> {
             line: Some(line_number),
             column,
         }),
+        quality: crate::EvidenceQuality::Located,
         repetition_count: 1,
     })
 }
@@ -118,6 +119,7 @@ impl JavaTestDiagnosticParser {
                 provenance: None,
                 message: message.to_owned(),
                 location: None,
+                quality: crate::EvidenceQuality::Structured,
                 repetition_count: 1,
             });
             self.pending_is_explicit = explicitly_java;
@@ -234,11 +236,5 @@ fn parse_stack_frame(line: &str) -> Option<(Location, bool)> {
 }
 
 fn compact_path(path: &str) -> String {
-    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
-        && let Some((_, relative)) = after_execroot.split_once('/')
-    {
-        return relative.to_owned();
-    }
-    path.strip_prefix("./").unwrap_or(&path).to_owned()
+    normalize_path(path)
 }

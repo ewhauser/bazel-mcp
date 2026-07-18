@@ -1,6 +1,6 @@
 use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
-use super::common::strip_workspace_marker;
+use super::common::normalize_path;
 
 /// Stateful extractor for standard Python traceback and syntax-error output.
 ///
@@ -37,6 +37,7 @@ impl PythonDiagnosticParser {
             provenance: None,
             message: message.to_owned(),
             location: self.location.take(),
+            quality: crate::EvidenceQuality::Structured,
             repetition_count: 1,
         })
     }
@@ -47,10 +48,7 @@ pub(super) fn parse_location(line: &str) -> Option<Location> {
     let start = line.find(marker)? + marker.len();
     let remainder = &line[start..];
     let (path, remainder) = remainder.split_once("\", line ")?;
-    let synthetic_path = path.starts_with('<')
-        && !path.starts_with("<RUNTIME_ROOT>/")
-        && !path.starts_with("<WORKSPACE>/")
-        && !path.starts_with("<workspace>/");
+    let synthetic_path = path.starts_with('<') && !path.contains("/");
     if synthetic_path || path.ends_with("_stage2_bootstrap.py") {
         return None;
     }
@@ -97,16 +95,5 @@ pub(super) fn exception_message(line: &str) -> Option<&str> {
 }
 
 fn compact_path(path: &str) -> String {
-    let path = strip_workspace_marker(path.trim_matches('"').replace('\\', "/"));
-    for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
-        if let Some((_, relative)) = path.rsplit_once(marker) {
-            return relative.to_owned();
-        }
-    }
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
-        && let Some((_, relative)) = after_execroot.split_once('/')
-    {
-        return relative.to_owned();
-    }
-    path.strip_prefix("./").unwrap_or(&path).to_owned()
+    normalize_path(path)
 }
