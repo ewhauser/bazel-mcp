@@ -9,6 +9,9 @@ repository.workspace = true
 description = "Deterministic, source-agnostic reduction of compiler and test diagnostics"
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 test-support = []
 

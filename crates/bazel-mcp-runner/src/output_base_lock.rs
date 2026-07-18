@@ -105,6 +105,10 @@ pub(crate) fn default_output_base_lock_root() -> PathBuf {
         // Use a process-environment-independent root so MCP instances launched
         // by different hosts still share one advisory-lock namespace.
         // SAFETY: geteuid has no preconditions and does not mutate memory.
+        #[expect(
+            unsafe_code,
+            reason = "libc::geteuid is the Unix effective-user-id primitive"
+        )]
         let identity = unsafe { libc::geteuid() };
         PathBuf::from("/tmp").join(format!("bazel-mcp-output-base-locks-{identity}"))
     }
@@ -379,6 +383,10 @@ fn process_exists(pid: u32) -> bool {
         return false;
     };
     // SAFETY: signal 0 performs process-existence and permission checks only.
+    #[expect(
+        unsafe_code,
+        reason = "libc::kill is the POSIX process-existence primitive"
+    )]
     if unsafe { libc::kill(pid, 0) } == 0 {
         return true;
     }

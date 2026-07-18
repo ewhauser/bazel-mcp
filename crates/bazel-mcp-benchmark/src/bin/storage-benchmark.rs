@@ -1070,10 +1070,18 @@ fn peak_rss_bytes() -> Option<u64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: `usage` points to writable storage for `getrusage`, and is only
     // assumed initialized after the operating system reports success.
+    #[expect(
+        unsafe_code,
+        reason = "libc::getrusage writes benchmark process resource usage"
+    )]
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
         return None;
     }
     // SAFETY: a successful `getrusage` call initialized the entire structure.
+    #[expect(
+        unsafe_code,
+        reason = "successful getrusage initialized the rusage value"
+    )]
     let raw = unsafe { usage.assume_init() }.ru_maxrss;
     let raw = u64::try_from(raw).ok()?;
     #[cfg(target_os = "macos")]
