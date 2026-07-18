@@ -371,6 +371,31 @@ The server supports four deployment-level result encodings:
 The encoding is server configuration, not a per-call argument. The benchmark
 MUST use the encoding intended for the production MCP host.
 
+### 8.6 Ephemeral agent-mode CLI
+
+The `bazel-mcp` executable exposes the `bazel.run` capture, reduction, and
+bounded presentation pipeline to CLI-only agent harnesses. Agent mode is
+selected when the executable basename is `bazel`, `BAZEL_MCP_MODE=agent` is
+set, or the invocation begins with `bazel-mcp passthrough --`.
+
+- The launch directory is resolved to its nearest Bazel workspace ancestor.
+- Bazel argv is split into startup arguments, a configured command, and command
+  arguments without shell evaluation.
+- Execution uses `InvocationService`, the normal command and flag policy, the
+  configured reducers and redaction, and the configured result encoding.
+- Raw output and BEP evidence are captured in a private invocation-scoped
+  filesystem store. That store is removed before normal process exit and is
+  never added to the persistent invocation ledger.
+- The final bounded result is written to stdout and the CLI exits with Bazel's
+  exit code. Non-Bazel wrapper failures use exit code 2.
+- An ephemeral result MUST NOT advertise inspection views or an inspect hint.
+  When omitted evidence exists, it provides a bounded rerun hint instead.
+- A leading `--no-agent-mode` removes the wrapper flag and invokes the resolved
+  real Bazel with inherited stdio and the remaining argv. This bypass is
+  explicit and does not apply agent-mode command or presentation policy.
+- Executable discovery MUST reject the current shim to prevent recursive
+  self-launch.
+
 ## 9. Workspace and Bazel discovery
 
 ### 9.1 Workspace validation

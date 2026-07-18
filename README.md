@@ -104,6 +104,37 @@ No configuration file is required. By default, the server can run Bazel in any
 workspace accessible to the current user. See [Security and local data](#security-and-local-data)
 to restrict it to specific roots.
 
+### Use the filtered Bazel CLI
+
+Harnesses that can launch only a Bazel-style command can use the same bounded
+result without speaking MCP:
+
+```sh
+bazel-mcp passthrough -- test //services/...
+```
+
+Agent mode is also selected when `BAZEL_MCP_MODE=agent` is set or when the
+executable filename is `bazel`, for example through a symlink placed earlier on
+the harness's `PATH`. It accepts ordinary Bazel startup arguments, a configured
+command, and command arguments. The current workspace is discovered by walking
+upward from the launch directory.
+
+Agent mode captures and reduces output through the same runner as `bazel.run`,
+prints the configured JSON or TOON representation, and exits with Bazel's exit
+code. Its raw output and BEP files live only in an invocation-scoped temporary
+directory that is removed before the command returns. Because there is no
+retained invocation, the result does not advertise `bazel.inspect`; truncated
+or otherwise omitted detail instead produces a hint for an unfiltered rerun:
+
+```sh
+bazel --no-agent-mode test //services/...
+```
+
+`--no-agent-mode` must be the first argument. It executes the resolved real
+Bazel with inherited standard input, output, and error streams. Configure
+`bazel_executable` when the shim would otherwise be the only `bazel` on `PATH`;
+the wrapper refuses to resolve itself recursively.
+
 ## Tools
 
 The server exposes three tools:

@@ -104,6 +104,10 @@ inject Aspect's `--bazel-startup-flag`, task identity, or local capture header.
 Configured Aspect tasks are operator-trusted code and may have other side
 effects that bazel-mcp cannot infer from their names.
 
+An explicit executable is especially useful when `bazel-mcp` is installed as
+a symlink named `bazel` for agent-mode CLI use. Executable discovery skips the
+currently running shim and fails instead of recursively launching it.
+
 ### Pass environment variables
 
 Child Bazel processes always receive `HOME`, `PATH`, `TMPDIR`, `TEMP`, `TMP`,
@@ -286,7 +290,7 @@ metrics view. Owner labels are deliberately bounded and omit workspace paths.
 
 ## CLI options
 
-Run `bazel-mcp --help` for the authoritative command-line reference:
+Run `bazel-mcp --help` for the MCP server option reference:
 
 | Option | Description |
 | --- | --- |
@@ -297,3 +301,38 @@ Run `bazel-mcp --help` for the authoritative command-line reference:
 
 Standard output is reserved for MCP protocol frames. Tracing and diagnostics
 are always written to standard error.
+
+## Agent-mode CLI
+
+Agent mode exposes the bounded `bazel.run` presentation to harnesses that can
+invoke only a Bazel-shaped CLI. Any of these forms select it:
+
+```sh
+bazel-mcp passthrough -- build //app:server
+BAZEL_MCP_MODE=agent bazel-mcp test //services/...
+bazel query 'deps(//app:server)'
+```
+
+The third form applies when the launched executable filename is `bazel`, such
+as a symlink to `bazel-mcp`. `BAZEL_MCP_CONFIG` and the normal default config
+path select configuration; Bazel-shaped argv is not parsed for MCP-only
+`--config`, `--allow-root`, or `--cache-root` options.
+
+The CLI discovers the nearest workspace ancestor, applies the configured
+command and argument policy, captures through the ordinary runner, prints the
+configured bounded result, and preserves Bazel's exit code. Capture uses a
+private temporary filesystem store that is deleted before exit. Consequently
+`available_views` is empty, `inspect_hint` is omitted, and a truncated result
+or other normally inspectable detail produces a `rerun_hint` instead of
+promising retained evidence.
+
+Put `--no-agent-mode` first to bypass capture and filtering:
+
+```sh
+bazel --no-agent-mode query --output=label 'deps(//app:server)'
+```
+
+The bypass invokes the resolved Bazel directly with inherited stdio and the
+original remaining arguments. It intentionally bypasses agent-mode command and
+flag policy. `BAZEL_MCP_LOG` optionally enables wrapper tracing in agent mode;
+the default emits warnings and errors only.

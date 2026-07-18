@@ -29,12 +29,26 @@ pub(crate) struct EncodedResult {
 pub(crate) struct ExecutionResult<'a> {
     pub(crate) record: &'a InvocationRecord,
     pub(crate) tool_error: bool,
+    pub(crate) retained: bool,
 }
 
 impl<'a> ExecutionResult<'a> {
     #[must_use]
     pub(crate) const fn new(record: &'a InvocationRecord, tool_error: bool) -> Self {
-        Self { record, tool_error }
+        Self {
+            record,
+            tool_error,
+            retained: true,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn ephemeral(record: &'a InvocationRecord) -> Self {
+        Self {
+            record,
+            tool_error: false,
+            retained: false,
+        }
     }
 }
 
@@ -57,6 +71,8 @@ struct RunResult {
     inspect_hint: Option<InspectHint>,
     available_views: AvailableViews,
     more_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rerun_hint: Option<&'static str>,
 }
 
 impl ResultEncoder {
@@ -141,7 +157,11 @@ impl RunResultBuilder {
     }
 
     pub(crate) fn build(&self, execution: ExecutionResult<'_>) -> Result<EncodedResult, String> {
-        let ExecutionResult { record, tool_error } = execution;
+        let ExecutionResult {
+            record,
+            tool_error,
+            retained,
+        } = execution;
         let exit_code = match &record.termination {
             Some(Termination::Exit { code }) => Some(*code),
             _ => None,
@@ -150,6 +170,10 @@ impl RunResultBuilder {
             .summary
             .as_ref()
             .ok_or_else(|| "completed invocation has no summary".to_owned())?;
+        let follow_up_available = summary.truncated
+            || !summary.targets.is_empty()
+            || !summary.tests.is_empty()
+            || summary.inspect_hint.is_some();
         let mut result = RunResult {
             invocation_id: record.request.id.to_string(),
             state: record.state,
@@ -163,12 +187,15 @@ impl RunResultBuilder {
             query_result_count: summary.query_result_count,
             query_sample: summary.query_sample.clone(),
             truncated: summary.truncated,
-            inspect_hint: summary.inspect_hint,
-            available_views: AvailableViews::follow_up(),
-            more_available: summary.truncated
-                || !summary.targets.is_empty()
-                || !summary.tests.is_empty()
-                || summary.inspect_hint.is_some(),
+            inspect_hint: if retained { summary.inspect_hint } else { None },
+            available_views: if retained {
+                AvailableViews::follow_up()
+            } else {
+                AvailableViews::none()
+            },
+            more_available: retained && follow_up_available,
+            rerun_hint: (!retained && follow_up_available)
+                .then_some("rerun with --no-agent-mode for unfiltered Bazel output"),
         };
         let limit = if summary.success { 2 * 1024 } else { 8 * 1024 };
         loop {
@@ -180,7 +207,10 @@ impl RunResultBuilder {
                 return Ok(encoded);
             }
             result.truncated = true;
-            result.more_available = true;
+            result.more_available = retained;
+            if !retained {
+                result.rerun_hint = Some("rerun with --no-agent-mode for unfiltered Bazel output");
+            }
             if result.query_sample.pop().is_some() || result.diagnostics.pop().is_some() {
                 continue;
             }
@@ -189,6 +219,19 @@ impl RunResultBuilder {
             }
             return Err("bounded bazel.run response could not fit its hard byte limit".into());
         }
+    }
+
+    pub(crate) fn build_cli(&self, record: &InvocationRecord) -> Result<String, String> {
+        let encoded = self.build(ExecutionResult::ephemeral(record))?;
+        if let Some(ContentBlock::Text(text)) = encoded.result.content.first() {
+            return Ok(text.text.clone());
+        }
+        encoded
+            .result
+            .structured_content
+            .as_ref()
+            .ok_or_else(|| "encoded result has no CLI representation".to_owned())
+            .and_then(|value| serde_json::to_string(value).map_err(|error| error.to_string()))
     }
 }
 
@@ -240,10 +283,15 @@ fn shrink_utf8(value: &mut String, minimum: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use bazel_mcp_types::{InspectPayload, InspectResult, InspectView};
+    use std::path::PathBuf;
+
+    use bazel_mcp_types::{
+        BazelCommand, InspectPayload, InspectResult, InspectView, InvocationRecord,
+        InvocationRequest, InvocationState, InvocationSummary, Termination,
+    };
     use rmcp::model::ContentBlock;
 
-    use super::{ResultEncoder, shrink_utf8};
+    use super::{ResultEncoder, RunResultBuilder, shrink_utf8};
     use crate::ResultEncoding;
 
     #[test]
@@ -252,6 +300,37 @@ mod tests {
         assert!(shrink_utf8(&mut value, 16));
         assert!(value.ends_with('…'));
         assert!(value.len() < 203);
+    }
+
+    #[test]
+    fn oversized_ephemeral_results_offer_a_rerun_without_promising_inspection() {
+        let request = InvocationRequest::new(
+            PathBuf::from("/workspace"),
+            BazelCommand::Build,
+            vec!["//:target".to_owned()],
+        );
+        let mut record = InvocationRecord::queued(request);
+        record.state = InvocationState::Failed;
+        record.termination = Some(Termination::Exit { code: 1 });
+        record.summary = Some(InvocationSummary {
+            success: false,
+            headline: "failure ".repeat(4_000),
+            ..InvocationSummary::default()
+        });
+
+        let text = RunResultBuilder::new(ResultEncoder::new(ResultEncoding::Text))
+            .build_cli(&record)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["available_views"], serde_json::json!([]));
+        assert_eq!(value["more_available"], false);
+        assert_eq!(
+            value["rerun_hint"],
+            "rerun with --no-agent-mode for unfiltered Bazel output"
+        );
+        assert!(text.len() <= 8 * 1024);
     }
 
     #[test]
