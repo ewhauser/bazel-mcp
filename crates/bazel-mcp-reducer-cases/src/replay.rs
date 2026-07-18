@@ -3,17 +3,14 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result, ensure};
 use bazel_mcp_bep::{DEFAULT_MAX_FRAME_BYTES, decode_stream_partial};
 use bazel_mcp_reducer::{
-    BepAccumulator, Budget, ReductionInput, TestFailureAccumulator, finalize_diagnostics,
-    map_text_diagnostic, normalize_terminal_text, reduce_artifacts, reduce_invocation,
+    BepAccumulator, Budget, ReductionInput, finalize_diagnostics, map_text_diagnostic,
+    normalize_terminal_text, reduce_artifacts, reduce_invocation,
 };
 use bazel_mcp_types::{
     Artifact, Diagnostic, DiagnosticCategory, DiagnosticLocation, InspectHint, InvocationSummary,
     Severity, TestCase, TestStatus,
 };
-use diagnostic_reducer::{
-    JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
-    parse_go_diagnostic,
-};
+use diagnostic_reducer::{Provenance, TestLogReducer};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -253,33 +250,20 @@ pub fn replay_with_evidence(case: &LoadedCase, evidence: &EvidenceSpec) -> Resul
 fn enrich_from_test_log(path: &Path, target: &str, summary: &mut InvocationSummary) -> Result<()> {
     let contents = fs::read(path).with_context(|| format!("read test log {}", path.display()))?;
     let normalized = normalize_terminal_text(&contents);
-    let mut accumulator = TestFailureAccumulator::default();
-    let mut javascript = JavaScriptTestDiagnosticParser::default();
-    let mut java = JavaTestDiagnosticParser::default();
-    let mut python = PythonDiagnosticParser::default();
+    let mut reducer = TestLogReducer::default();
+    let provenance = Provenance::new("recorded-test-log").with_label(target);
     for line in normalized.lines() {
-        accumulator.observe_line(line);
-        if let Some(diagnostic) = parse_go_diagnostic(line) {
-            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
-        }
-        if let Some(diagnostic) = javascript.observe_line(line) {
-            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
-        }
-        if let Some(diagnostic) = java.observe_line(line) {
-            push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
-        }
-        if let Some(diagnostic) = python.observe_line(line) {
+        reducer.observe_line(line, &provenance);
+    }
+    reducer.finish_log(true);
+    let reduced = reducer.finish();
+    if reduced.failures.is_empty() {
+        for diagnostic in reduced.diagnostics {
             push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
         }
     }
-    if let Some(diagnostic) = javascript.finish() {
-        push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
-    }
-    if let Some(diagnostic) = java.finish() {
-        push_test_diagnostic(summary, target, map_text_diagnostic(diagnostic));
-    }
-    for failure in accumulator.finish() {
-        let is_go_failure = failure.message.starts_with("Go test ");
+    for failure in reduced.failures {
+        let is_go_failure = failure.framework.as_deref() == Some("go-test");
         let location = failure
             .location
             .as_ref()

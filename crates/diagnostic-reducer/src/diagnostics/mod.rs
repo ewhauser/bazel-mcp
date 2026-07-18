@@ -1,5 +1,4 @@
 mod arbitration;
-mod aspect;
 mod common;
 mod cpp;
 mod go;
@@ -8,7 +7,6 @@ mod javascript;
 mod protobuf;
 mod python;
 mod rust;
-mod starlark;
 mod typescript;
 
 use std::collections::BTreeSet;
@@ -81,26 +79,12 @@ const TEXT_DIAGNOSTIC_REDUCERS: &[TextDiagnosticReducer] = &[
         reduce: reduce_java_tests,
     },
     TextDiagnosticReducer {
-        name: "starlark",
-        reduce: reduce_starlark,
-    },
-    TextDiagnosticReducer {
         name: "python",
         reduce: arbitration::reduce_python,
     },
 ];
 
 const LINE_DIAGNOSTIC_REDUCERS: &[LineDiagnosticReducer] = &[
-    LineDiagnosticReducer {
-        name: "aspect-lint",
-        enabled: always,
-        parse: aspect::parse_diagnostic,
-    },
-    LineDiagnosticReducer {
-        name: "go-strict-dependency",
-        enabled: strict_dependencies_only,
-        parse: go::strict_dependency_diagnostic,
-    },
     LineDiagnosticReducer {
         name: "cpp",
         enabled: always,
@@ -174,16 +158,8 @@ fn reduce_java_tests(input: &str, context: &mut TextDiagnosticContext<'_>) {
     java::reduce_tests(input, context.diagnostics, &mut context.java_test_messages);
 }
 
-fn reduce_starlark(input: &str, context: &mut TextDiagnosticContext<'_>) {
-    starlark::reduce(input, context.diagnostics);
-}
-
 fn always(_: bool) -> bool {
     true
-}
-
-fn strict_dependencies_only(has_strict_dependency_block: bool) -> bool {
-    has_strict_dependency_block
 }
 
 #[cfg(feature = "test-support")]
@@ -212,11 +188,6 @@ pub(crate) fn parse_protobuf_diagnostic(input: &str) -> Option<Diagnostic> {
 }
 
 #[cfg(feature = "test-support")]
-pub(crate) fn parse_starlark_inline_diagnostic(input: &str) -> Option<Diagnostic> {
-    starlark::parse_inline_diagnostic(input)
-}
-
-#[cfg(feature = "test-support")]
 pub(crate) fn parse_typescript_diagnostic(input: &str) -> Option<Diagnostic> {
     typescript::parse_diagnostic(input)
 }
@@ -239,7 +210,6 @@ mod tests {
                 "rust-compiler",
                 "javascript-test",
                 "java-test",
-                "starlark",
                 "python",
             ]
         );
@@ -248,14 +218,7 @@ mod tests {
                 .iter()
                 .map(|reducer| reducer.name)
                 .collect::<Vec<_>>(),
-            [
-                "aspect-lint",
-                "go-strict-dependency",
-                "cpp",
-                "typescript",
-                "protobuf",
-                "go"
-            ]
+            ["cpp", "typescript", "protobuf", "go"]
         );
     }
 

@@ -1,6 +1,6 @@
 //! Deterministic, source-agnostic reduction of compiler, test, and tool text.
 //!
-//! The crate performs no I/O and has no async, Bazel protocol, MCP, storage, or
+//! The crate performs no I/O and has no async, provider protocol, storage, or
 //! runner dependency. Callers provide already acquired text and an explicit
 //! redaction policy; only normalized and redacted diagnostics are returned.
 
@@ -8,19 +8,28 @@ mod diagnostics;
 mod finalize;
 mod model;
 mod redaction;
+mod streaming;
 mod test_failures;
+mod test_log;
 mod text;
 
+pub use diagnostic_reducer_core::{
+    Emitter, GenericRanker, OutputPolicy, Parser, ParserPlan, ParserPlanError, RankKey, Ranker,
+    ReductionSession, ScopeBoundary,
+};
 pub use diagnostics::{
     JavaScriptTestDiagnosticParser, JavaTestDiagnosticParser, PythonDiagnosticParser,
     parse_go_diagnostic,
 };
 pub use model::{
-    Budget, Diagnostic, DiagnosticClass, FallbackPolicy, Location, Provenance, Reduction,
-    ReductionOptions, Severity, TextInput,
+    Budget, Diagnostic, DiagnosticClass, EndReason, EvidenceQuality, FallbackPolicy, Limits,
+    Location, LogLine, Provenance, Reduction, ReductionOptions, ReductionStats, Scope, ScopeKind,
+    SessionOptions, Severity, Stream, TestFailure, TextInput,
 };
-pub use redaction::{NoRedaction, Redactor};
+pub use redaction::{NoPathMapping, NoRedaction, PathMapper, Redactor};
+pub use streaming::{BuiltinDiagnosticParser, BuiltinParserOptions, builtin_parser_plan};
 pub use test_failures::{TestFailureAccumulator, TestFailureEvidence};
+pub use test_log::{TestLogReducer, TestLogReduction};
 pub use text::{deduplicate_lines, normalize_terminal_text};
 
 /// Reduces one or more text inputs with deterministic parser and input order.
@@ -30,15 +39,32 @@ pub fn reduce(
     options: &ReductionOptions,
     redactor: &dyn Redactor,
 ) -> Reduction {
+    reduce_with_policy(
+        inputs,
+        options,
+        OutputPolicy::new(redactor, &NoPathMapping, &GenericRanker),
+    )
+}
+
+/// Reduces batch inputs with caller-owned path mapping, redaction, and ranking.
+#[must_use]
+pub fn reduce_with_policy(
+    inputs: &[TextInput<'_>],
+    options: &ReductionOptions,
+    policy: OutputPolicy<'_>,
+) -> Reduction {
     let mut diagnostics = Vec::new();
     for input in inputs {
         let start = diagnostics.len();
         diagnostics::add_text_diagnostics(input.text, &mut diagnostics, options.fallback);
         for diagnostic in &mut diagnostics[start..] {
             diagnostic.provenance = input.provenance.cloned();
+            if diagnostic.location.is_some() && diagnostic.quality == EvidenceQuality::Structured {
+                diagnostic.quality = EvidenceQuality::Located;
+            }
         }
     }
-    finalize::finalize(diagnostics, options.budget, redactor)
+    finalize::finalize_with_policy(diagnostics, options.budget, policy)
 }
 
 #[cfg(feature = "test-support")]
@@ -73,12 +99,6 @@ pub fn __parse_protobuf_diagnostic(input: &str) -> Option<Diagnostic> {
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub fn __parse_starlark_inline_diagnostic(input: &str) -> Option<Diagnostic> {
-    diagnostics::parse_starlark_inline_diagnostic(input)
-}
-
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
 pub fn __parse_typescript_diagnostic(input: &str) -> Option<Diagnostic> {
     diagnostics::parse_typescript_diagnostic(input)
 }
@@ -88,7 +108,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reduces_compiler_and_test_logs_without_bazel_objects() {
+    fn reduces_compiler_and_test_logs_without_provider_objects() {
         let compiler = Provenance::new("compile").with_label("rust");
         let test = Provenance::new("test").with_label("node");
         let inputs = [

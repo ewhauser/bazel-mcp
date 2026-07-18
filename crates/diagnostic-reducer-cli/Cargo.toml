@@ -1,0 +1,23 @@
+[package]
+name = "diagnostic-reducer-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+license = "MIT"
+authors = ["Eric Hauser"]
+repository = "https://github.com/ewhauser/bazel-mcp"
+description = "CLI and CI presentation adapter for diagnostic-reducer"
+keywords = ["diagnostics", "logs", "ci", "sarif"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+diagnostic-reducer = { path = "../diagnostic-reducer", version = "0.1.0" }
+serde_json = "1"
+
+[[bin]]
+name = "diagnostic-reduce"
+path = "src/main.rs"

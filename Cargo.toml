@@ -26,7 +26,8 @@ bazel-mcp-reducer = { path = "crates/bazel-mcp-reducer" }
 bazel-mcp-runner = { path = "crates/bazel-mcp-runner" }
 bazel-mcp-store = { path = "crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "crates/bazel-mcp-types" }
-diagnostic-reducer = { path = "crates/diagnostic-reducer" }
+diagnostic-reducer = { path = "crates/diagnostic-reducer", version = "0.1.0" }
+diagnostic-reducer-core = { path = "crates/diagnostic-reducer-core", version = "0.1.0" }
 
 # Error handling and logging
 anyhow = "1"

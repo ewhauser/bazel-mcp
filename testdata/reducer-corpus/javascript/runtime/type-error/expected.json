@@ -32,15 +32,6 @@
       {
         "severity": "error",
         "category": "test",
-        "message": "TypeError: Cannot read properties of undefined (reading 'lines')",
-        "location": null,
-        "target": "//cases:runtime_failure",
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
-        "category": "test",
         "message": "Test failed: //cases:runtime_failure",
         "location": null,
         "target": "//cases:runtime_failure",

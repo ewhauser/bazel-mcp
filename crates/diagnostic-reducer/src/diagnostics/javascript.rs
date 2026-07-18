@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::{Diagnostic, DiagnosticClass, Location, Severity};
 
-use super::common::{bounded_text, strip_workspace_marker};
+use super::common::{bounded_text, normalize_path};
 
 #[derive(Debug, Default)]
 pub(crate) struct SwcParseOutput {
@@ -96,10 +96,11 @@ pub(crate) fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
         output.diagnostics.push(Diagnostic {
             severity,
             class: DiagnosticClass::Compiler,
-            code: None,
+            code: Some("swc.parser".to_owned()),
             provenance: None,
             message,
             location: Some(location),
+            quality: crate::EvidenceQuality::Located,
             repetition_count: 1,
         });
     }
@@ -312,6 +313,7 @@ impl JavaScriptTestDiagnosticParser {
                 provenance: None,
                 message: message.to_owned(),
                 location: leading_location,
+                quality: crate::EvidenceQuality::Structured,
                 repetition_count: 1,
             });
             self.frames_seen = 0;
@@ -423,17 +425,6 @@ pub(super) fn compact_path(path: &str) -> String {
         .trim_matches('"')
         .strip_prefix("file://")
         .unwrap_or(path)
-        .replace('\\', "/");
-    let path = strip_workspace_marker(path);
-    for marker in [".runfiles/_main/", ".runfiles/__main__/"] {
-        if let Some((_, relative)) = path.rsplit_once(marker) {
-            return relative.to_owned();
-        }
-    }
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
-        && let Some((_, relative)) = after_execroot.split_once('/')
-    {
-        return relative.to_owned();
-    }
-    path.strip_prefix("./").unwrap_or(&path).to_owned()
+        .to_owned();
+    normalize_path(&path)
 }

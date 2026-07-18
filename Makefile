@@ -2,6 +2,8 @@
 	setup-oss-corpus test-token-integration run check bench bench-save \
 	bench-compare bench-storage bench-storage-compare bench-bes-transport bench-bes-live bench-token bench-token-live bench-agentic \
 	bench-reducers \
+	bench-generic-reducers \
+	check-diagnostic-reducer-boundary \
 	bench-agentic-smoke bench-agentic-live bench-agentic-presentation \
 	bench-agentic-control-smoke bench-agentic-toon publish-token-benchmark \
 	generate-bep-goldens fuzz-setup fuzz-list fuzz-smoke \
@@ -96,10 +98,13 @@ test-token-integration:
 run:
 	$(BAZEL) run //:bazel-mcp -- $(ARGS)
 
-check:
+check: check-diagnostic-reducer-boundary
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	$(NIX_DEVELOP) cargo shear
+
+check-diagnostic-reducer-boundary:
+	python3 scripts/check-diagnostic-reducer-boundary.py
 
 bench:
 	cargo bench -p bazel-mcp-benchmark
@@ -112,6 +117,9 @@ bench-compare:
 
 bench-reducers:
 	cargo bench -p bazel-mcp-benchmark --bench custom_reducers
+
+bench-generic-reducers:
+	cargo bench -p diagnostic-reducer --bench streaming
 
 bench-storage:
 	cargo run --release -p bazel-mcp-benchmark --bin storage-benchmark -- \

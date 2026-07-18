@@ -26,19 +26,6 @@
       },
       {
         "severity": "error",
-        "category": "compilation",
-        "message": "Error: file ':defs.bzl' does not contain symbol 'missing_rule'",
-        "location": {
-          "path": "cases/loading/BUILD.bazel",
-          "line": 1,
-          "column": null
-        },
-        "target": null,
-        "action": null,
-        "repetition_count": 1
-      },
-      {
-        "severity": "error",
         "category": "loading",
         "message": "no such target '//cases/loading:failure': target 'failure' not declared in package 'cases/loading' defined by <WORKSPACE>______________________________________________________/cases/loading/BUILD.bazel",
         "location": null,

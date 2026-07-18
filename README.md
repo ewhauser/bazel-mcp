@@ -559,6 +559,29 @@ format-specific run. See
 the [agentic benchmark methodology](docs/benchmarks.md#agentic-coding-benchmark)
 to reproduce it.
 
+## Reusable diagnostic reducer
+
+The provider-neutral log parser is developed as three publishable crates that
+are designed to move to their own repository:
+
+- `diagnostic-reducer-core` provides the bounded streaming state machine,
+  parser lifecycle, provenance, redaction, ranking, and output budgets.
+- `diagnostic-reducer` provides the fixed compiler and test-log parser pack and
+  a synchronous batch compatibility API.
+- `diagnostic-reducer-cli` provides the `diagnostic-reduce` stdin/file CLI with
+  human, JSON, JSONL, SARIF, and GitHub workflow output.
+
+The generic crates contain no Bazel, MCP, storage, runner, or async dependency.
+Bazel-specific path and message semantics remain in `bazel-mcp-reducer`. See
+the [reducer architecture](docs/diagnostic-reducer.md) and
+[repository extraction plan](docs/diagnostic-reducer-extraction.md).
+
+```sh
+cargo run -p diagnostic-reducer-cli -- --format human build.log
+make check-diagnostic-reducer-boundary
+make bench-generic-reducers
+```
+
 ## Contributing
 
 Contributions are welcome. The usual local checks are:
@@ -579,6 +602,9 @@ Use `make bench-reducers` to compare the same diagnostic reducer implemented in
 native Rust and Starlark. See the
 [Starlark reducer performance report](docs/starlark-reducer-performance.md) for
 the checked-in measurements and interpretation.
+
+Use `make bench-generic-reducers` to compare batch reduction with 64 KiB and
+1 KiB streaming chunks across large no-match and mixed-tail logs.
 
 Architecture and protocol decisions are recorded under [`specs/`](specs/).
 
