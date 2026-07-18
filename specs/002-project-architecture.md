@@ -452,10 +452,14 @@ Responsibilities:
   cross-process advisory lock for every invocation, and enforce the global
   limit.
 - Generate UUIDv7 invocation IDs.
-- Assemble validated Bazel argv without a shell.
-- Spawn the wrapper/Bazel client in a process group.
+- Select the direct Bazel driver or the optional command-specific Aspect CLI
+  driver after policy validation.
+- Assemble validated Bazel or Aspect argv without a shell.
+- Spawn the selected client in a process group.
 - Capture stdout, stderr, and BEP without returning them to the caller.
-- Start and register the optional loopback BES transport before spawning Bazel.
+- Start and register the optional loopback BES transport before spawning Bazel,
+  and whenever Aspect routing is enabled so Aspect may forward its owned BEP
+  stream to private capture metadata.
 - Enforce timeout and graceful cancellation escalation.
 - Await async store operations directly; run CPU-heavy BEP/reducer work and
   blocking filesystem work via bounded `spawn_blocking` tasks.
@@ -472,6 +476,7 @@ crates/bazel-mcp-runner/
 ├── src/
 │   ├── cancel.rs
 │   ├── capture.rs
+│   ├── driver.rs
 │   ├── inspect.rs
 │   ├── lib.rs
 │   ├── process.rs
@@ -865,6 +870,7 @@ Configuration covers:
 - global concurrency and timeouts
 - response encoding and byte budgets
 - BEP transport (`tail` by default, or explicit loopback `bes`)
+- optional Aspect CLI executable, routed commands, and mutation opt-in
 - redaction rules
 - explicit Starlark reducer files and resource limits
 - logging destination and level

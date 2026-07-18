@@ -32,6 +32,14 @@ maximum_pending_invocations = 256
 # Applied only when output_user_root isolates the server from the user's daemon.
 isolated_bazel_server_idle_seconds = 60
 
+# Aspect CLI routing is opt-in. A routed command must also appear in the
+# top-level allowed_commands list. When executable is omitted, bazel-mcp finds
+# `aspect` on PATH. For example, add "lint" to allowed_commands and commands.
+[aspect]
+commands = []
+# executable = "/opt/homebrew/bin/aspect"
+allow_workspace_mutation = false
+
 # Custom reducers are opt-in and are never loaded from a Bazel workspace
 # automatically. Relative paths are resolved from this configuration file.
 [starlark]

@@ -3,6 +3,7 @@
 mod artifacts;
 mod cancel;
 mod capture;
+mod driver;
 mod evidence;
 mod execution;
 mod inspection;
@@ -14,6 +15,7 @@ mod version;
 
 pub use bazel_mcp_reducer::{RawStarlarkConfig, StarlarkLimits, StarlarkReducerConfig};
 pub use bazel_mcp_types::{InspectResult, InspectView};
+pub use driver::{AspectConfig, RawAspectConfig};
 pub use inspection::InspectRequest;
 #[doc(hidden)]
 pub use service::RunnerTestSupport;

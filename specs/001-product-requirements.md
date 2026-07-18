@@ -183,7 +183,8 @@ separate `fetch_*`, `find_*`, or per-command tools for equivalent data.
 
 #### Purpose
 
-Execute one Bazel invocation and return its bounded result.
+Execute one Bazel invocation, or one explicitly configured Aspect CLI command,
+and return its bounded result.
 
 #### Input
 
@@ -206,7 +207,9 @@ Execute one Bazel invocation and return its bounded result.
 | `timeout_seconds` | No | Integer | Uses the server default when omitted; bounded by server policy. |
 
 The server MUST pass arguments directly to a child process. It MUST NOT join or
-evaluate them as shell text.
+evaluate them as shell text. Commands listed in the operator's Aspect route
+configuration invoke Aspect CLI; all other allowed commands invoke Bazel
+directly.
 
 #### Execution behavior
 
@@ -390,6 +393,13 @@ For each workspace, the server resolves the executable in this order:
 
 The caller cannot supply an arbitrary executable path through `bazel.run`.
 Resolution is recorded in invocation metadata.
+
+Aspect CLI routing is optional and command-specific. An explicit Aspect
+executable is validated when configured; otherwise `aspect` is resolved from
+the server process's `PATH`. The underlying Bazel executable still follows the
+resolution order above and is supplied to Aspect without changing the request
+schema. Routed build-like commands forward BEP to bazel-mcp's loopback BES so
+the Aspect-owned stream can retain its own invocation identity.
 
 ## 10. Command policy and adapters
 

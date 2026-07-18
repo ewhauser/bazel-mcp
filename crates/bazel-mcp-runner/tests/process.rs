@@ -188,6 +188,100 @@ async fn configured_service(
     .unwrap()
 }
 
+#[tokio::test]
+async fn routes_configured_lint_through_aspect_and_keeps_query_on_bazel() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let aspect = root.path().join("fake-aspect");
+    let aspect_log = root.path().join("aspect-args.log");
+    let bazel_log = root.path().join("bazel-args.log");
+    let aspect_script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$BAZEL_REAL\" \"$@\" > '{}'\necho '🚨 src/app.ts:8:3 · eslint · no-console — unexpected console statement' >&2\nexit 1\n",
+        aspect_log.display()
+    );
+    tokio::fs::write(&aspect, aspect_script).await.unwrap();
+    tokio::fs::set_permissions(&aspect, std::fs::Permissions::from_mode(0o700))
+        .await
+        .unwrap();
+    let bazel_script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nprintf '%s\\n' \"$@\" > '{}'\necho '//pkg:target'\n",
+        bazel_log.display()
+    );
+    let configured_bazel = root.path().join("configured-fake-bazel");
+    let output_user_root = root.path().join("output-user-root");
+    let service = configured_service(&root, &workspace, &bazel_script, |config| {
+        config.policy.allowed_commands.insert("lint".to_owned());
+        config.aspect.executable = Some(aspect.clone());
+        config.aspect.commands.insert("lint".to_owned());
+        config.output_user_root = Some(output_user_root.clone());
+    })
+    .await;
+
+    let mut lint_request = InvocationRequest::new(
+        workspace.clone(),
+        BazelCommand::Custom("lint".to_owned()),
+        vec!["//...".to_owned(), "--config=ci".to_owned()],
+    );
+    lint_request.startup_arguments = vec!["--host_jvm_args=-Xmx1g".to_owned()];
+    let lint_id = lint_request.id;
+    let lint = service.run(lint_request).await.unwrap();
+
+    assert_eq!(lint.state, InvocationState::Failed);
+    let summary = lint.summary.unwrap();
+    assert_eq!(summary.diagnostics.len(), 1);
+    assert_eq!(
+        summary.diagnostics[0].message,
+        "eslint [no-console]: unexpected console statement"
+    );
+    assert!(summary.headline.starts_with("Aspect lint failed:"));
+    let aspect_args = tokio::fs::read_to_string(&aspect_log).await.unwrap();
+    let aspect_args = aspect_args.lines().collect::<Vec<_>>();
+    assert_eq!(aspect_args[0], configured_bazel.to_string_lossy());
+    assert!(aspect_args.contains(&format!("--task:id={lint_id}").as_str()));
+    assert!(aspect_args.contains(&"--task:timing-summary=none"));
+    assert!(aspect_args.contains(&"lint"));
+    assert!(
+        aspect_args.contains(
+            &format!(
+                "--bazel-startup-flag=--output_user_root={}",
+                output_user_root.display()
+            )
+            .as_str()
+        )
+    );
+    assert!(aspect_args.contains(&"--bazel-startup-flag=--host_jvm_args=-Xmx1g"));
+    assert!(aspect_args.contains(&format!("--bazel-flag=--invocation_id={lint_id}").as_str()));
+    assert!(
+        aspect_args
+            .iter()
+            .any(|argument| argument.starts_with("--bes-backend=grpc://"))
+    );
+    assert!(
+        aspect_args.contains(&format!("--bes-header=x-bazel-mcp-invocation-id={lint_id}").as_str())
+    );
+    assert!(aspect_args.contains(&"//..."));
+    assert!(aspect_args.contains(&"--config=ci"));
+    assert!(
+        !aspect_args
+            .iter()
+            .any(|argument| argument.starts_with("--build_event_binary_file"))
+    );
+
+    let query = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Query,
+            vec!["//...".to_owned()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(query.state, InvocationState::Succeeded);
+    let bazel_args = tokio::fs::read_to_string(bazel_log).await.unwrap();
+    assert!(bazel_args.lines().any(|argument| argument == "query"));
+    assert!(!bazel_args.lines().any(|argument| argument == "lint"));
+}
+
 async fn shared_executable_service(
     root: &TempDir,
     workspace: &Path,

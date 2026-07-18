@@ -61,6 +61,71 @@ pub fn validate_arguments(arguments: &[String]) -> Result<(), PolicyError> {
     Ok(())
 }
 
+/// Validate the wrapper-specific portion of an Aspect CLI task invocation.
+///
+/// Aspect deliberately exposes Bazel passthrough flags, so server-owned Bazel
+/// flags must also be protected when nested under `--bazel-flag`. The local BES
+/// backend and task identity are injected by the runner and cannot be supplied
+/// by the caller.
+pub fn validate_aspect_arguments(
+    command: &BazelCommand,
+    arguments: &[String],
+    allow_workspace_mutation: bool,
+) -> Result<(), PolicyError> {
+    for argument in arguments {
+        if ["--task:id", "--task:timing-summary"]
+            .iter()
+            .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
+        {
+            return Err(PolicyError::AspectReservedArgument(argument.to_owned()));
+        }
+        if argument == "--bazel-startup-flag" || argument.starts_with("--bazel-startup-flag=") {
+            return Err(PolicyError::AspectReservedArgument(
+                "--bazel-startup-flag (use startup_arguments instead)".to_owned(),
+            ));
+        }
+        if argument == "--bazel-flag" {
+            return Err(PolicyError::AspectReservedArgument(
+                "--bazel-flag requires the --bazel-flag=... form".to_owned(),
+            ));
+        }
+        if let Some(nested) = argument.strip_prefix("--bazel-flag=") {
+            if let Some(flag) = RESERVED_FLAGS
+                .iter()
+                .find(|flag| nested == **flag || nested.starts_with(&format!("{flag}=")))
+            {
+                return Err(PolicyError::ReservedFlag((*flag).to_owned()));
+            }
+            if ["--bes_backend", "--bes_upload_mode"]
+                .iter()
+                .any(|flag| nested == *flag || nested.starts_with(&format!("{flag}=")))
+            {
+                return Err(PolicyError::AspectReservedArgument(nested.to_owned()));
+            }
+        }
+        if argument == "--bes-header" {
+            return Err(PolicyError::AspectReservedArgument(
+                "--bes-header requires the --bes-header=... form".to_owned(),
+            ));
+        }
+        if let Some(header) = argument.strip_prefix("--bes-header=") {
+            let (name, _) = header.split_once('=').unwrap_or((header, ""));
+            if name.eq_ignore_ascii_case("x-bazel-mcp-invocation-id") {
+                return Err(PolicyError::AspectReservedArgument(
+                    "--bes-header=x-bazel-mcp-invocation-id=...".to_owned(),
+                ));
+            }
+        }
+        if command.as_str() == "lint"
+            && !allow_workspace_mutation
+            && (argument == "--fix" || argument.starts_with("--fix="))
+        {
+            return Err(PolicyError::AspectWorkspaceMutationDenied);
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_query_arguments(
     command: &BazelCommand,
     arguments: &[String],
@@ -240,5 +305,44 @@ mod tests {
         assert!(
             validate_query_arguments(&BazelCommand::Build, &["--output=proto".to_owned()]).is_ok()
         );
+    }
+
+    #[test]
+    fn protects_aspect_identity_capture_and_lint_mutation() {
+        let lint = BazelCommand::Custom("lint".to_owned());
+        assert!(validate_aspect_arguments(&lint, &["//...".into()], false).is_ok());
+        assert!(matches!(
+            validate_aspect_arguments(&lint, &["--fix".into()], false),
+            Err(PolicyError::AspectWorkspaceMutationDenied)
+        ));
+        assert!(validate_aspect_arguments(&lint, &["--fix".into()], true).is_ok());
+        assert!(matches!(
+            validate_aspect_arguments(
+                &lint,
+                &["--bazel-flag=--invocation_id=caller".into()],
+                false,
+            ),
+            Err(PolicyError::ReservedFlag(_))
+        ));
+        assert!(matches!(
+            validate_aspect_arguments(&lint, &["--task:id=caller".into()], false),
+            Err(PolicyError::AspectReservedArgument(_))
+        ));
+        assert!(matches!(
+            validate_aspect_arguments(
+                &lint,
+                &["--bazel-startup-flag=--output_base=/tmp/other".into()],
+                false,
+            ),
+            Err(PolicyError::AspectReservedArgument(_))
+        ));
+        assert!(matches!(
+            validate_aspect_arguments(
+                &lint,
+                &["--bes-header=x-bazel-mcp-invocation-id=other".into()],
+                false,
+            ),
+            Err(PolicyError::AspectReservedArgument(_))
+        ));
     }
 }

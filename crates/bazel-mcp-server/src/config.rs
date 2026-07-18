@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use bazel_mcp_runner::BepTransport;
 
 pub use bazel_mcp_policy::RawPolicyConfig;
-pub use bazel_mcp_runner::{RawRunnerConfig, RawStarlarkConfig};
+pub use bazel_mcp_runner::{RawAspectConfig, RawRunnerConfig, RawStarlarkConfig};
 pub use bazel_mcp_store::{RawRetentionConfig, RetentionConfig};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -237,6 +237,9 @@ impl ValidatedServerConfig {
         }
         if let Some(executable) = &raw.policy.bazel_executable {
             raw.policy.bazel_executable = Some(canonicalize_with_missing_tail(executable)?);
+        }
+        if let Some(executable) = &raw.runner.aspect.executable {
+            raw.runner.aspect.executable = Some(canonicalize_with_missing_tail(executable)?);
         }
         for root in &raw.policy.allowed_roots {
             if raw.cache_root.starts_with(root) {
@@ -664,6 +667,44 @@ mod tests {
     }
 
     #[test]
+    fn loads_aspect_routes_and_canonicalizes_an_explicit_executable() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let executable = root.path().join("bin/aspect");
+        let path = write_config(
+            root.path(),
+            &workspace,
+            &format!(
+                "allowed_commands = [\"build\", \"lint\"]\n[aspect]\nexecutable = {executable:?}\ncommands = [\"lint\"]\nallow_workspace_mutation = true\n"
+            ),
+        );
+
+        let config = ValidatedServerConfig::load(&cli(path)).unwrap();
+
+        assert_eq!(
+            config.runner.aspect.executable,
+            Some(canonicalize_with_missing_tail(&executable).unwrap())
+        );
+        assert_eq!(config.runner.aspect.commands, ["lint".to_owned()].into());
+        assert!(config.runner.aspect.allow_workspace_mutation);
+    }
+
+    #[test]
+    fn rejects_aspect_routes_not_allowed_by_command_policy() {
+        let root = tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let path = write_config(root.path(), &workspace, "[aspect]\ncommands = [\"lint\"]\n");
+
+        let error = ValidatedServerConfig::load(&cli(path)).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("every Aspect route must also be allowed by command policy")
+        );
+    }
+
+    #[test]
     fn validates_task_lifecycle_settings_for_every_policy() {
         let root = tempdir().unwrap();
         let workspace = root.path().join("workspace");
@@ -699,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_top_level_and_starlark_settings() {
+    fn rejects_unknown_top_level_starlark_and_aspect_settings() {
         let root = tempdir().unwrap();
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
@@ -715,6 +756,10 @@ mod tests {
         );
         let error = ValidatedServerConfig::load(&cli(starlark)).unwrap_err();
         assert!(format!("{error:#}").contains("unknown field `max_tick_count`"));
+
+        let aspect = write_config(root.path(), &workspace, "[aspect]\ncommandz = [\"lint\"]\n");
+        let error = ValidatedServerConfig::load(&cli(aspect)).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `commandz`"));
     }
 
     #[test]
