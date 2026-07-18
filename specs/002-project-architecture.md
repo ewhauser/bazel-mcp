@@ -514,13 +514,18 @@ thin.
 
 Responsibilities:
 
-- Parse CLI options and locate server configuration.
+- Select stdio MCP or ephemeral agent-mode CLI startup, parse the applicable
+  options or Bazel argv, and locate server configuration.
 - Initialize tracing without writing application logs to MCP stdout.
 - Construct `InvocationService` and run startup recovery.
 - Serve MCP over stdio.
 - Define and route exactly `bazel.run`, `bazel.inspect`, and `bazel.cancel`.
 - Map MCP progress and cancellation to `InvocationService`.
-- Encode tool results according to the configured result encoding.
+- Encode MCP and ephemeral CLI results from one bounded logical result according
+  to the configured result encoding.
+- Give agent-mode invocations private temporary store roots and remove them
+  before normal CLI exit; only stdio MCP mode runs retention and exposes
+  inspection.
 - Report tool-execution errors separately from failed Bazel invocations.
 
 Suggested layout:

@@ -11,7 +11,9 @@ mod workspace;
 pub use command::validate_command;
 pub use config::{PolicyConfig, RawPolicyConfig};
 pub use environment::filtered_environment;
-pub use executable::{resolve_aspect_executable, resolve_bazel_executable};
+pub use executable::{
+    resolve_aspect_executable, resolve_bazel_executable, resolve_bazel_executable_excluding,
+};
 pub use flags::{
     INTERNAL_BEP_FLAG, effective_output_base, validate_arguments, validate_aspect_arguments,
     validate_query_arguments,
@@ -59,6 +61,8 @@ pub enum PolicyError {
     AspectReservedArgument(String),
     #[error("Aspect lint --fix is disabled; set aspect.allow_workspace_mutation = true to opt in")]
     AspectWorkspaceMutationDenied,
+    #[error("resolved Bazel executable would recursively launch the agent-mode shim: {0}")]
+    ExecutableRecursion(PathBuf),
     #[error("invalid redaction expression {pattern:?}: {source}")]
     InvalidRedaction {
         pattern: String,

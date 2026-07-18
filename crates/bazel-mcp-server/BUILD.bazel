@@ -44,6 +44,22 @@ rust_test(
 )
 
 rust_test(
+    name = "agent_cli_test",
+    srcs = ["tests/agent_cli.rs"],
+    data = [":bazel-mcp"],
+    size = "small",
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+        normal_dev = True,
+    ),
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
+
+rust_test(
     name = "shutdown_test",
     srcs = ["tests/shutdown.rs"],
     data = [":bazel-mcp"],

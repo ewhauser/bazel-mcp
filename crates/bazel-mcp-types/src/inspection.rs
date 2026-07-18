@@ -73,6 +73,11 @@ pub struct AvailableViews(Vec<InspectView>);
 
 impl AvailableViews {
     #[must_use]
+    pub const fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    #[must_use]
     pub fn follow_up() -> Self {
         Self(InspectView::FOLLOW_UP.to_vec())
     }

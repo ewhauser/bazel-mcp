@@ -273,6 +273,16 @@ impl ValidatedServerConfig {
         &self.cache_root
     }
 
+    pub(crate) fn with_agent_runtime(
+        mut self,
+        cache_root: PathBuf,
+        bazel_executable: PathBuf,
+    ) -> Self {
+        self.cache_root = cache_root;
+        self.runner.policy.bazel_executable = Some(bazel_executable);
+        self
+    }
+
     #[must_use]
     pub fn shutdown_wait(&self) -> Duration {
         self.runner

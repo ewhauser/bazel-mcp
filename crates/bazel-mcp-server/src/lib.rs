@@ -1,11 +1,13 @@
 //! Thin stdio MCP boundary for the Bazel invocation service.
 
+mod agent;
 mod config;
 mod handler;
 mod protocol;
 mod result;
 mod tasks;
 
+pub use agent::{LaunchMode, agent_log_filter, detect_launch, run_agent};
 pub use bazel_mcp_runner::BepTransport;
 pub use config::{
     Cli, McpConfig, McpExecutionPolicy, RawAspectConfig, RawMcpConfig, RawPolicyConfig,
