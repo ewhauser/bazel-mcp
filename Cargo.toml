@@ -14,6 +14,9 @@ description = "A token-efficient MCP server for Bazel invocations"
 keywords = ["bazel", "mcp", "llm", "build"]
 categories = ["command-line-utilities", "development-tools"]
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+
 [workspace.dependencies]
 # Internal crates
 bazel-mcp-bep = { path = "crates/bazel-mcp-bep" }

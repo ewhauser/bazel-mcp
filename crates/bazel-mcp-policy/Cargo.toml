@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 bazel-mcp-types.workspace = true
 regex.workspace = true
@@ -17,4 +20,3 @@ which.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-

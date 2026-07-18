@@ -10,6 +10,9 @@ homepage.workspace = true
 description.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [package.metadata.dist]
 dist = true
 

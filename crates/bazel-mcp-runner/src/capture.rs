@@ -768,6 +768,10 @@ fn is_process_alive(pid: u32) -> bool {
     }
     // SAFETY: signal 0 performs a POSIX liveness/permission check and does not
     // deliver a signal to the target process.
+    #[expect(
+        unsafe_code,
+        reason = "libc::kill is the POSIX process-liveness primitive"
+    )]
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }

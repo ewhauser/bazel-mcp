@@ -9,6 +9,9 @@ repository.workspace = true
 description.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow.workspace = true
 bazel-mcp-bep.workspace = true
