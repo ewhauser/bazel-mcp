@@ -12,7 +12,11 @@ use diagnostic_reducer::{
 use diagnostic_reducer_cli::{OutputFormat, has_severity, render};
 
 #[derive(ClapParser, Debug)]
-#[command(name = "diagnostic-reduce", version, about)]
+#[command(
+    name = "diagnostic-reduce",
+    version,
+    about = "Reduce compiler and test logs into bounded structured diagnostics"
+)]
 struct Args {
     /// Input files. Omit or pass '-' to read stdin.
     #[arg(value_name = "INPUT")]

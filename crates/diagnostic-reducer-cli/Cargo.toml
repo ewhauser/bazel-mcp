@@ -10,6 +10,11 @@ description = "CLI and CI presentation adapter for diagnostic-reducer"
 keywords = ["diagnostics", "logs", "ci", "sarif"]
 categories = ["command-line-utilities", "development-tools"]
 
+[package.metadata.dist]
+# This crate is publishable, but bazel-mcp's cargo-dist release only ships the
+# server. The CLI will own its release artifacts after repository extraction.
+dist = false
+
 [lints]
 workspace = true
 
