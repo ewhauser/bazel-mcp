@@ -143,6 +143,7 @@ impl InvocationService {
                         }),
                         query_result_count: summary.query_result_count,
                         query_sample: summary.query_sample.clone(),
+                        run: record.run.clone(),
                         elapsed_ms: summary.elapsed_ms,
                         truncated: summary.truncated,
                         inspect_hint: summary.inspect_hint,

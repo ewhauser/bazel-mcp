@@ -650,6 +650,7 @@ async fn create_terminal_invocation(
                     headline: "benchmark invocation succeeded".to_owned(),
                     ..InvocationSummary::default()
                 },
+                run: None,
                 metrics: Default::default(),
                 canonical_arguments: Some(vec![
                     "build".into(),
@@ -807,6 +808,7 @@ async fn benchmark_terminal(query_count_and_finalize_ms: f64) -> anyhow::Result<
                     headline: "representative build succeeded".to_owned(),
                     ..InvocationSummary::default()
                 },
+                run: None,
                 metrics: Default::default(),
                 canonical_arguments: Some(vec!["build".into(), "//benchmark:build".into()]),
                 artifacts: Vec::new(),
@@ -843,6 +845,7 @@ async fn benchmark_terminal(query_count_and_finalize_ms: f64) -> anyhow::Result<
                     tests,
                     ..InvocationSummary::default()
                 },
+                run: None,
                 metrics: Default::default(),
                 canonical_arguments: Some(vec!["test".into(), "//benchmark:all".into()]),
                 artifacts: Vec::new(),

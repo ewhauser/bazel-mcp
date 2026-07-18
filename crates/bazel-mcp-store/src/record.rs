@@ -2,8 +2,8 @@
 
 use bazel_mcp_types::{
     CoverageFile, CoverageSummary, Diagnostic, InspectHint, InvocationMetrics, InvocationRecord,
-    InvocationRequest, InvocationState, InvocationSummary, QueryRow, TargetCounts, TargetResult,
-    Termination, TestCounts, TestResult,
+    InvocationRequest, InvocationState, InvocationSummary, QueryRow, RunSummary, TargetCounts,
+    TargetResult, Termination, TestCounts, TestResult,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -20,6 +20,7 @@ pub struct InvocationHeader {
     pub finished_at_ms: Option<i64>,
     pub termination: Option<Termination>,
     pub summary: Option<InvocationSummaryHeader>,
+    pub run: Option<RunSummary>,
     pub metrics: InvocationMetrics,
     pub canonical_arguments: Option<Vec<String>>,
     pub cancellation_reason: Option<String>,
@@ -41,6 +42,7 @@ impl From<InvocationRecord> for InvocationHeader {
             finished_at_ms: record.finished_at_ms,
             termination: record.termination,
             summary: record.summary.map(InvocationSummaryHeader::from),
+            run: record.run,
             metrics: record.metrics,
             canonical_arguments: record.canonical_arguments,
             cancellation_reason: record.cancellation_reason,
@@ -58,6 +60,7 @@ impl InvocationHeader {
             finished_at_ms: self.finished_at_ms,
             termination: self.termination,
             summary: self.summary.map(InvocationSummaryHeader::into_summary),
+            run: self.run,
             metrics: self.metrics,
             canonical_arguments: self.canonical_arguments,
             cancellation_reason: self.cancellation_reason,

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{BazelCommand, InvocationSummary};
+use crate::{BazelCommand, InvocationSummary, RunSummary};
 
 /// Stable, opaque identity for one Bazel invocation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -58,6 +58,14 @@ pub struct InvocationRequest {
     pub command: BazelCommand,
     #[serde(default)]
     pub arguments: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Arguments passed to the executed program after Bazel's `--` delimiter.
+    ///
+    /// These values are always treated as sensitive and must be replaced before
+    /// an invocation record is persisted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub program_arguments: Vec<String>,
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
@@ -73,6 +81,8 @@ impl InvocationRequest {
             startup_arguments: Vec::new(),
             command,
             arguments,
+            target: None,
+            program_arguments: Vec::new(),
             timeout_ms: None,
             environment: BTreeMap::new(),
             requested_at_ms: unix_timestamp_ms(),
@@ -158,6 +168,7 @@ pub enum Termination {
     Exit { code: i32 },
     Signal { signal: i32 },
     Timeout,
+    OutputLimit { maximum_bytes: u64 },
     Cancelled,
     SpawnFailure { message: String },
     Interrupted,
@@ -187,6 +198,8 @@ pub struct InvocationRecord {
     pub finished_at_ms: Option<i64>,
     pub termination: Option<Termination>,
     pub summary: Option<InvocationSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunSummary>,
     pub metrics: InvocationMetrics,
     #[serde(default)]
     pub canonical_arguments: Option<Vec<String>>,
@@ -204,6 +217,7 @@ impl InvocationRecord {
             finished_at_ms: None,
             termination: None,
             summary: None,
+            run: None,
             metrics: InvocationMetrics::default(),
             canonical_arguments: None,
             cancellation_reason: None,

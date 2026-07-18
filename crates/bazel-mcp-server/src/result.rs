@@ -2,7 +2,7 @@
 
 use bazel_mcp_types::{
     AvailableViews, Diagnostic, InspectHint, InspectPayload, InspectResult, InvocationRecord,
-    InvocationState, QueryRow, TargetCounts, Termination, TestCounts,
+    InvocationState, QueryRow, RunSummary, TargetCounts, Termination, TestCounts,
 };
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Serialize;
@@ -66,6 +66,8 @@ struct RunResult {
     query_result_count: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     query_sample: Vec<QueryRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run: Option<RunSummary>,
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     inspect_hint: Option<InspectHint>,
@@ -186,6 +188,7 @@ impl RunResultBuilder {
             diagnostics: summary.diagnostics.clone(),
             query_result_count: summary.query_result_count,
             query_sample: summary.query_sample.clone(),
+            run: record.run.clone(),
             truncated: summary.truncated,
             inspect_hint: if retained { summary.inspect_hint } else { None },
             available_views: if retained {
@@ -211,7 +214,13 @@ impl RunResultBuilder {
             if !retained {
                 result.rerun_hint = Some("rerun with --no-agent-mode for unfiltered Bazel output");
             }
-            if result.query_sample.pop().is_some() || result.diagnostics.pop().is_some() {
+            if result
+                .run
+                .as_mut()
+                .is_some_and(|run| run.output_excerpt.pop().is_some())
+                || result.query_sample.pop().is_some()
+                || result.diagnostics.pop().is_some()
+            {
                 continue;
             }
             if shrink_utf8(&mut result.headline, 96) || shrink_utf8(&mut result.command, 32) {
@@ -287,11 +296,11 @@ mod tests {
 
     use bazel_mcp_types::{
         BazelCommand, InspectPayload, InspectResult, InspectView, InvocationRecord,
-        InvocationRequest, InvocationState, InvocationSummary, Termination,
+        InvocationRequest, InvocationState, InvocationSummary, RunOutcome, RunSummary, Termination,
     };
     use rmcp::model::ContentBlock;
 
-    use super::{ResultEncoder, RunResultBuilder, shrink_utf8};
+    use super::{ExecutionResult, ResultEncoder, RunResultBuilder, shrink_utf8};
     use crate::ResultEncoding;
 
     #[test]
@@ -331,6 +340,36 @@ mod tests {
             "rerun with --no-agent-mode for unfiltered Bazel output"
         );
         assert!(text.len() <= 8 * 1024);
+    }
+
+    #[test]
+    fn run_result_exposes_typed_program_outcome() {
+        let mut record = InvocationRecord::queued(InvocationRequest::new(
+            PathBuf::from("/workspace/example"),
+            BazelCommand::Run,
+            vec!["--config=dev".to_owned()],
+        ));
+        record.state = InvocationState::Failed;
+        record.termination = Some(Termination::Exit { code: 7 });
+        record.summary = Some(InvocationSummary {
+            headline: "//cmd:example exited with code 7".to_owned(),
+            ..Default::default()
+        });
+        record.run = Some(RunSummary {
+            target: "//cmd:example".to_owned(),
+            outcome: RunOutcome::ProgramFailed,
+            program_exit_code: Some(7),
+            output_excerpt: vec!["program output".to_owned()],
+        });
+
+        let encoded = RunResultBuilder::new(ResultEncoder::new(ResultEncoding::Structured))
+            .build(ExecutionResult::new(&record, false))
+            .unwrap();
+        let value = encoded.result.structured_content.unwrap();
+
+        assert_eq!(value["run"]["outcome"], "program_failed");
+        assert_eq!(value["run"]["program_exit_code"], 7);
+        assert_eq!(value["run"]["output_excerpt"][0], "program output");
     }
 
     #[test]

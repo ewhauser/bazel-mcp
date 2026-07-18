@@ -146,11 +146,32 @@ The server exposes three tools:
 | `bazel.cancel` | Cancel a queued or running invocation. |
 
 `bazel.run` supports `build`, `test`, `coverage`, `query`, `cquery`, `aquery`,
-and selected informational commands. Operators may also route explicitly
-allowed commands such as `lint` through Aspect CLI. Successful results are
-limited to 2 KiB and unsuccessful results to 8 KiB. Follow-up `bazel.inspect`
-calls are also bounded and paginated, so an agent only retrieves the evidence
-it needs.
+selected informational commands, and an opt-in form of the Bazel `run`
+command. Operators may also route explicitly allowed commands such as `lint`
+through Aspect CLI. Successful results are limited to 2 KiB and unsuccessful
+results to 8 KiB. Follow-up `bazel.inspect` calls are also bounded and
+paginated, so an agent only retrieves the evidence it needs.
+
+The Bazel `run` command is denied by default. Once enabled by server policy, it
+accepts one explicit `target` and a separate sensitive `program_args` list:
+
+```json
+{
+  "workspace": "/src/project",
+  "command": "run",
+  "args": ["--config=dev"],
+  "target": "//cmd/example",
+  "program_args": ["--format=json", "input.txt"],
+  "timeout_seconds": 300
+}
+```
+
+The server owns the `--` boundary, omits run residue from BEP projections,
+stores program-argument placeholders instead of values, and connects stdin to
+null. This mode is intended for finite, non-interactive Unix programs. It does
+not provide a PTY or background-service lifecycle. Bazel `run` always uses the
+direct Bazel driver rather than Aspect CLI. See
+[configuration](docs/configuration.md#enable-bazel-run) for the opt-in policy.
 
 Failure results rank concrete root causes before aggregated action failures.
 Equivalent fanout failures are represented once with `target: null` and a

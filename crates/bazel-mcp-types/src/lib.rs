@@ -31,5 +31,7 @@ pub use invocation::{
 };
 pub use pagination::{Page, PageRequest};
 pub use query::QueryRow;
-pub use result::{InspectHint, InvocationSummary, TargetCounts, TargetResult, TestCounts};
+pub use result::{
+    InspectHint, InvocationSummary, RunOutcome, RunSummary, TargetCounts, TargetResult, TestCounts,
+};
 pub use test::{TestCase, TestResult, TestStatus};

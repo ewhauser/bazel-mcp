@@ -54,13 +54,35 @@ pub struct RunParams {
     /// Bazel startup arguments placed before the command.
     #[serde(default)]
     pub startup_args: Vec<String>,
-    /// Bazel command or a configured Aspect command such as lint.
+    /// Bazel command such as build, test, query, or run, or a configured Aspect command such as lint.
     pub command: String,
-    /// Arguments placed after the selected command.
+    /// Arguments placed after the selected command. For run, valued options must use --flag=value.
     #[serde(default)]
     pub args: Vec<String>,
+    /// The single executable target required when command is run.
+    pub target: Option<String>,
+    /// Sensitive arguments passed to the executed program after `--`.
+    #[serde(default)]
+    pub program_args: Vec<String>,
     /// Optional timeout in seconds.
     pub timeout_seconds: Option<u64>,
+}
+
+impl RunParams {
+    fn into_request(self) -> InvocationRequest {
+        let command = match BazelCommand::from_str(&self.command) {
+            Ok(command) => command,
+            Err(never) => match never {},
+        };
+        let mut request = InvocationRequest::new(PathBuf::from(self.workspace), command, self.args);
+        request.startup_arguments = self.startup_args;
+        request.target = self.target;
+        request.program_arguments = self.program_args;
+        request.timeout_ms = self
+            .timeout_seconds
+            .map(|seconds| seconds.saturating_mul(1_000));
+        request
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -139,7 +161,7 @@ impl BazelMcpServer {
 impl BazelMcpServer {
     #[tool(
         name = "bazel.run",
-        description = "Execute one allowed Bazel or configured Aspect command silently and return a bounded actionable summary."
+        description = "Execute one allowed Bazel or configured Aspect command silently and return a bounded actionable summary. For command=run, pass one target and optional sensitive program_args; run must be enabled by server policy."
     )]
     async fn bazel_run(
         &self,
@@ -148,16 +170,7 @@ impl BazelMcpServer {
         meta: Meta,
         client: Peer<RoleServer>,
     ) -> Result<CallToolResult, String> {
-        let command = match BazelCommand::from_str(&params.command) {
-            Ok(command) => command,
-            Err(never) => match never {},
-        };
-        let mut request =
-            InvocationRequest::new(PathBuf::from(params.workspace), command, params.args);
-        request.startup_arguments = params.startup_args;
-        request.timeout_ms = params
-            .timeout_seconds
-            .map(|seconds| seconds.saturating_mul(1000));
+        let request = params.into_request();
         let id = request.id;
         let runner = self.runner.clone();
         let mut task =
@@ -462,17 +475,7 @@ impl BazelMcpServer {
         let params: RunParams =
             serde_json::from_value(serde_json::Value::Object(arguments.unwrap_or_default()))
                 .map_err(|error| format!("invalid bazel.run arguments: {error}"))?;
-        let command = match BazelCommand::from_str(&params.command) {
-            Ok(command) => command,
-            Err(never) => match never {},
-        };
-        let mut request =
-            InvocationRequest::new(PathBuf::from(params.workspace), command, params.args);
-        request.startup_arguments = params.startup_args;
-        request.timeout_ms = params
-            .timeout_seconds
-            .map(|seconds| seconds.saturating_mul(1_000));
-        Ok(request)
+        Ok(params.into_request())
     }
 
     async fn submit_deferred(
@@ -1017,6 +1020,30 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn run_request_keeps_bazel_and_program_arguments_separate() {
+        let arguments = serde_json::from_value(serde_json::json!({
+            "workspace": "/workspace/example",
+            "command": "run",
+            "args": ["--config=dev"],
+            "target": "//cmd:example",
+            "program_args": ["--format=json", "input.txt"],
+            "timeout_seconds": 300
+        }))
+        .unwrap();
+
+        let request = BazelMcpServer::decode_run_request(Some(arguments)).unwrap();
+
+        assert_eq!(request.command, BazelCommand::Run);
+        assert_eq!(request.arguments, vec!["--config=dev"]);
+        assert_eq!(request.target.as_deref(), Some("//cmd:example"));
+        assert_eq!(
+            request.program_arguments,
+            vec!["--format=json", "input.txt"]
+        );
+        assert_eq!(request.timeout_ms, Some(300_000));
+    }
 
     #[tokio::test]
     async fn invocation_ledger_can_be_scoped_to_a_workspace() {

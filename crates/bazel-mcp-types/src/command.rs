@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CommandClass {
     BuildLike,
+    Run,
     Query,
     Informational,
     Unsafe,
@@ -39,9 +40,10 @@ impl BazelCommand {
             Self::Build | Self::Test | Self::Coverage | Self::MobileInstall => {
                 CommandClass::BuildLike
             }
+            Self::Run => CommandClass::Run,
             Self::Query | Self::Cquery | Self::Aquery => CommandClass::Query,
             Self::Info | Self::Version | Self::Help | Self::Mod => CommandClass::Informational,
-            Self::Clean | Self::Shutdown | Self::Run => CommandClass::Unsafe,
+            Self::Clean | Self::Shutdown => CommandClass::Unsafe,
             Self::Custom(_) => CommandClass::Unknown,
         }
     }

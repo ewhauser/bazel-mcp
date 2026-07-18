@@ -10,7 +10,8 @@ use bazel_mcp_bes::{BesError, BesServer};
 use bazel_mcp_policy::{
     PolicyConfig, PolicyError, Redactor, effective_output_base, filtered_environment,
     resolve_aspect_executable, resolve_bazel_executable, validate_arguments,
-    validate_aspect_arguments, validate_command, validate_query_arguments, validate_workspace,
+    validate_aspect_arguments, validate_command, validate_query_arguments, validate_run_arguments,
+    validate_workspace,
 };
 use bazel_mcp_reducer::{
     RawStarlarkConfig, ReducerPipeline, StarlarkReducerConfig, load_starlark_reducers,
@@ -71,6 +72,7 @@ pub enum BepTransport {
 pub struct RawRunnerConfig {
     pub default_timeout_seconds: u64,
     pub maximum_timeout_seconds: u64,
+    pub maximum_run_output_bytes: u64,
     pub cancellation_interrupt_grace_seconds: u64,
     pub cancellation_terminate_grace_seconds: u64,
     pub global_concurrency: usize,
@@ -91,6 +93,7 @@ impl Default for RawRunnerConfig {
         Self {
             default_timeout_seconds: config.default_timeout.as_secs(),
             maximum_timeout_seconds: config.maximum_timeout.as_secs(),
+            maximum_run_output_bytes: config.maximum_run_output_bytes,
             cancellation_interrupt_grace_seconds: config.cancellation_interrupt_grace.as_secs(),
             cancellation_terminate_grace_seconds: config.cancellation_terminate_grace.as_secs(),
             global_concurrency: config.global_concurrency,
@@ -112,6 +115,7 @@ pub struct RunnerConfig {
     pub policy: PolicyConfig,
     pub default_timeout: Duration,
     pub maximum_timeout: Duration,
+    pub maximum_run_output_bytes: u64,
     pub cancellation_interrupt_grace: Duration,
     pub cancellation_terminate_grace: Duration,
     pub global_concurrency: usize,
@@ -133,6 +137,7 @@ impl Default for RunnerConfig {
             policy: PolicyConfig::default(),
             default_timeout: Duration::from_secs(30 * 60),
             maximum_timeout: Duration::from_secs(2 * 60 * 60),
+            maximum_run_output_bytes: 256 * 1024 * 1024,
             cancellation_interrupt_grace: Duration::from_secs(10),
             cancellation_terminate_grace: Duration::from_secs(5),
             global_concurrency: 4,
@@ -172,6 +177,11 @@ impl RunnerConfig {
                 "maximum timeout must be greater than zero",
             ));
         }
+        if self.maximum_run_output_bytes == 0 {
+            return Err(RunnerError::InvalidConfiguration(
+                "maximum run output bytes must be greater than zero",
+            ));
+        }
         if self.default_timeout > self.maximum_timeout {
             return Err(RunnerError::InvalidConfiguration(
                 "default timeout exceeds maximum timeout",
@@ -195,6 +205,11 @@ impl RunnerConfig {
         if self.aspect.has_invalid_command() {
             return Err(RunnerError::InvalidConfiguration(
                 "Aspect routes must be non-empty command names without whitespace or a leading dash",
+            ));
+        }
+        if self.aspect.commands.contains("run") {
+            return Err(RunnerError::InvalidConfiguration(
+                "bazel run cannot be routed through Aspect CLI",
             ));
         }
         if self.aspect.commands.iter().any(|command| {
@@ -226,6 +241,7 @@ impl TryFrom<(RawRunnerConfig, PolicyConfig)> for RunnerConfig {
             policy,
             default_timeout: Duration::from_secs(raw.default_timeout_seconds),
             maximum_timeout: Duration::from_secs(raw.maximum_timeout_seconds),
+            maximum_run_output_bytes: raw.maximum_run_output_bytes,
             cancellation_interrupt_grace: Duration::from_secs(
                 raw.cancellation_interrupt_grace_seconds,
             ),
@@ -627,6 +643,12 @@ impl InvocationService {
         validate_command(&self.config.policy, &request.command)?;
         validate_arguments(&request.startup_arguments)?;
         validate_arguments(&request.arguments)?;
+        validate_run_arguments(
+            &request.command,
+            &request.arguments,
+            request.target.as_deref(),
+            &request.program_arguments,
+        )?;
         let uses_aspect = self.config.aspect.routes(&request.command);
         if uses_aspect {
             validate_aspect_arguments(
@@ -1154,6 +1176,13 @@ impl InvocationService {
         {
             *argument = self.redactor.redact_bounded(argument, 64 * 1024);
         }
+        for argument in &mut request.program_arguments {
+            *argument = "[REDACTED]".to_owned();
+        }
+        request.target = request
+            .target
+            .as_deref()
+            .map(|target| self.redactor.redact_bounded(target, 64 * 1024));
         for value in request.environment.values_mut() {
             *value = self.redactor.redact_bounded(value, 64 * 1024);
         }
@@ -1236,7 +1265,22 @@ mod tests {
             maximum_timeout: Duration::ZERO,
             ..RunnerConfig::default()
         };
-        assert!(InvocationService::new(store, zero_timeout).is_err());
+        assert!(InvocationService::new(store.clone(), zero_timeout).is_err());
+
+        let zero_run_output = RunnerConfig {
+            maximum_run_output_bytes: 0,
+            ..RunnerConfig::default()
+        };
+        assert!(InvocationService::new(store.clone(), zero_run_output).is_err());
+
+        let aspect_run = RunnerConfig {
+            aspect: AspectConfig {
+                commands: ["run".to_owned()].into(),
+                ..AspectConfig::default()
+            },
+            ..RunnerConfig::default()
+        };
+        assert!(InvocationService::new(store, aspect_run).is_err());
     }
 
     #[test]

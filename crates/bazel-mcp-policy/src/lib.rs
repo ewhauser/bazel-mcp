@@ -16,7 +16,7 @@ pub use executable::{
 };
 pub use flags::{
     INTERNAL_BEP_FLAG, effective_output_base, validate_arguments, validate_aspect_arguments,
-    validate_query_arguments,
+    validate_query_arguments, validate_run_arguments,
 };
 pub use redaction::Redactor;
 pub use workspace::validate_workspace;
@@ -41,6 +41,16 @@ pub enum PolicyError {
     ReservedFlag(String),
     #[error("argument contains a NUL byte")]
     InvalidArgument,
+    #[error("bazel run requires exactly one non-empty target")]
+    RunTargetRequired,
+    #[error("bazel run target must not look like a command option")]
+    InvalidRunTarget,
+    #[error("bazel run command arguments must be flags; use --flag=value for valued options")]
+    RunArgumentsMustBeFlags,
+    #[error("target and program_args are only valid when command is run")]
+    RunFieldsOnNonRunCommand,
+    #[error("bazel run is currently supported only on Unix platforms")]
+    RunUnsupportedPlatform,
     #[error("argument exceeds the {maximum_bytes}-byte limit")]
     ArgumentTooLong { maximum_bytes: usize },
     #[error("argument list exceeds the {maximum_count}-item limit")]

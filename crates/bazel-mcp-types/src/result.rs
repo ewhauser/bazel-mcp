@@ -4,6 +4,31 @@ use crate::{CoverageSummary, Diagnostic, QueryRow, TestResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    BuildFailed,
+    NotLaunched,
+    Succeeded,
+    ProgramFailed,
+    CancelledDuringBuild,
+    CancelledDuringProgram,
+    TimedOutDuringBuild,
+    TimedOutDuringProgram,
+    OutputLimitDuringBuild,
+    OutputLimitDuringProgram,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub target: String,
+    pub outcome: RunOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_excerpt: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InspectHint {
     Diagnostics,
     Tests,

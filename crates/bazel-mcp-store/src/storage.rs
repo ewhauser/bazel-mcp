@@ -113,6 +113,7 @@ pub struct InvocationCompletion {
     pub state: InvocationState,
     pub termination: Termination,
     pub summary: InvocationSummary,
+    pub run: Option<bazel_mcp_types::RunSummary>,
     pub metrics: InvocationMetrics,
     pub canonical_arguments: Option<Vec<String>>,
     pub artifacts: Vec<Artifact>,
@@ -397,6 +398,7 @@ impl Store {
             state,
             termination,
             summary,
+            run,
             metrics,
             canonical_arguments,
             artifacts,
@@ -418,6 +420,7 @@ impl Store {
         result.transition(state)?;
         result.termination = Some(termination);
         result.summary = Some(summary);
+        result.run = run;
         result.metrics = metrics;
         let telemetry_generation = {
             let index = self.inner.index.read().await;
@@ -1537,6 +1540,7 @@ mod tests {
                     state: InvocationState::Succeeded,
                     termination: Termination::Exit { code: 0 },
                     summary,
+                    run: None,
                     metrics: InvocationMetrics::default(),
                     canonical_arguments: None,
                     artifacts: Vec::new(),
@@ -2132,6 +2136,7 @@ mod tests {
                         }],
                         ..InvocationSummary::default()
                     },
+                    run: None,
                     metrics: InvocationMetrics::default(),
                     canonical_arguments: None,
                     artifacts: Vec::new(),

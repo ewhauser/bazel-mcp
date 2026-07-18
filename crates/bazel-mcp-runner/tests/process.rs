@@ -7,8 +7,8 @@ use std::{
 };
 
 use bazel_mcp_bep::proto::{
-    ActionExecuted, BuildEvent, BuildEventId, File, TestResult as BepTestResult,
-    TestSummary as BepTestSummary, build_event, build_event_id, file,
+    ActionExecuted, BuildEvent, BuildEventId, BuildFinished, ExecRequestConstructed, File,
+    TestResult as BepTestResult, TestSummary as BepTestSummary, build_event, build_event_id, file,
 };
 use bazel_mcp_bep::{encode_event_id, encode_frame};
 use bazel_mcp_policy::PolicyConfig;
@@ -20,7 +20,8 @@ use bazel_mcp_store::Store;
 use bazel_mcp_types::{
     Artifact, ArtifactKind, BazelCommand, DeferredRetrieval, Diagnostic, DiagnosticCategory,
     InspectHint, InspectPayload, InvocationRecord, InvocationRequest, InvocationState,
-    InvocationSummary, ResultDisposition, Severity, Termination, TestCase, TestResult, TestStatus,
+    InvocationSummary, ResultDisposition, RunOutcome, Severity, Termination, TestCase, TestResult,
+    TestStatus,
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -73,6 +74,24 @@ fn failed_test_bep(log_uri: &str, xml_uri: &str) -> Vec<u8> {
         ..Default::default()
     };
     [encode_frame(&result), encode_frame(&summary)].concat()
+}
+
+fn successful_run_build_bep(should_exec: bool) -> Vec<u8> {
+    let finished = BuildEvent {
+        payload: Some(build_event::Payload::Finished(Box::new(BuildFinished {
+            overall_success: true,
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let exec_request = BuildEvent {
+        last_message: true,
+        payload: Some(build_event::Payload::ExecRequest(Box::new(
+            ExecRequestConstructed { should_exec },
+        ))),
+        ..Default::default()
+    };
+    [encode_frame(&finished), encode_frame(&exec_request)].concat()
 }
 
 async fn wait_for_path(path: &Path) {
@@ -308,6 +327,107 @@ async fn shared_executable_service(
         },
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn run_keeps_program_arguments_private_and_classifies_program_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let bep = root.path().join("run.bep");
+    tokio::fs::write(&bep, successful_run_build_bep(true))
+        .await
+        .unwrap();
+    let argv = root.path().join("run-argv.txt");
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\n: > '{}'\nfor arg in \"$@\"; do\n  printf '%s\\n' \"$arg\" >> '{}'\n  case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac\ndone\ncp '{}' \"$bep_path\"\nprintf 'program output\\n'\nexit 7\n",
+        argv.display(),
+        argv.display(),
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |config| {
+        config.policy.allowed_commands.insert("run".to_owned());
+        config.policy.denied_commands.remove("run");
+    })
+    .await;
+    let secret = "token=PROGRAM_ARGUMENT_SECRET";
+    let mut request = InvocationRequest::new(
+        workspace,
+        BazelCommand::Run,
+        vec!["--config=dev".to_owned()],
+    );
+    request.target = Some("//cmd:example".to_owned());
+    request.program_arguments = vec!["--format=json".to_owned(), secret.to_owned()];
+
+    let record = service.run(request).await.unwrap();
+
+    assert_eq!(record.state, InvocationState::Failed);
+    let run = record.run.as_ref().unwrap();
+    assert_eq!(run.target, "//cmd:example");
+    assert_eq!(run.outcome, RunOutcome::ProgramFailed);
+    assert_eq!(run.program_exit_code, Some(7));
+    assert_eq!(run.output_excerpt, vec!["program output"]);
+    assert_eq!(
+        record.request.program_arguments,
+        vec!["[REDACTED]", "[REDACTED]"]
+    );
+    let encoded = serde_json::to_string(&record).unwrap();
+    assert!(!encoded.contains(secret));
+    assert!(
+        record
+            .canonical_arguments
+            .as_ref()
+            .unwrap()
+            .contains(&"[REDACTED_PROGRAM_ARGS:2]".to_owned())
+    );
+
+    let argv = tokio::fs::read_to_string(argv).await.unwrap();
+    let arguments = argv.lines().collect::<Vec<_>>();
+    assert!(arguments.contains(&"--run=true"));
+    assert!(arguments.contains(&"--omit_run_args=true"));
+    assert!(arguments.contains(&"--noexperimental_run_bep_event_include_residue"));
+    assert!(arguments.contains(&"--subcommands=false"));
+    assert_eq!(
+        &arguments[arguments.len() - 4..],
+        &["//cmd:example", "--", "--format=json", secret]
+    );
+}
+
+#[tokio::test]
+async fn run_terminates_when_raw_output_exceeds_its_ceiling() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let bep = root.path().join("run-output-limit.bep");
+    tokio::fs::write(&bep, successful_run_build_bep(true))
+        .await
+        .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\ncp '{}' \"$bep_path\"\ni=0\nwhile [ \"$i\" -lt 4096 ]; do printf x; i=$((i+1)); done\nsleep 5\n",
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |config| {
+        config.policy.allowed_commands.insert("run".to_owned());
+        config.policy.denied_commands.remove("run");
+        config.maximum_run_output_bytes = 1_024;
+    })
+    .await;
+    let mut request = InvocationRequest::new(workspace, BazelCommand::Run, Vec::new());
+    request.target = Some("//cmd:noisy".to_owned());
+
+    let record = service.run(request).await.unwrap();
+
+    assert_eq!(record.state, InvocationState::Failed);
+    assert_eq!(
+        record.termination,
+        Some(Termination::OutputLimit {
+            maximum_bytes: 1_024
+        })
+    );
+    assert_eq!(
+        record.run.as_ref().unwrap().outcome,
+        RunOutcome::OutputLimitDuringProgram
+    );
 }
 
 #[tokio::test]

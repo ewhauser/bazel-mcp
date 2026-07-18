@@ -139,6 +139,8 @@ async fn run_agent_inner(mut arguments: Vec<OsString>) -> anyhow::Result<AgentRe
     let runner = InvocationService::start(store.clone(), RunnerConfig::from(&config)).await?;
     let mut request = InvocationRequest::new(workspace, parsed.command, parsed.arguments);
     request.startup_arguments = parsed.startup_arguments;
+    request.target = parsed.target;
+    request.program_arguments = parsed.program_arguments;
     let cancellation = CancellationToken::new();
     let signal_cancellation = cancellation.clone();
     let signal = tokio::spawn(async move {
@@ -176,6 +178,8 @@ struct ParsedBazelArguments {
     startup_arguments: Vec<String>,
     command: BazelCommand,
     arguments: Vec<String>,
+    target: Option<String>,
+    program_arguments: Vec<String>,
 }
 
 fn parse_bazel_arguments(
@@ -187,6 +191,8 @@ fn parse_bazel_arguments(
             startup_arguments: Vec::new(),
             command: BazelCommand::Help,
             arguments: Vec::new(),
+            target: None,
+            program_arguments: Vec::new(),
         });
     }
     if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--version" | "--help")) {
@@ -198,6 +204,8 @@ fn parse_bazel_arguments(
                 BazelCommand::Help
             },
             arguments: Vec::new(),
+            target: None,
+            program_arguments: Vec::new(),
         });
     }
 
@@ -229,10 +237,30 @@ fn parse_bazel_arguments(
     let command = strings[command_index]
         .parse::<BazelCommand>()
         .expect("BazelCommand parsing is infallible");
+    let mut command_arguments = strings[command_index + 1..].to_vec();
+    let mut target = None;
+    let mut program_arguments = Vec::new();
+    if command == BazelCommand::Run {
+        if let Some(delimiter) = command_arguments
+            .iter()
+            .position(|argument| argument == "--")
+        {
+            program_arguments = command_arguments.split_off(delimiter + 1);
+            command_arguments.pop();
+        }
+        if let Some(target_index) = command_arguments
+            .iter()
+            .position(|argument| !argument.starts_with('-'))
+        {
+            target = Some(command_arguments.remove(target_index));
+        }
+    }
     Ok(ParsedBazelArguments {
         startup_arguments: strings[..command_index].to_vec(),
         command,
-        arguments: strings[command_index + 1..].to_vec(),
+        arguments: command_arguments,
+        target,
+        program_arguments,
     })
 }
 
@@ -273,7 +301,12 @@ fn invocation_exit_code(record: &InvocationRecord) -> i32 {
         Some(Termination::Signal { signal }) => 128_i32.saturating_add(*signal),
         Some(Termination::Timeout) => 124,
         Some(Termination::Cancelled) => 130,
-        Some(Termination::SpawnFailure { .. } | Termination::Interrupted) | None => 1,
+        Some(
+            Termination::OutputLimit { .. }
+            | Termination::SpawnFailure { .. }
+            | Termination::Interrupted,
+        )
+        | None => 1,
     }
 }
 
@@ -355,6 +388,32 @@ mod tests {
         assert_eq!(parsed.startup_arguments, ["--output_base", "/tmp/output"]);
         assert_eq!(parsed.command, BazelCommand::Test);
         assert_eq!(parsed.arguments, ["//pkg:all", "--test_filter=one"]);
+        assert_eq!(parsed.target, None);
+        assert!(parsed.program_arguments.is_empty());
+    }
+
+    #[test]
+    fn separates_run_target_and_private_program_arguments() {
+        let mut policy = PolicyConfig::default();
+        policy.allowed_commands.insert("run".to_owned());
+        policy.denied_commands.remove("run");
+        let parsed = parse_bazel_arguments(
+            &os(&[
+                "run",
+                "--config=dev",
+                "//cmd:example",
+                "--",
+                "--token=secret",
+                "input.txt",
+            ]),
+            &policy,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.command, BazelCommand::Run);
+        assert_eq!(parsed.arguments, ["--config=dev"]);
+        assert_eq!(parsed.target.as_deref(), Some("//cmd:example"));
+        assert_eq!(parsed.program_arguments, ["--token=secret", "input.txt"]);
     }
 
     #[test]
