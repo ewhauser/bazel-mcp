@@ -3,7 +3,7 @@ mod bazel;
 use bazel::add_bazel_diagnostics;
 
 use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
-use diagnostic_reducer::{
+use logcompact_builtins::{
     Budget as CoreBudget, Diagnostic as CoreDiagnostic, DiagnosticClass, GenericRanker,
     NoRedaction, OutputPolicy, ReductionOptions, TextInput, normalize_terminal_text,
     reduce_with_policy,
@@ -56,9 +56,9 @@ pub fn map_diagnostic(diagnostic: CoreDiagnostic) -> Diagnostic {
     };
     Diagnostic {
         severity: match diagnostic.severity {
-            diagnostic_reducer::Severity::Error => Severity::Error,
-            diagnostic_reducer::Severity::Warning => Severity::Warning,
-            diagnostic_reducer::Severity::Note => Severity::Note,
+            logcompact_builtins::Severity::Error => Severity::Error,
+            logcompact_builtins::Severity::Warning => Severity::Warning,
+            logcompact_builtins::Severity::Note => Severity::Note,
         },
         category,
         message: diagnostic.message,
@@ -89,17 +89,17 @@ pub(crate) fn map_path_for_bazel(path: &str) -> String {
 }
 #[cfg(test)]
 pub(crate) fn parse_cpp_diagnostic(input: &str) -> Option<Diagnostic> {
-    diagnostic_reducer::__parse_cpp_diagnostic(input).map(map_diagnostic)
+    logcompact_builtins::__parse_cpp_diagnostic(input).map(map_diagnostic)
 }
 
 #[cfg(test)]
 pub(crate) fn parse_cpp_linker_diagnostic(input: &str) -> Option<Diagnostic> {
-    diagnostic_reducer::__parse_cpp_linker_diagnostic(input).map(map_diagnostic)
+    logcompact_builtins::__parse_cpp_linker_diagnostic(input).map(map_diagnostic)
 }
 
 #[cfg(test)]
 pub(crate) fn cpp_path_end(input: &str, delimiter: char) -> Option<usize> {
-    diagnostic_reducer::__cpp_path_end(input, delimiter)
+    logcompact_builtins::__cpp_path_end(input, delimiter)
 }
 
 #[cfg(test)]
@@ -110,7 +110,7 @@ pub(crate) struct SwcParseOutput {
 #[cfg(test)]
 pub(crate) fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
     SwcParseOutput {
-        diagnostics: diagnostic_reducer::__parse_swc_diagnostics(input)
+        diagnostics: logcompact_builtins::__parse_swc_diagnostics(input)
             .into_iter()
             .map(map_diagnostic)
             .collect(),
@@ -119,7 +119,7 @@ pub(crate) fn parse_swc_diagnostics(input: &str) -> SwcParseOutput {
 
 #[cfg(test)]
 pub(crate) fn parse_protobuf_diagnostic(input: &str) -> Option<Diagnostic> {
-    diagnostic_reducer::__parse_protobuf_diagnostic(input).map(map_diagnostic)
+    logcompact_builtins::__parse_protobuf_diagnostic(input).map(map_diagnostic)
 }
 
 #[cfg(test)]
@@ -129,12 +129,12 @@ pub(crate) fn parse_starlark_inline_diagnostic(input: &str) -> Option<Diagnostic
 
 #[cfg(test)]
 pub(crate) fn parse_typescript_diagnostic(input: &str) -> Option<Diagnostic> {
-    diagnostic_reducer::__parse_typescript_diagnostic(input).map(map_diagnostic)
+    logcompact_builtins::__parse_typescript_diagnostic(input).map(map_diagnostic)
 }
 
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct PythonDiagnosticParser(diagnostic_reducer::PythonDiagnosticParser);
+pub(crate) struct PythonDiagnosticParser(logcompact_builtins::PythonDiagnosticParser);
 
 #[cfg(test)]
 impl PythonDiagnosticParser {

@@ -1,17 +1,17 @@
 //! Bazel adapter for provider-neutral streaming test-log reduction.
 
 use bazel_mcp_types::{Diagnostic, DiagnosticCategory, TestCase, TestStatus};
-use diagnostic_reducer::{Provenance, TestLogReducer};
+use logcompact_builtins::{Provenance, TestLogReducer};
 
 use crate::diagnostics::{map_diagnostic, map_path_for_bazel};
 
 const MAX_FAILURES: usize = 20;
 
-pub type TestFailureEvidence = diagnostic_reducer::TestFailureEvidence;
+pub type TestFailureEvidence = logcompact_builtins::TestFailureEvidence;
 
 /// Backward-compatible Bazel projection over the provider-neutral accumulator.
 #[derive(Default)]
-pub struct TestFailureAccumulator(diagnostic_reducer::TestFailureAccumulator);
+pub struct TestFailureAccumulator(logcompact_builtins::TestFailureAccumulator);
 
 impl TestFailureAccumulator {
     pub fn observe_line(&mut self, line: &str) {
@@ -129,8 +129,8 @@ fn map_failure_evidence(mut failure: TestFailureEvidence) -> TestFailureEvidence
 }
 
 fn map_test_failure(
-    mut failure: diagnostic_reducer::TestFailure,
-) -> diagnostic_reducer::TestFailure {
+    mut failure: logcompact_builtins::TestFailure,
+) -> logcompact_builtins::TestFailure {
     if let Some(location) = &mut failure.location {
         let original = location.path.clone();
         let mapped = map_path_for_bazel(&original);
@@ -142,7 +142,7 @@ fn map_test_failure(
     failure
 }
 
-fn map_test_diagnostic(diagnostic: diagnostic_reducer::Diagnostic, label: &str) -> Diagnostic {
+fn map_test_diagnostic(diagnostic: logcompact_builtins::Diagnostic, label: &str) -> Diagnostic {
     let mut diagnostic = map_diagnostic(diagnostic);
     diagnostic.category = DiagnosticCategory::Test;
     diagnostic.target = Some(label.to_owned());
