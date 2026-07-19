@@ -3,13 +3,14 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "17 7 * * 1"
-permissions:
-  contents: read
+permissions: {}
 concurrency:
   group: token-integration
   cancel-in-progress: false
 jobs:
   abseil:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:

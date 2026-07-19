@@ -6,13 +6,14 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
-permissions:
-  contents: read
+permissions: {}
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
 jobs:
   lint:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -23,6 +24,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo install cargo-shear --version 1.12.0 --locked && cargo shear
   bazel-build:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -46,6 +49,8 @@ jobs:
       - run: PATH="$HOME/go/bin:$PATH" bazelisk test --config=ci //crates/...
       - run: PATH="$HOME/go/bin:$PATH" make build BAZEL_BUILD_FLAGS=--config=ci
   cargo-test-linux:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -54,6 +59,8 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: cargo test --workspace --doc
   cargo-test-macos:
+    permissions:
+      contents: read
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -61,6 +68,8 @@ jobs:
         with: { persist-credentials: false }
       - run: cargo test --workspace --all-features
   cargo-check-windows:
+    permissions:
+      contents: read
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -68,6 +77,8 @@ jobs:
         with: { persist-credentials: false }
       - run: cargo check --workspace --all-targets --all-features
   windows-release-smoke:
+    permissions:
+      contents: read
     runs-on: windows-latest
     timeout-minutes: 30
     # PR CI validates native linking, archive layout, and startup. Tagged releases
@@ -80,7 +91,7 @@ jobs:
         with: { persist-credentials: false }
       - name: Install dist
         shell: pwsh
-        run: irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
+        run: ./scripts/install-cargo-dist.ps1
       - name: Build Windows release archive
         shell: pwsh
         run: dist build --print=linkage --output-format=json --artifacts=local --target=x86_64-pc-windows-msvc > dist-manifest.json
@@ -88,6 +99,8 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-windows-release.ps1
   cargo-deny:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -96,6 +109,8 @@ jobs:
       - run: cargo install cargo-deny --version 0.20.2 --locked
       - run: cargo deny check
   cargo-audit:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -104,22 +119,31 @@ jobs:
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit
   nix-flake-check:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { persist-credentials: false }
-      - uses: cachix/install-nix-action@7e1d5bdb99afadeb0885b07e3913a4240e12ede5 # v31
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
       - run: nix flake check
   zizmor:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { persist-credentials: false }
       - run: python3 -m unittest scripts/test_publish_github_release_assets.py
-      - run: pipx run zizmor .github/workflows
+      - name: Audit GitHub Actions supply chain
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pipx run --spec zizmor==1.25.2 zizmor .github
   bazel-matrix:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -139,6 +163,8 @@ jobs:
       - run: go install github.com/bazelbuild/bazelisk@v1.26.0
       - run: PATH="$HOME/go/bin:$PATH" ./scripts/test-bazel-matrix.sh
   mcp-conformance:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -146,6 +172,8 @@ jobs:
         with: { persist-credentials: false }
       - run: make mcp-conformance
   claude-code-compatibility:
+    permissions:
+      contents: read
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -159,6 +187,8 @@ jobs:
       - run: npm ci --prefix scripts/compat
       - run: PATH="$PWD/scripts/compat/node_modules/.bin:$PATH" make test-claude-code
   fuzz-smoke:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

@@ -3,13 +3,14 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "43 5 * * 6"
-permissions:
-  contents: read
+permissions: {}
 concurrency:
   group: fuzz-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   fuzz:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -21,7 +22,10 @@ jobs:
         with: { persist-credentials: false }
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - run: cd fuzz && cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300
+      - name: Fuzz selected target
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: cd fuzz && cargo +nightly fuzz run "$FUZZ_TARGET" -- -max_total_time=300
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
