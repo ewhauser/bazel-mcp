@@ -563,12 +563,12 @@ to reproduce it.
 
 Provider-neutral parsing and the standalone CLI live in
 [`ewhauser/logcompact`](https://github.com/ewhauser/logcompact). This repository
-depends on `logcompact-builtins` 0.3.1 for deterministic compiler and test-log
+depends on `logcompact-builtins` 0.3.3 for deterministic compiler and test-log
 parsing; Bazel-specific path, event, and message semantics remain in
 `bazel-mcp-reducer`.
 
 ```sh
-cargo install logcompact --version 0.3.1
+cargo install logcompact --version 0.3.3
 logcompact build.log --format human
 ```
 
