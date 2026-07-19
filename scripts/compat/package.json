@@ -4,6 +4,6 @@
   "private": true,
   "description": "Pinned Claude Code dependency for credential-free MCP compatibility tests",
   "devDependencies": {
-    "@anthropic-ai/claude-code": "2.1.204"
+    "@anthropic-ai/claude-code": "2.1.207"
   }
 }
