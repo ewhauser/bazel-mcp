@@ -36,7 +36,7 @@ jobs:
       # Cache keys are immutable, so an input change creates a new cache while
       # restore-keys loads the most recent compatible cache as a warm baseline.
       - name: Mount Bazel caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/bazel-disk
@@ -152,7 +152,7 @@ jobs:
       - name: Configure Bazel caches
         run: cp .github/workflows/ci.bazelrc "$HOME/.bazelrc"
       - name: Mount Bazel caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/bazel-disk
