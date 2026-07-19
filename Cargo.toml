@@ -70,7 +70,7 @@ tempfile = "3"
 which = "8"
 
 # Testing and benchmarks
-criterion = "0.7"
+criterion = "0.8"
 proptest = "1"
 tiktoken-rs = "=0.12.0"
 
