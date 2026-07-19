@@ -66,7 +66,7 @@ protoc-bin-vendored = "3"
 quick-xml = { version = "0.41", features = ["serialize"] }
 
 # Storage and platform
-nix = { version = "0.30", features = ["fs", "process", "signal"] }
+nix = { version = "0.31", features = ["fs", "process", "signal"] }
 tempfile = "3"
 which = "8"
 
