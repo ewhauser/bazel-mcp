@@ -129,10 +129,7 @@ The initial repository is laid out as follows:
 │   ├── bazel-mcp-runner/
 │   ├── bazel-mcp-server/
 │   ├── bazel-mcp-store/
-│   ├── bazel-mcp-types/
-│   ├── diagnostic-reducer-core/
-│   ├── diagnostic-reducer/
-│   └── diagnostic-reducer-cli/
+│   └── bazel-mcp-types/
 ├── fuzz/
 │   ├── Cargo.lock
 │   ├── Cargo.toml
@@ -351,61 +348,18 @@ directly by the Bazel child. Query pagination scans stdout using opaque byte
 offsets, applies bounded redaction before filtering, and never writes a duplicate
 normalized query payload.
 
-### `diagnostic-reducer-core`
+### `logcompact-builtins` (external)
 
-Provider-neutral, synchronous state machine for incrementally reducing bounded
-log streams and trusted structured findings. It is explicitly versioned and
-publishable and depends only on general-purpose serialization crates.
-
-Responsibilities:
-
-- Frame arbitrary byte chunks into normalized CR, LF, and CRLF lines.
-- Track caller-owned scopes, streams, line spans, parser IDs, and end reasons.
-- Execute an immutable ordered plan of trusted native parsers.
-- Bound open scopes, retained bytes, line length, and emitted candidates.
-- Apply path mapping, redaction, control sanitization, fallback arbitration,
-  exact deduplication, typed ranking, and serialized output budgets.
-- Return diagnostics, test failures, and text-free accounting.
-
-The crate contains no language grammar or provider semantics and performs no
-filesystem, process, storage, network, environment, clock, random, or async
-work. Raw evidence retention is a caller responsibility.
-
-### `diagnostic-reducer`
-
-Provider-neutral built-in parser pack and synchronous batch compatibility API.
-It depends only on `diagnostic-reducer-core` and serialization crates.
-
-Responsibilities:
-
-- Run the fixed compiler, linter, runtime, and test parser registry in
-  deterministic order.
-- Parse Rust, C/C++, Java, JavaScript, TypeScript, Python, Go, and protobuf
-  diagnostics without build-provider objects.
-- Extract bounded Rust, GoogleTest, Go, JavaScript, Java, and Python test
-  evidence while refusing incomplete structured blocks.
-- Preserve batch/streaming equivalence across arbitrary chunk boundaries.
-
-Runtime plugin discovery and provider-specific log acquisition, path rules,
-status messages, and protocol objects are outside its contract.
-
-### `diagnostic-reducer-cli`
-
-Thin I/O and presentation adapter over the generic parser pack. It incrementally
-reads stdin or explicitly named files and renders human text, JSON, JSONL,
-SARIF, or GitHub workflow annotations. It does not launch commands, discover
-provider state, or retain raw evidence. Explicit literal-redaction and
-path-prefix rules are passed into the core output policy.
-
-All three generic crates are independently versioned and publishable so they can
-move together to a dedicated repository. A repository check enforces their
-dependency direction and rejects provider-specific semantics in their Rust
-sources.
+The provider-neutral streaming state machine, fixed compiler and test-log
+parser pack, and standalone CLI are maintained in
+[`ewhauser/logcompact`](https://github.com/ewhauser/logcompact). This workspace
+uses the published `logcompact-builtins` crate. Raw evidence retention and all
+Bazel-specific acquisition, path, event, and status semantics remain local.
 
 ### `bazel-mcp-reducer`
 
 Pure, deterministic conversion of BEP views and generic reduced diagnostics into
-Bazel domain results. It depends on `diagnostic-reducer`, `bazel-mcp-bep`, and
+Bazel domain results. It depends on `logcompact-builtins`, `bazel-mcp-bep`, and
 `bazel-mcp-types`, but not on the store, runner, Tokio, or MCP.
 
 Responsibilities:
@@ -661,8 +615,7 @@ bazel-mcp-server
 │   ├── bazel-mcp-store
 │   │   └── bazel-mcp-types
 │   ├── bazel-mcp-reducer
-│   │   ├── diagnostic-reducer
-│   │   │   └── diagnostic-reducer-core
+│   │   ├── logcompact-builtins (external)
 │   │   ├── bazel-mcp-bep
 │   │   └── bazel-mcp-types
 │   ├── bazel-mcp-bep
@@ -672,22 +625,14 @@ bazel-mcp-server
 └── bazel-mcp-types
 
 bazel-mcp-benchmark
-└── may depend on any library crate, but never the reverse
-
-diagnostic-reducer-cli
-└── diagnostic-reducer
-    └── diagnostic-reducer-core
+└── may depend on any workspace library crate, but never the reverse
 ```
 
 Rules:
 
 - `bazel-mcp-types` has no internal dependencies.
-- `diagnostic-reducer-core` has no workspace-internal dependencies and no async
-  or I/O surface.
-- `diagnostic-reducer` depends only on `diagnostic-reducer-core` among internal
-  crates and adds no I/O.
-- `diagnostic-reducer-cli` is the only generic crate with filesystem/stdin I/O;
-  it depends only on the generic reducer family among internal crates.
+- `logcompact-builtins` is an external, provider-neutral dependency with no
+  Bazel, runner, store, async, or MCP surface.
 - `bazel-mcp-bep` does not depend on application crates.
 - `bazel-mcp-bes` depends only on `bazel-mcp-bep` among internal crates.
 - `bazel-mcp-policy`, `bazel-mcp-store`, and `bazel-mcp-reducer` are siblings and
@@ -769,9 +714,8 @@ are updated together in one change.
 
 All external and internal dependencies are declared under
 `[workspace.dependencies]`. Crate manifests use `{ workspace = true }`. Private
-internal dependencies use workspace-relative paths. Packages intended for
-extraction include both a workspace-relative path and an explicit compatible
-version so `cargo package` can resolve their published dependency:
+internal dependencies use workspace-relative paths; reusable log parsing comes
+from the published `logcompact-builtins` package:
 
 ```toml
 [workspace.dependencies]
@@ -781,8 +725,7 @@ bazel-mcp-reducer = { path = "crates/bazel-mcp-reducer" }
 bazel-mcp-runner = { path = "crates/bazel-mcp-runner" }
 bazel-mcp-store = { path = "crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "crates/bazel-mcp-types" }
-diagnostic-reducer = { path = "crates/diagnostic-reducer", version = "0.1.0" }
-diagnostic-reducer-core = { path = "crates/diagnostic-reducer-core", version = "0.1.0" }
+logcompact-builtins = "0.3.1"
 ```
 
 External dependencies are grouped by purpose in the root manifest. The initial
@@ -1197,7 +1140,7 @@ Initial targets:
 - `bep_framing`: arbitrary and truncated varint-delimited inputs
 - `bep_event_stream`: arbitrary framed protobuf streams
 - `named_file_sets`: nested, repeated, and adversarial file-set graphs
-- `diagnostic_reducer`: arbitrary terminal bytes and ANSI sequences through
+- `logcompact`: arbitrary terminal bytes and ANSI sequences through
   both batch and streaming sessions, including arbitrary chunk boundaries,
   scope end reasons, and input/line/candidate bounds
 - `redaction`: arbitrary text and configured secret patterns
@@ -1221,9 +1164,9 @@ Criterion benchmarks in `bazel-mcp-benchmark` measure framing, graph building,
 reduction, storage, and query processing. They report bytes or events per second
 and include scaling cases, not only fixed examples.
 
-The generic parser pack additionally benchmarks batch input and 64 KiB/1 KiB
-streaming chunks over large no-match and mixed-tail logs. It is an explicit
-target (`make bench-generic-reducers`) rather than an ordinary unit test.
+The external generic parser pack benchmarks batch and streaming reduction in
+the `logcompact` repository. This workspace benchmarks only its Bazel-specific
+adapter and integration behavior.
 
 ### Process macrobenchmarks
 
@@ -1282,12 +1225,6 @@ Nested instructions are added only where local guardrails materially differ:
   and adversarial parser rules.
 - `bazel-mcp-reducer/AGENTS.md`: deterministic ordering, byte budgets,
   diagnostic fidelity, and snapshot review rules.
-- `diagnostic-reducer-core/AGENTS.md`: provider neutrality, synchronous parser
-  lifecycle, hard bounds, transformation order, and publishable API rules.
-- `diagnostic-reducer/AGENTS.md`: fixed parser order, generic grammar, redaction,
-  batch/streaming equivalence, and reviewed fixture rules.
-- `diagnostic-reducer-cli/AGENTS.md`: thin I/O/presentation boundary and no
-  process execution.
 - `bazel-mcp-runner/AGENTS.md`: process groups, cancellation, blocking-task,
   locking, and no-shell rules.
 

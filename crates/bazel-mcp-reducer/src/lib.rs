@@ -16,12 +16,12 @@ pub use build::{
     extract_canonical_arguments, finalize_diagnostics, reduce_artifacts, reduce_invocation,
 };
 pub use coverage::{CoverageError, parse_lcov, parse_lcov_reader};
-pub use diagnostic_reducer::{deduplicate_lines, normalize_terminal_text};
 pub use diagnostics::map_diagnostic as map_text_diagnostic;
 pub use extension::{
     CustomReducer, ReducerApplyReport, ReducerContext, ReducerError, ReducerEvent,
     ReducerEventKind, ReducerFailure, ReducerMode, ReducerPatch, ReducerPipeline, ReducerSelector,
 };
+pub use logcompact_builtins::{deduplicate_lines, normalize_terminal_text};
 pub use query::reduce_query;
 pub use starlark::{
     REDUCER_API_VERSION, RawStarlarkConfig, StarlarkLimits, StarlarkReducerConfig,

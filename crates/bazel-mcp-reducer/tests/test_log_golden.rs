@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use bazel_mcp_reducer::{TestFailureAccumulator, normalize_terminal_text};
-use diagnostic_reducer::Location;
+use logcompact_builtins::Location;
 use serde::Serialize;
 
 const CASES: [&str; 5] = ["ordinary", "subtests", "table", "panic", "repeated"];

@@ -1,5 +1,5 @@
 use bazel_mcp_types::{Diagnostic, DiagnosticCategory, DiagnosticLocation, Severity};
-use diagnostic_reducer::{PathMapper, deduplicate_lines};
+use logcompact_builtins::{PathMapper, deduplicate_lines};
 
 use super::bounded_text;
 

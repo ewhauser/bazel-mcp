@@ -24,7 +24,7 @@ bazel-mcp-policy = { path = "../crates/bazel-mcp-policy" }
 bazel-mcp-reducer = { path = "../crates/bazel-mcp-reducer" }
 bazel-mcp-store = { path = "../crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "../crates/bazel-mcp-types" }
-diagnostic-reducer = { path = "../crates/diagnostic-reducer" }
+logcompact-builtins = "0.3.1"
 buffa = "=0.8.1"
 
 [[bin]]
@@ -52,8 +52,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "diagnostic_reducer"
-path = "fuzz_targets/diagnostic_reducer.rs"
+name = "logcompact"
+path = "fuzz_targets/logcompact.rs"
 test = false
 doc = false
 

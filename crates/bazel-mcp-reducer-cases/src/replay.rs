@@ -10,7 +10,7 @@ use bazel_mcp_types::{
     Artifact, Diagnostic, DiagnosticCategory, DiagnosticLocation, InspectHint, InvocationSummary,
     Severity, TestCase, TestStatus,
 };
-use diagnostic_reducer::{Provenance, TestLogReducer};
+use logcompact_builtins::{Provenance, TestLogReducer};
 use serde::{Deserialize, Serialize};
 
 use crate::{

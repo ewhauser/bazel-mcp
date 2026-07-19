@@ -306,7 +306,7 @@ dependencies = [
  "anyhow",
  "bazel-mcp-bep",
  "bazel-mcp-types",
- "diagnostic-reducer",
+ "logcompact-builtins",
  "quick-xml",
  "regex",
  "serde",
@@ -326,7 +326,7 @@ dependencies = [
  "bazel-mcp-store",
  "bazel-mcp-types",
  "clap",
- "diagnostic-reducer",
+ "logcompact-builtins",
  "regex",
  "schemars",
  "serde",
@@ -948,32 +948,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "unicode-xid",
-]
-
-[[package]]
-name = "diagnostic-reducer"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "diagnostic-reducer-core",
- "serde_json",
-]
-
-[[package]]
-name = "diagnostic-reducer-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "diagnostic-reducer",
- "serde_json",
-]
-
-[[package]]
-name = "diagnostic-reducer-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1664,6 +1638,28 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "logcompact-builtins"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d7d7a919815fe86528b97d577fad7a154033d91d8f58145297e9fe79d527a56"
+dependencies = [
+ "logcompact-core",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "logcompact-core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41afd650ba87c8797df8ca271fcbee9c8724a448abf0311130d9290d5f58ea0b"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "logos"
