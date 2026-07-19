@@ -14,8 +14,7 @@
 # title/body based on your changelogs.
 
 name: Release
-permissions:
-  "contents": "read"
+permissions: {}
 concurrency:
   group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
@@ -73,7 +72,7 @@ jobs:
     runs-on: "ubuntu-22.04"
     timeout-minutes: 15
     permissions:
-      contents: write
+      contents: write # Lets cargo-dist inspect or create the selected release.
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       publishing: ${{ !github.event.pull_request }}
@@ -86,10 +85,8 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
       - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: ./scripts/install-cargo-dist.sh
       # Pass the validated tag input through the environment instead of expanding
       # event data directly into shell source.
       - id: plan
@@ -126,6 +123,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    permissions:
+      contents: read
     steps:
       - name: enable windows longpaths
         run: |
@@ -140,11 +139,11 @@ jobs:
         # Install a native binary for this matrix runner. Reusing the plan
         # job's binary breaks on ARM Linux and macOS runners.
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: ./scripts/install-cargo-dist.sh
       - name: Install dist (Windows)
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
-        run: irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
+        run: ./scripts/install-cargo-dist.ps1
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -209,6 +208,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -217,7 +218,7 @@ jobs:
           submodules: recursive
       - name: Install dist
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: ./scripts/install-cargo-dist.sh
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -262,7 +263,9 @@ jobs:
     runs-on: "ubuntu-22.04"
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: write # Uploads artifacts to the GitHub release.
+      attestations: write # Stores Sigstore provenance for release assets.
+      id-token: write # Authenticates release attestations via OIDC.
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -283,7 +286,7 @@ jobs:
           sparse-checkout-cone-mode: false
       - name: Install dist
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+        run: ./scripts/install-cargo-dist.sh
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
@@ -316,6 +319,10 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      - name: Attest release artifacts
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: artifacts/*
       - name: Publish GitHub release artifacts
         env:
           ANNOUNCEMENT_IS_PRERELEASE: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}"
@@ -347,6 +354,8 @@ jobs:
       GITHUB_USER: "axo bot"
       GITHUB_EMAIL: "admin+bot@axo.dev"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -395,6 +404,8 @@ jobs:
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:

@@ -2,8 +2,7 @@ name: Release Please
 on:
   push:
     branches: [main]
-permissions:
-  contents: read
+permissions: {}
 concurrency:
   group: release-please
   cancel-in-progress: false
@@ -12,8 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
-      pull-requests: write
+      contents: write # Creates the release tag and GitHub release.
+      pull-requests: write # Updates the managed release pull request.
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -28,7 +27,9 @@ jobs:
     needs: release
     if: ${{ needs.release.outputs.release_created == 'true' }}
     permissions:
-      contents: write
+      contents: write # Publishes assets to the GitHub release.
+      attestations: write # Stores Sigstore provenance for release assets.
+      id-token: write # Authenticates release attestations via OIDC.
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release.outputs.tag_name }}
@@ -40,8 +41,8 @@ jobs:
     if: ${{ needs.release.outputs.release_created == 'true' }}
     permissions:
       contents: read
-      pages: write
-      id-token: write
+      pages: write # Publishes the validated Pages artifact.
+      id-token: write # Authenticates the Pages deployment via OIDC.
     uses: ./.github/workflows/docs.yml
     with:
       deploy: true

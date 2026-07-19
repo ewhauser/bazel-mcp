@@ -10,13 +10,14 @@ on:
         description: BES or BuildBuddy endpoint accepted by Bazel
         required: true
         type: string
-permissions:
-  contents: read
+permissions: {}
 concurrency:
   group: remote-bazel-integration
   cancel-in-progress: false
 jobs:
   remote-execution-and-bes:
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     environment: remote-integration
     timeout-minutes: 60
