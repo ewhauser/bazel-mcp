@@ -6,73 +6,73 @@ use crate::TranscriptMetrics;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdapterMetrics {
-    pub adapter: String,
-    pub scenario: String,
-    pub cache_condition: String,
+    pub(crate) adapter: String,
+    pub(crate) scenario: String,
+    pub(crate) cache_condition: String,
     pub sample: u32,
-    pub bazel_wall_ms: u64,
-    pub end_to_end_ms: u64,
-    pub exit_code: Option<i32>,
-    pub diagnostic_found: bool,
-    pub raw_process_bytes: u64,
-    pub transcript: TranscriptMetrics,
+    pub(crate) bazel_wall_ms: u64,
+    pub(crate) end_to_end_ms: u64,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) diagnostic_found: bool,
+    pub(crate) raw_process_bytes: u64,
+    pub(crate) transcript: TranscriptMetrics,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnvironmentMetadata {
-    pub os: String,
-    pub architecture: String,
-    pub rustc: String,
-    pub logical_cpus: usize,
+    pub(crate) os: String,
+    pub(crate) architecture: String,
+    pub(crate) rustc: String,
+    pub(crate) logical_cpus: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SummaryStatistics {
-    pub cache_condition: String,
-    pub adapter: String,
-    pub observations: usize,
-    pub median_bazel_wall_ms: u64,
-    pub p95_bazel_wall_ms: u64,
-    pub median_context_tokens: u64,
-    pub p95_context_tokens: u64,
-    pub median_visible_bytes: u64,
-    pub p95_visible_bytes: u64,
+    pub(crate) cache_condition: String,
+    pub(crate) adapter: String,
+    pub(crate) observations: usize,
+    pub(crate) median_bazel_wall_ms: u64,
+    pub(crate) p95_bazel_wall_ms: u64,
+    pub(crate) median_context_tokens: u64,
+    pub(crate) p95_context_tokens: u64,
+    pub(crate) median_visible_bytes: u64,
+    pub(crate) p95_visible_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Estimate {
-    pub value: f64,
-    pub ci95_lower: f64,
-    pub ci95_upper: f64,
+    pub(crate) value: f64,
+    pub(crate) ci95_lower: f64,
+    pub(crate) ci95_upper: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BaselineComparison {
-    pub baseline_adapter: String,
-    pub candidate_adapter: String,
-    pub aggregate: BTreeMap<String, Estimate>,
-    pub by_cache: BTreeMap<String, BTreeMap<String, Estimate>>,
+    pub(crate) baseline_adapter: String,
+    pub(crate) candidate_adapter: String,
+    pub(crate) aggregate: BTreeMap<String, Estimate>,
+    pub(crate) by_cache: BTreeMap<String, BTreeMap<String, Estimate>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BenchmarkReport {
-    pub schema_version: u32,
-    pub project: String,
-    pub commit: String,
-    pub bazel_version: String,
-    pub tokenizer_crate_version: String,
-    pub encoding: String,
-    pub canonicalization_version: u32,
-    pub adapter_order_seed: u64,
-    pub environment: EnvironmentMetadata,
+    pub(crate) schema_version: u32,
+    pub(crate) project: String,
+    pub(crate) commit: String,
+    pub(crate) bazel_version: String,
+    pub(crate) tokenizer_crate_version: String,
+    pub(crate) encoding: String,
+    pub(crate) canonicalization_version: u32,
+    pub(crate) adapter_order_seed: u64,
+    pub(crate) environment: EnvironmentMetadata,
     pub samples: Vec<AdapterMetrics>,
-    pub statistics: Vec<SummaryStatistics>,
+    pub(crate) statistics: Vec<SummaryStatistics>,
     #[serde(default)]
-    pub comparisons: Vec<BaselineComparison>,
+    pub(crate) comparisons: Vec<BaselineComparison>,
     // Retained in schema v3 for consumers of schema v2 reports. These values
     // are the point estimates for shell-default versus bazel-mcp.
-    pub aggregate_reduction_percent: BTreeMap<String, f64>,
-    pub reduction_percent_by_cache: BTreeMap<String, BTreeMap<String, f64>>,
+    pub(crate) aggregate_reduction_percent: BTreeMap<String, f64>,
+    pub(crate) reduction_percent_by_cache: BTreeMap<String, BTreeMap<String, f64>>,
 }
 
 impl BenchmarkReport {

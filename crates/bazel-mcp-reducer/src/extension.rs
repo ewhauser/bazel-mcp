@@ -22,13 +22,13 @@ pub enum ReducerEventKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReducerEvent {
-    pub ordinal: u64,
-    pub kind: ReducerEventKind,
+    pub(crate) ordinal: u64,
+    pub(crate) kind: ReducerEventKind,
     pub label: Option<String>,
     pub target_kind: Option<String>,
     pub action_type: Option<String>,
-    pub success: Option<bool>,
-    pub exit_code: Option<i32>,
+    pub(crate) success: Option<bool>,
+    pub(crate) exit_code: Option<i32>,
     pub message: Option<String>,
 }
 
@@ -56,7 +56,7 @@ pub struct ReducerSelector {
 
 impl ReducerSelector {
     #[must_use]
-    pub fn matches(&self, context: &ReducerContext) -> bool {
+    fn matches(&self, context: &ReducerContext) -> bool {
         if !self.commands.is_empty() && !self.commands.contains(&context.command) {
             return false;
         }
@@ -67,7 +67,7 @@ impl ReducerSelector {
     }
 
     #[must_use]
-    pub fn has_event_constraints(&self) -> bool {
+    pub(crate) fn has_event_constraints(&self) -> bool {
         !self.target_labels.is_empty()
             || !self.target_kinds.is_empty()
             || !self.action_types.is_empty()
@@ -156,7 +156,7 @@ pub struct ReducerError {
 
 impl ReducerError {
     #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }

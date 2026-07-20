@@ -108,7 +108,7 @@ impl IncrementalBepCapture {
         }
     }
 
-    pub(crate) async fn finish(mut self) -> Result<BepReduction, RunnerError> {
+    async fn finish(mut self) -> Result<BepReduction, RunnerError> {
         let started = Instant::now();
         self.finishing.store(true, Ordering::Release);
         let result = match self.task.take().expect("tail task must exist").await {

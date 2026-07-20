@@ -15,7 +15,8 @@ use tokio::{
 
 use crate::{
     AdapterMetrics, BaselineComparison, BenchmarkReport, EnvironmentMetadata, Estimate,
-    ProjectManifest, Scenario, SummaryStatistics, Transcript, TranscriptEvent, TranscriptKind,
+    ProjectManifest, Scenario, SummaryStatistics,
+    transcript::{Transcript, TranscriptEvent, TranscriptKind},
 };
 
 const BOOTSTRAP_RESAMPLES: usize = 4_000;

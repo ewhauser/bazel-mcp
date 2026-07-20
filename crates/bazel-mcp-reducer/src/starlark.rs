@@ -71,15 +71,15 @@ impl Default for StarlarkLimits {
 #[serde(default, deny_unknown_fields)]
 pub struct RawStarlarkConfig {
     pub files: Vec<PathBuf>,
-    pub max_source_bytes: usize,
-    pub max_input_bytes: usize,
-    pub max_events: usize,
-    pub max_output_bytes: usize,
-    pub max_output_items: usize,
-    pub max_ticks: u64,
-    pub max_heap_bytes: usize,
-    pub max_callstack_size: usize,
-    pub timeout_ms: u64,
+    max_source_bytes: usize,
+    max_input_bytes: usize,
+    max_events: usize,
+    max_output_bytes: usize,
+    max_output_items: usize,
+    max_ticks: u64,
+    max_heap_bytes: usize,
+    max_callstack_size: usize,
+    timeout_ms: u64,
 }
 
 impl Default for RawStarlarkConfig {

@@ -55,13 +55,13 @@ pub(crate) struct EvidenceRecord {
 
 pub(crate) struct EvidencePage {
     pub(crate) items: Vec<String>,
-    pub(crate) item_cursors: Vec<String>,
+    item_cursors: Vec<String>,
     pub(crate) truncated: bool,
     pub(crate) next_cursor: Option<String>,
 }
 
 impl LogCursor {
-    pub(crate) fn encode(&self) -> Result<String, RunnerError> {
+    fn encode(&self) -> Result<String, RunnerError> {
         Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
     }
 

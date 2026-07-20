@@ -78,7 +78,7 @@ pub(crate) fn local_artifact_path(artifact: &bazel_mcp_types::Artifact) -> Optio
     path.is_absolute().then_some(path)
 }
 
-pub(crate) fn bazel_test_log_output_base(path: &Path) -> Option<PathBuf> {
+fn bazel_test_log_output_base(path: &Path) -> Option<PathBuf> {
     let components = path.components().collect::<Vec<_>>();
     let execroot = components
         .iter()

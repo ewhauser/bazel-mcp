@@ -126,7 +126,7 @@ impl InvocationState {
         )
     }
 
-    pub fn validate_transition(self, next: Self) -> Result<(), StateTransitionError> {
+    fn validate_transition(self, next: Self) -> Result<(), StateTransitionError> {
         let valid = matches!(
             (self, next),
             (

@@ -24,6 +24,6 @@ impl Budget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Budgeted<T> {
-    pub value: T,
-    pub truncated: bool,
+    pub(crate) value: T,
+    pub(crate) truncated: bool,
 }

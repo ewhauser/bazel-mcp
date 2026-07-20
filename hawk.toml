@@ -1,0 +1,57 @@
+[[production]]
+package = "bazel-mcp-server"
+bin = "bazel-mcp"
+reason = "shipped MCP server binary"
+
+[[production]]
+package = "bazel-mcp-reducer-cases"
+bin = "reducer-cases"
+reason = "repository reducer integration harness"
+
+[[production]]
+package = "bazel-mcp-benchmark"
+bin = "bep-spike"
+reason = "BEP decoder benchmark"
+
+[[production]]
+package = "bazel-mcp-benchmark"
+bin = "token-integration"
+reason = "token integration benchmark"
+
+[[production]]
+package = "bazel-mcp-benchmark"
+bin = "agentic-benchmark"
+reason = "agentic integration benchmark"
+
+[[production]]
+package = "bazel-mcp-benchmark"
+bin = "bazel-agentic-shell"
+reason = "agentic shell benchmark adapter"
+
+[[production]]
+package = "bazel-mcp-benchmark"
+bin = "storage-benchmark"
+reason = "storage benchmark"
+
+[[production]]
+package = "bazel-mcp-benchmark"
+bin = "bes-transport-benchmark"
+reason = "BES transport benchmark"
+
+[[exclude]]
+crate = "bazel_mcp_bep"
+module = "proto"
+reason = "generated from the Bazel Build Event Protocol schema"
+
+[[exclude]]
+crate = "bazel_mcp_bes"
+module = "proto"
+reason = "generated from the Build Event Service schema"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "bazel_mcp_store"
+item = "cursor_is_well_formed"
+kind = "function"
+level = "expect"
+reason = "public entry point for the separate fuzz workspace"

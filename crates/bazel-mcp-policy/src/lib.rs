@@ -15,8 +15,8 @@ pub use executable::{
     resolve_aspect_executable, resolve_bazel_executable, resolve_bazel_executable_excluding,
 };
 pub use flags::{
-    INTERNAL_BEP_FLAG, effective_output_base, validate_arguments, validate_aspect_arguments,
-    validate_query_arguments, validate_run_arguments,
+    effective_output_base, validate_arguments, validate_aspect_arguments, validate_query_arguments,
+    validate_run_arguments,
 };
 pub use redaction::Redactor;
 pub use workspace::validate_workspace;

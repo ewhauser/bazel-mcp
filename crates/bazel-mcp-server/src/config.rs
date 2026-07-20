@@ -42,13 +42,13 @@ pub enum McpExecutionPolicy {
 pub struct Cli {
     /// Read configuration from this TOML file.
     #[arg(long, env = "BAZEL_MCP_CONFIG")]
-    pub config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     /// Add an allowed workspace root. May be repeated.
     #[arg(long = "allow-root")]
-    pub allowed_roots: Vec<PathBuf>,
+    pub(crate) allowed_roots: Vec<PathBuf>,
     /// Override the invocation cache directory.
     #[arg(long)]
-    pub cache_root: Option<PathBuf>,
+    pub(crate) cache_root: Option<PathBuf>,
     /// Tracing filter written to stderr (stdout is MCP-only).
     #[arg(long, default_value = "bazel_mcp=info")]
     pub log: String,
@@ -58,12 +58,12 @@ pub struct Cli {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RawMcpConfig {
-    pub progress_initial_seconds: u64,
-    pub progress_interval_seconds: u64,
-    pub result_encoding: ResultEncoding,
-    pub mcp_execution_policy: McpExecutionPolicy,
-    pub task_ttl_seconds: u64,
-    pub task_poll_interval_ms: u64,
+    progress_initial_seconds: u64,
+    progress_interval_seconds: u64,
+    result_encoding: ResultEncoding,
+    mcp_execution_policy: McpExecutionPolicy,
+    task_ttl_seconds: u64,
+    task_poll_interval_ms: u64,
 }
 
 impl Default for RawMcpConfig {
@@ -82,15 +82,15 @@ impl Default for RawMcpConfig {
 /// Flat TOML compatibility layer composed from subsystem-owned raw settings.
 #[derive(Clone, Debug, Serialize)]
 pub struct RawServerConfig {
-    pub cache_root: PathBuf,
+    cache_root: PathBuf,
     #[serde(flatten)]
-    pub policy: RawPolicyConfig,
+    policy: RawPolicyConfig,
     #[serde(flatten)]
-    pub runner: RawRunnerConfig,
+    runner: RawRunnerConfig,
     #[serde(flatten)]
-    pub retention: RawRetentionConfig,
+    retention: RawRetentionConfig,
     #[serde(flatten)]
-    pub mcp: RawMcpConfig,
+    mcp: RawMcpConfig,
 }
 
 impl Default for RawServerConfig {
@@ -159,12 +159,12 @@ impl<'de> Deserialize<'de> for RawServerConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpConfig {
-    pub result_encoding: ResultEncoding,
-    pub progress_initial: Duration,
-    pub progress_interval: Duration,
-    pub execution_policy: McpExecutionPolicy,
-    pub task_ttl: Duration,
-    pub task_poll_interval: Duration,
+    pub(crate) result_encoding: ResultEncoding,
+    pub(crate) progress_initial: Duration,
+    pub(crate) progress_interval: Duration,
+    pub(crate) execution_policy: McpExecutionPolicy,
+    pub(crate) task_ttl: Duration,
+    pub(crate) task_poll_interval: Duration,
 }
 
 impl TryFrom<RawMcpConfig> for McpConfig {
@@ -262,14 +262,7 @@ impl ValidatedServerConfig {
     }
 
     #[must_use]
-    pub fn clamp_timeout(&self, requested: Option<u64>) -> u64 {
-        requested
-            .unwrap_or(self.runner.default_timeout.as_secs())
-            .clamp(1, self.runner.maximum_timeout.as_secs())
-    }
-
-    #[must_use]
-    pub fn cache_root(&self) -> &Path {
+    pub(crate) fn cache_root(&self) -> &Path {
         &self.cache_root
     }
 
@@ -284,7 +277,7 @@ impl ValidatedServerConfig {
     }
 
     #[must_use]
-    pub fn shutdown_wait(&self) -> Duration {
+    pub(crate) fn shutdown_wait(&self) -> Duration {
         self.runner
             .cancellation_interrupt_grace
             .saturating_add(self.runner.cancellation_terminate_grace)

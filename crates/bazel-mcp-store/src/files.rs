@@ -18,7 +18,7 @@ use crate::StoreError;
 /// byte provide deterministic, bounded fan-out without a database lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationPaths {
-    pub directory: PathBuf,
+    pub(crate) directory: PathBuf,
     pub manifest: PathBuf,
     pub details: PathBuf,
     pub stdout: PathBuf,
@@ -62,7 +62,7 @@ impl InvocationPaths {
         }
     }
 
-    pub async fn create(&self) -> Result<(), StoreError> {
+    pub(crate) async fn create(&self) -> Result<(), StoreError> {
         let parent = self
             .directory
             .parent()

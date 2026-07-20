@@ -15,36 +15,36 @@ pub enum TranscriptKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptEvent {
-    pub sequence: u64,
-    pub adapter: String,
-    pub scenario: String,
-    pub kind: TranscriptKind,
-    pub role: String,
-    pub model_visible: bool,
-    pub content: String,
+    pub(crate) sequence: u64,
+    pub(crate) adapter: String,
+    pub(crate) scenario: String,
+    pub(crate) kind: TranscriptKind,
+    pub(crate) role: String,
+    pub(crate) model_visible: bool,
+    pub(crate) content: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Transcript {
-    pub canonicalization_version: u32,
-    pub events: Vec<TranscriptEvent>,
+    pub(crate) canonicalization_version: u32,
+    pub(crate) events: Vec<TranscriptEvent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptMetrics {
-    pub encoding: String,
-    pub visible_tool_tokens: u64,
-    pub cumulative_context_tokens: u64,
-    pub model_visible_bytes: u64,
-    pub model_events: u64,
-    pub tool_calls: u64,
-    pub polling_calls: u64,
+    encoding: String,
+    pub(crate) visible_tool_tokens: u64,
+    pub(crate) cumulative_context_tokens: u64,
+    pub(crate) model_visible_bytes: u64,
+    model_events: u64,
+    tool_calls: u64,
+    polling_calls: u64,
     #[serde(default)]
-    pub protocol_polling_bytes: u64,
+    protocol_polling_bytes: u64,
 }
 
 impl Transcript {
-    pub fn to_jsonl(&self) -> Result<String, serde_json::Error> {
+    pub(crate) fn to_jsonl(&self) -> Result<String, serde_json::Error> {
         let mut output = String::new();
         for event in &self.events {
             output.push_str(&serde_json::to_string(event)?);
@@ -53,7 +53,7 @@ impl Transcript {
         Ok(output)
     }
 
-    pub fn measure(&self, encoding: &str) -> anyhow::Result<TranscriptMetrics> {
+    pub(crate) fn measure(&self, encoding: &str) -> anyhow::Result<TranscriptMetrics> {
         let tokenizer = tokenizer(encoding)?;
         let mut prior_context = String::new();
         let mut visible_tool_tokens = 0_u64;

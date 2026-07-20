@@ -32,7 +32,6 @@ pub struct LiveRun {
     pub workspace: PathBuf,
     pub cache_root: PathBuf,
     pub output_user_root: PathBuf,
-    pub run_result: Value,
     pub bazel_version: Option<String>,
     runtime: TempDir,
 }
@@ -214,7 +213,6 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
         workspace,
         cache_root,
         output_user_root,
-        run_result,
         bazel_version,
         runtime,
     })

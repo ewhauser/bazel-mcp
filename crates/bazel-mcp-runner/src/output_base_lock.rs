@@ -39,7 +39,7 @@ struct OutputBaseWaitTiming {
 }
 
 impl OutputBaseWaitStatus {
-    pub(crate) fn begin(&self, owner: Option<String>) {
+    fn begin(&self, owner: Option<String>) {
         let mut timing = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if timing.active_since.is_none() {
             timing.active_since = Some(Instant::now());
@@ -49,7 +49,7 @@ impl OutputBaseWaitStatus {
         }
     }
 
-    pub(crate) fn end(&self) {
+    fn end(&self) {
         let mut timing = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(started) = timing.active_since.take() {
             timing.accumulated = timing.accumulated.saturating_add(started.elapsed());

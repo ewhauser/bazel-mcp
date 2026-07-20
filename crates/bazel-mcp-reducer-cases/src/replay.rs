@@ -19,10 +19,10 @@ use crate::{
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReplayOutput {
-    pub event_count: usize,
-    pub terminal_error: Option<String>,
-    pub summary: InvocationSummary,
-    pub artifacts: Vec<Artifact>,
+    event_count: usize,
+    terminal_error: Option<String>,
+    pub(crate) summary: InvocationSummary,
+    pub(crate) artifacts: Vec<Artifact>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,15 +41,6 @@ struct RecordedProvenance {
     rules: BTreeMap<String, String>,
     origin_repository: Option<String>,
     origin_commit: Option<String>,
-}
-
-pub fn replay_case(case: &LoadedCase) -> Result<ReplayOutput> {
-    let evidence = case
-        .manifest
-        .evidence
-        .as_ref()
-        .context("case has no recorded evidence")?;
-    replay_with_evidence(case, evidence)
 }
 
 pub fn verify_recorded_case(case: &LoadedCase) -> Result<ReplayOutput> {

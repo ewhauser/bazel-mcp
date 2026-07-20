@@ -27,9 +27,9 @@ pub(crate) struct EncodedResult {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ExecutionResult<'a> {
-    pub(crate) record: &'a InvocationRecord,
-    pub(crate) tool_error: bool,
-    pub(crate) retained: bool,
+    record: &'a InvocationRecord,
+    tool_error: bool,
+    retained: bool,
 }
 
 impl<'a> ExecutionResult<'a> {
@@ -43,7 +43,7 @@ impl<'a> ExecutionResult<'a> {
     }
 
     #[must_use]
-    pub(crate) const fn ephemeral(record: &'a InvocationRecord) -> Self {
+    const fn ephemeral(record: &'a InvocationRecord) -> Self {
         Self {
             record,
             tool_error: false,

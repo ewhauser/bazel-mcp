@@ -34,7 +34,7 @@ pub enum AgenticAdapter {
 }
 
 impl AgenticAdapter {
-    pub const fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::ShellDefault => "shell-default",
             Self::ShellOptimized => "shell-optimized",
@@ -67,28 +67,27 @@ impl AgenticAdapter {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AgenticProjectManifest {
-    pub name: String,
-    pub url: String,
-    pub commit: String,
-    pub license: String,
-    pub bazel_version: String,
-    pub tasks: Vec<AgenticTask>,
+    name: String,
+    commit: String,
+    license: String,
+    bazel_version: String,
+    tasks: Vec<AgenticTask>,
     #[serde(skip)]
     resource_root: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AgenticTask {
-    pub name: String,
-    pub prompt_file: PathBuf,
-    pub workspace_overlay: PathBuf,
-    pub verification_overlay: Option<PathBuf>,
-    pub verify_command: String,
-    pub verify_args: Vec<String>,
+    name: String,
+    prompt_file: PathBuf,
+    workspace_overlay: PathBuf,
+    verification_overlay: Option<PathBuf>,
+    verify_command: String,
+    verify_args: Vec<String>,
     #[serde(default)]
-    pub protected_paths: Vec<PathBuf>,
+    protected_paths: Vec<PathBuf>,
     #[serde(default = "default_task_timeout_seconds")]
-    pub timeout_seconds: u64,
+    timeout_seconds: u64,
 }
 
 fn default_task_timeout_seconds() -> u64 {
@@ -194,113 +193,113 @@ pub struct AgenticConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticSample {
-    pub adapter: String,
-    pub task: String,
-    pub sample: u32,
-    pub verified: bool,
-    pub verifier_exit_code: Option<i32>,
-    pub protected_paths_unchanged: bool,
-    pub protected_path_violations: Vec<String>,
-    pub used_expected_bazel_path: bool,
-    pub shell_bazel_calls: u64,
-    pub mcp_bazel_run_calls: u64,
-    pub model_events: u64,
-    pub agent_message_events: u64,
-    pub tool_calls: u64,
-    pub file_change_events: u64,
-    pub command_output_bytes: u64,
-    pub mcp_output_bytes: u64,
-    pub changed_paths: Vec<String>,
-    pub patch_bytes: u64,
-    pub end_to_end_ms: u64,
-    pub verifier_ms: u64,
-    pub usage: ProviderUsage,
-    pub final_summary: String,
-    pub reported_validation: Vec<String>,
+    adapter: String,
+    task: String,
+    sample: u32,
+    verified: bool,
+    verifier_exit_code: Option<i32>,
+    protected_paths_unchanged: bool,
+    protected_path_violations: Vec<String>,
+    used_expected_bazel_path: bool,
+    shell_bazel_calls: u64,
+    mcp_bazel_run_calls: u64,
+    model_events: u64,
+    agent_message_events: u64,
+    tool_calls: u64,
+    file_change_events: u64,
+    command_output_bytes: u64,
+    mcp_output_bytes: u64,
+    changed_paths: Vec<String>,
+    patch_bytes: u64,
+    end_to_end_ms: u64,
+    verifier_ms: u64,
+    usage: ProviderUsage,
+    final_summary: String,
+    reported_validation: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticSummary {
-    pub adapter: String,
-    pub attempts: usize,
-    pub verified_solves: usize,
-    pub solve_rate_percent: f64,
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub uncached_input_tokens: u64,
-    pub output_tokens: u64,
-    pub reasoning_output_tokens: u64,
-    pub total_tokens: u64,
-    pub tokens_per_verified_solve: Option<f64>,
-    pub agent_message_events: u64,
-    pub tool_calls: u64,
-    pub command_output_bytes: u64,
-    pub mcp_output_bytes: u64,
-    pub end_to_end_ms: u64,
+    adapter: String,
+    attempts: usize,
+    verified_solves: usize,
+    solve_rate_percent: f64,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    uncached_input_tokens: u64,
+    output_tokens: u64,
+    reasoning_output_tokens: u64,
+    total_tokens: u64,
+    tokens_per_verified_solve: Option<f64>,
+    agent_message_events: u64,
+    tool_calls: u64,
+    command_output_bytes: u64,
+    mcp_output_bytes: u64,
+    end_to_end_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticWeightedSummary {
-    pub adapter: String,
-    pub cached_input_weight_percent: u32,
-    pub weighted_tokens: f64,
-    pub weighted_tokens_per_verified_solve: Option<f64>,
+    adapter: String,
+    cached_input_weight_percent: u32,
+    weighted_tokens: f64,
+    weighted_tokens_per_verified_solve: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticComparison {
-    pub baseline_adapter: String,
-    pub candidate_adapter: String,
-    pub paired_attempts: usize,
-    pub concordant_verified_solves: usize,
-    pub solve_rate_delta_percentage_points: f64,
-    pub total_token_reduction_percent: Estimate,
-    pub uncached_input_reduction_percent: Estimate,
-    pub concordant_total_token_reduction_percent: Option<Estimate>,
-    pub tokens_per_verified_solve_reduction_percent: Option<f64>,
+    baseline_adapter: String,
+    candidate_adapter: String,
+    paired_attempts: usize,
+    concordant_verified_solves: usize,
+    solve_rate_delta_percentage_points: f64,
+    total_token_reduction_percent: Estimate,
+    uncached_input_reduction_percent: Estimate,
+    concordant_total_token_reduction_percent: Option<Estimate>,
+    tokens_per_verified_solve_reduction_percent: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticWeightedComparison {
-    pub baseline_adapter: String,
-    pub candidate_adapter: String,
-    pub cached_input_weight_percent: u32,
-    pub weighted_token_reduction_percent: Estimate,
+    baseline_adapter: String,
+    candidate_adapter: String,
+    cached_input_weight_percent: u32,
+    weighted_token_reduction_percent: Estimate,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticTaskComparison {
-    pub task: String,
-    pub baseline_adapter: String,
-    pub candidate_adapter: String,
-    pub paired_attempts: usize,
-    pub baseline_verified_solves: usize,
-    pub candidate_verified_solves: usize,
-    pub total_token_reduction_percent: f64,
-    pub active_token_reduction_percent: f64,
-    pub tool_output_byte_reduction_percent: f64,
-    pub end_to_end_reduction_percent: f64,
+    task: String,
+    baseline_adapter: String,
+    candidate_adapter: String,
+    paired_attempts: usize,
+    baseline_verified_solves: usize,
+    candidate_verified_solves: usize,
+    total_token_reduction_percent: f64,
+    active_token_reduction_percent: f64,
+    tool_output_byte_reduction_percent: f64,
+    end_to_end_reduction_percent: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgenticReport {
-    pub schema_version: u32,
-    pub provider: String,
-    pub provider_version: String,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub project: String,
-    pub commit: String,
-    pub bazel_version: String,
-    pub adapter_order_seed: u64,
-    pub adapter_order_strategy: String,
-    pub environment: EnvironmentMetadata,
-    pub samples: Vec<AgenticSample>,
-    pub summaries: Vec<AgenticSummary>,
-    pub comparisons: Vec<AgenticComparison>,
-    pub task_comparisons: Vec<AgenticTaskComparison>,
-    pub weighted_summaries: Vec<AgenticWeightedSummary>,
-    pub weighted_comparisons: Vec<AgenticWeightedComparison>,
+    schema_version: u32,
+    provider: String,
+    provider_version: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    project: String,
+    commit: String,
+    bazel_version: String,
+    adapter_order_seed: u64,
+    adapter_order_strategy: String,
+    environment: EnvironmentMetadata,
+    samples: Vec<AgenticSample>,
+    summaries: Vec<AgenticSummary>,
+    comparisons: Vec<AgenticComparison>,
+    task_comparisons: Vec<AgenticTaskComparison>,
+    weighted_summaries: Vec<AgenticWeightedSummary>,
+    weighted_comparisons: Vec<AgenticWeightedComparison>,
 }
 
 impl AgenticReport {
@@ -2084,7 +2083,6 @@ mod tests {
             repository_root: repository_root.to_owned(),
             project: AgenticProjectManifest {
                 name: "test".to_owned(),
-                url: "local".to_owned(),
                 commit,
                 license: "test".to_owned(),
                 bazel_version: "9.1.0".to_owned(),

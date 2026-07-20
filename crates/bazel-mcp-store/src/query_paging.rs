@@ -294,7 +294,7 @@ struct BoundedLineReader<R> {
     reader: R,
     offset: u64,
     ordinal: u64,
-    pub(crate) limit: usize,
+    limit: usize,
     value: Vec<u8>,
 }
 

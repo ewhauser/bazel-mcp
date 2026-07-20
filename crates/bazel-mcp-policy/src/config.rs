@@ -1,6 +1,5 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use bazel_mcp_types::BazelCommand;
 use serde::{Deserialize, Serialize};
 
 use crate::{PolicyError, redaction::Redactor};
@@ -10,10 +9,10 @@ use crate::{PolicyError, redaction::Redactor};
 #[serde(default)]
 pub struct RawPolicyConfig {
     pub allowed_roots: Vec<PathBuf>,
-    pub allowed_commands: BTreeSet<String>,
-    pub denied_commands: BTreeSet<String>,
-    pub environment_allowlist: BTreeSet<String>,
-    pub redaction_patterns: Vec<String>,
+    allowed_commands: BTreeSet<String>,
+    denied_commands: BTreeSet<String>,
+    environment_allowlist: BTreeSet<String>,
+    redaction_patterns: Vec<String>,
     pub bazel_executable: Option<PathBuf>,
 }
 
@@ -83,15 +82,9 @@ impl Default for PolicyConfig {
 
 impl PolicyConfig {
     /// Validate policy-owned configuration before it reaches request handling.
-    pub fn validate(&self) -> Result<(), PolicyError> {
+    fn validate(&self) -> Result<(), PolicyError> {
         Redactor::new(&self.redaction_patterns)?;
         Ok(())
-    }
-
-    #[must_use]
-    pub fn permits(&self, command: &BazelCommand) -> bool {
-        let name = command.as_str();
-        self.allowed_commands.contains(name) && !self.denied_commands.contains(name)
     }
 }
 
