@@ -5,24 +5,24 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectManifest {
-    pub name: String,
-    pub url: String,
-    pub release_tag: String,
-    pub commit: String,
-    pub license: String,
-    pub bazel_version: String,
+    pub(crate) name: String,
+    url: String,
+    release_tag: String,
+    pub(crate) commit: String,
+    license: String,
+    pub(crate) bazel_version: String,
     pub scenarios: Vec<Scenario>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scenario {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub expected_exit: i32,
-    pub expected_cause: Option<String>,
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) expected_exit: i32,
+    pub(crate) expected_cause: Option<String>,
     #[serde(default)]
-    pub cache_condition: String,
+    cache_condition: String,
 }
 
 impl ProjectManifest {

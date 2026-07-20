@@ -4,10 +4,11 @@ Install the pinned Rust toolchain, Bazelisk, Git, a C++ toolchain, and the tools
 provided by `nix develop`. Run `make setup-hooks` once per checkout.
 
 Use the root Makefile as the stable interface. Before opening a pull request,
-run `make check` and `make test`; run `make test-bazel-matrix` for runner, BEP,
-policy, or reducer changes. Reducer changes require reviewed fixture/snapshot
-diffs. Raw fixtures must not contain usernames, hostnames, credentials, or
-absolute local paths.
+run `make check`, `make test`, and `make hawk`; Hawk requires the prebuilt 0.1.8
+release on `PATH` and its pinned Rust 1.97.0 toolchain. Run
+`make test-bazel-matrix` for runner, BEP, policy, or reducer changes. Reducer
+changes require reviewed fixture/snapshot diffs. Raw fixtures must not contain
+usernames, hostnames, credentials, or absolute local paths.
 
 Reducer work should add or update a manifest-driven live example and recorded
 contract. Run `make test-reducer-corpus`; use the explicitly gated record and

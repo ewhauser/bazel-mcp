@@ -15,7 +15,7 @@ pub use build::{
     BepAccumulator, ReductionInput, RunBepOutcome, StreamReductionOutput,
     extract_canonical_arguments, finalize_diagnostics, reduce_artifacts, reduce_invocation,
 };
-pub use coverage::{CoverageError, parse_lcov, parse_lcov_reader};
+pub use coverage::{CoverageError, parse_lcov_reader};
 pub use diagnostics::map_diagnostic as map_text_diagnostic;
 pub use extension::{
     CustomReducer, ReducerApplyReport, ReducerContext, ReducerError, ReducerEvent,

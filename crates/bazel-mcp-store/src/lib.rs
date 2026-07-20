@@ -18,12 +18,9 @@ mod retention;
 mod storage;
 mod telemetry;
 
-pub use config::{RawRetentionConfig, RetentionConfig, RetentionConfigError};
+pub use config::{RawRetentionConfig, RetentionConfig};
 pub use files::InvocationPaths;
-pub use record::{
-    CoverageHeader, HydratedInvocation, InvocationDetails, InvocationHeader,
-    InvocationSummaryHeader,
-};
+pub use record::{CoverageHeader, InvocationHeader, InvocationSummaryHeader};
 pub use storage::{InvocationCompletion, Store, StoreError, StoreIoStats, StoreStartupStats};
 
 /// Parser entry point used by adversarial cursor tests and fuzzing.

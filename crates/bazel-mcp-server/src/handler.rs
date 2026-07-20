@@ -117,7 +117,7 @@ pub struct CancelParams {
 
 impl BazelMcpServer {
     #[must_use]
-    pub fn new(runner: InvocationService, result_encoding: ResultEncoding) -> Self {
+    pub(crate) fn new(runner: InvocationService, result_encoding: ResultEncoding) -> Self {
         let result_encoder = ResultEncoder::new(result_encoding);
         Self {
             runner,
@@ -133,7 +133,7 @@ impl BazelMcpServer {
     }
 
     #[must_use]
-    pub fn with_progress_timing(
+    pub(crate) fn with_progress_timing(
         mut self,
         initial_delay: std::time::Duration,
         interval: std::time::Duration,
@@ -144,7 +144,7 @@ impl BazelMcpServer {
     }
 
     #[must_use]
-    pub fn with_task_execution(
+    pub(crate) fn with_task_execution(
         mut self,
         policy: McpExecutionPolicy,
         ttl: Duration,

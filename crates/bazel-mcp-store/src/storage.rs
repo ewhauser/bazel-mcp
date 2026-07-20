@@ -74,9 +74,9 @@ pub struct Store {
 
 pub(crate) struct StoreInner {
     pub(crate) index: IndexCoordinator,
-    pub(crate) manifests: ManifestRepository,
-    pub(crate) leases: LeaseManager,
-    pub(crate) changes: ChangeCoordinator,
+    manifests: ManifestRepository,
+    leases: LeaseManager,
+    changes: ChangeCoordinator,
     pub(crate) metrics: StoreMetrics,
     startup_stats: StoreStartupStats,
 }
@@ -576,7 +576,8 @@ impl Store {
     /// Page raw query output after applying a caller-supplied text transform.
     /// The transform runs before filtering or returning values, allowing the
     /// runner to redact without persisting a second copy of query results.
-    pub async fn page_query_rows_mapped<F>(
+    #[cfg(test)]
+    async fn page_query_rows_mapped<F>(
         &self,
         id: InvocationId,
         filter: Option<&str>,

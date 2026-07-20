@@ -7,8 +7,6 @@ use bazel_mcp_types::{BazelCommand, CommandClass};
 
 use crate::PolicyError;
 
-pub const INTERNAL_BEP_FLAG: &str = "--build_event_binary_file";
-
 const MAX_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_ARGUMENT_COUNT: usize = 10_000;
 const MAX_ARGUMENTS_BYTES: usize = 2 * 1024 * 1024;

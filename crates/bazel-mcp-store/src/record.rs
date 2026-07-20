@@ -16,19 +16,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct InvocationHeader {
     pub request: InvocationRequest,
     pub state: InvocationState,
-    pub started_at_ms: Option<i64>,
+    started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub termination: Option<Termination>,
     pub summary: Option<InvocationSummaryHeader>,
-    pub run: Option<RunSummary>,
+    run: Option<RunSummary>,
     pub metrics: InvocationMetrics,
-    pub canonical_arguments: Option<Vec<String>>,
-    pub cancellation_reason: Option<String>,
+    canonical_arguments: Option<Vec<String>>,
+    pub(crate) cancellation_reason: Option<String>,
 }
 
 impl InvocationHeader {
     #[must_use]
-    pub fn from_record(record: &InvocationRecord) -> Self {
+    pub(crate) fn from_record(record: &InvocationRecord) -> Self {
         record.clone().into()
     }
 }
@@ -98,22 +98,22 @@ impl<'de> Deserialize<'de> for InvocationHeader {
 /// Summary fields available without loading the detail sidecar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvocationSummaryHeader {
-    pub success: bool,
+    success: bool,
     pub headline: String,
     pub target_counts: TargetCounts,
-    pub diagnostics: Vec<Diagnostic>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
     pub test_counts: TestCounts,
-    pub coverage: Option<CoverageHeader>,
-    pub query_sample: Vec<QueryRow>,
-    pub query_result_count: Option<u64>,
-    pub elapsed_ms: u64,
-    pub truncated: bool,
-    pub inspect_hint: Option<InspectHint>,
+    coverage: Option<CoverageHeader>,
+    query_sample: Vec<QueryRow>,
+    pub(crate) query_result_count: Option<u64>,
+    elapsed_ms: u64,
+    truncated: bool,
+    inspect_hint: Option<InspectHint>,
 }
 
 impl InvocationSummaryHeader {
     #[must_use]
-    pub fn into_summary(self) -> InvocationSummary {
+    fn into_summary(self) -> InvocationSummary {
         InvocationSummary {
             success: self.success,
             headline: self.headline,
@@ -159,9 +159,9 @@ impl From<InvocationSummary> for InvocationSummaryHeader {
 /// Aggregate coverage values retained in the compact manifest.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoverageHeader {
-    pub lines_found: u64,
-    pub lines_hit: u64,
-    pub coverage_percent: f64,
+    lines_found: u64,
+    lines_hit: u64,
+    coverage_percent: f64,
 }
 
 impl CoverageHeader {
@@ -194,14 +194,14 @@ impl From<CoverageSummary> for CoverageHeader {
 /// Large collections stored in `details.json` rather than the manifest.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InvocationDetails {
-    pub targets: Vec<TargetResult>,
-    pub tests: Vec<TestResult>,
-    pub coverage_files: Vec<CoverageFile>,
+    pub(crate) targets: Vec<TargetResult>,
+    pub(crate) tests: Vec<TestResult>,
+    pub(crate) coverage_files: Vec<CoverageFile>,
 }
 
 impl InvocationDetails {
     #[must_use]
-    pub fn from_record(record: &InvocationRecord) -> Self {
+    pub(crate) fn from_record(record: &InvocationRecord) -> Self {
         let Some(summary) = &record.summary else {
             return Self::default();
         };
@@ -227,7 +227,7 @@ impl InvocationDetails {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.targets.is_empty() && self.tests.is_empty() && self.coverage_files.is_empty()
     }
 }
@@ -235,13 +235,14 @@ impl InvocationDetails {
 /// A manifest header combined with its detail sidecar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HydratedInvocation {
-    pub header: InvocationHeader,
-    pub details: InvocationDetails,
+    pub(crate) header: InvocationHeader,
+    pub(crate) details: InvocationDetails,
 }
 
 impl HydratedInvocation {
     #[must_use]
-    pub fn from_record(record: &InvocationRecord) -> Self {
+    #[cfg(test)]
+    fn from_record(record: &InvocationRecord) -> Self {
         Self {
             header: InvocationHeader::from_record(record),
             details: InvocationDetails::from_record(record),
@@ -249,7 +250,7 @@ impl HydratedInvocation {
     }
 
     #[must_use]
-    pub fn into_record(self) -> InvocationRecord {
+    pub(crate) fn into_record(self) -> InvocationRecord {
         let mut record = self.header.into_record();
         self.details.hydrate(&mut record);
         record

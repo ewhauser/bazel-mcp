@@ -10,11 +10,10 @@ mod tasks;
 pub use agent::{LaunchMode, agent_log_filter, detect_launch, run_agent};
 pub use bazel_mcp_runner::BepTransport;
 pub use config::{
-    Cli, McpConfig, McpExecutionPolicy, RawAspectConfig, RawMcpConfig, RawPolicyConfig,
-    RawRetentionConfig, RawRunnerConfig, RawServerConfig, RawStarlarkConfig, ResultEncoding,
-    RetentionConfig, ValidatedServerConfig,
+    Cli, McpConfig, McpExecutionPolicy, RawAspectConfig, RawPolicyConfig, RawRetentionConfig,
+    RawRunnerConfig, RawStarlarkConfig, ResultEncoding, RetentionConfig, ValidatedServerConfig,
 };
-pub use handler::BazelMcpServer;
+pub(crate) use handler::BazelMcpServer;
 
 use anyhow::Context;
 use bazel_mcp_runner::{InvocationService, RunnerConfig};

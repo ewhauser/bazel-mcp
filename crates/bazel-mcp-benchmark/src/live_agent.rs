@@ -48,75 +48,75 @@ pub struct CodexLiveConfig {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderUsage {
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub output_tokens: u64,
-    pub reasoning_output_tokens: u64,
+    pub(crate) input_tokens: u64,
+    pub(crate) cached_input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) reasoning_output_tokens: u64,
 }
 
 impl ProviderUsage {
-    pub fn uncached_input_tokens(&self) -> u64 {
+    pub(crate) fn uncached_input_tokens(&self) -> u64 {
         self.input_tokens.saturating_sub(self.cached_input_tokens)
     }
 
-    pub fn total_tokens(&self) -> u64 {
+    pub(crate) fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiveAgentSample {
-    pub adapter: String,
-    pub scenario: String,
-    pub cache_condition: String,
-    pub sample: u32,
-    pub expected_exit: i32,
-    pub reported_exit: i32,
-    pub expected_cause: Option<String>,
-    pub diagnostic_found: bool,
-    pub used_expected_tool: bool,
-    pub end_to_end_ms: u64,
-    pub model_events: u64,
-    pub tool_calls: u64,
-    pub usage: ProviderUsage,
-    pub final_summary: String,
+    adapter: String,
+    scenario: String,
+    cache_condition: String,
+    sample: u32,
+    expected_exit: i32,
+    reported_exit: i32,
+    expected_cause: Option<String>,
+    diagnostic_found: bool,
+    used_expected_tool: bool,
+    end_to_end_ms: u64,
+    model_events: u64,
+    tool_calls: u64,
+    usage: ProviderUsage,
+    final_summary: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiveAgentSummary {
-    pub adapter: String,
-    pub observations: usize,
-    pub correct_observations: usize,
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub uncached_input_tokens: u64,
-    pub output_tokens: u64,
-    pub reasoning_output_tokens: u64,
-    pub total_tokens: u64,
+    adapter: String,
+    observations: usize,
+    correct_observations: usize,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    uncached_input_tokens: u64,
+    output_tokens: u64,
+    reasoning_output_tokens: u64,
+    total_tokens: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiveAgentComparison {
-    pub baseline_adapter: String,
-    pub candidate_adapter: String,
-    pub input_token_reduction_percent: f64,
-    pub uncached_input_token_reduction_percent: f64,
-    pub total_token_reduction_percent: f64,
+    baseline_adapter: String,
+    candidate_adapter: String,
+    input_token_reduction_percent: f64,
+    uncached_input_token_reduction_percent: f64,
+    total_token_reduction_percent: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiveAgentReport {
-    pub schema_version: u32,
-    pub provider: String,
-    pub provider_version: String,
-    pub model: Option<String>,
-    pub project: String,
-    pub commit: String,
-    pub bazel_version: String,
-    pub environment: EnvironmentMetadata,
-    pub samples: Vec<LiveAgentSample>,
-    pub summaries: Vec<LiveAgentSummary>,
-    pub comparisons: Vec<LiveAgentComparison>,
+    schema_version: u32,
+    provider: String,
+    provider_version: String,
+    model: Option<String>,
+    project: String,
+    commit: String,
+    bazel_version: String,
+    environment: EnvironmentMetadata,
+    samples: Vec<LiveAgentSample>,
+    summaries: Vec<LiveAgentSummary>,
+    comparisons: Vec<LiveAgentComparison>,
 }
 
 impl LiveAgentReport {

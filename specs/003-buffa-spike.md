@@ -171,8 +171,8 @@ user-plus-system CPU time. Do not use a single wall-time result.
   repeated-element memory amplification in owned and view decoding. Existing
   frame, stream, and event limits bound input bytes but not the number of
   repeated elements inside one frame. The current trust boundary is a local
-  BEP file emitted by the Bazel process started by this server; `decode_event`
-  must not be repurposed for arbitrary remote protobuf input. Track the issue
+  BEP file emitted by the Bazel process started by this server; the BEP decode
+  pipeline must not be repurposed for arbitrary remote protobuf input. Track the issue
   and enable an upstream decoded-element budget when one is available.
 - The open reflection/WKT conformance issue is outside this integration: the
   BEP subset uses neither Buffa reflection nor its well-known-type adapters.

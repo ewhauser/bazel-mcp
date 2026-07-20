@@ -8,10 +8,14 @@
 	fuzz-run harden-release check-release-security \
 	mcp-conformance test-claude-code test-claude-code-live generate-sbom \
 	reducer-cases-list test-reducer-corpus test-reducer-live record-reducer-case \
-	record-reducer-replay accept-reducer-case generate-reducer-case-schema check-reducer-case-schema
+	record-reducer-replay accept-reducer-case generate-reducer-case-schema check-reducer-case-schema hawk
 
 ARGS ?= --help
 BAZEL ?= bazelisk
+HAWK_TOOLCHAIN ?= 1.97.0
+HAWK_CARGO ?= $(shell rustup which --toolchain $(HAWK_TOOLCHAIN) cargo)
+HAWK_RUSTC ?= $(shell rustup which --toolchain $(HAWK_TOOLCHAIN) rustc)
+HAWK_TARGET_DIR ?= target/hawk
 BAZEL_BUILD_FLAGS ?=
 FUZZ_TARGET ?= bep_framing
 FUZZ_ARGS ?= -max_total_time=60
@@ -100,6 +104,11 @@ check:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	$(NIX_DEVELOP) cargo shear
+
+hawk:
+	PATH="$(dir $(HAWK_CARGO)):$$PATH" CARGO="$(HAWK_CARGO)" RUSTC="$(HAWK_RUSTC)" \
+		"$(HAWK_CARGO)" hawk check --manifest-path Cargo.toml \
+		--target-dir "$(HAWK_TARGET_DIR)" -D warnings
 
 bench:
 	cargo bench -p bazel-mcp-benchmark

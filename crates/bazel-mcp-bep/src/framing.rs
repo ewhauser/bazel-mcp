@@ -38,15 +38,8 @@ pub struct BepEvent {
 }
 
 impl BepEvent {
-    /// Decode and retain an already-owned protobuf frame without copying it.
-    pub fn decode(frame: Vec<u8>) -> Result<Self, buffa::DecodeError> {
-        Ok(Self {
-            inner: BuildEventOwnedView::decode(Bytes::from(frame))?,
-        })
-    }
-
     /// Decode a borrowed frame by copying only the frame backing allocation.
-    pub fn decode_slice(frame: &[u8]) -> Result<Self, buffa::DecodeError> {
+    fn decode_slice(frame: &[u8]) -> Result<Self, buffa::DecodeError> {
         Ok(Self {
             inner: BuildEventOwnedView::decode(Bytes::copy_from_slice(frame))?,
         })
@@ -62,11 +55,6 @@ impl BepEvent {
     #[must_use]
     pub fn view(&self) -> &BuildEventView<'_> {
         self.inner.view()
-    }
-
-    #[must_use]
-    pub fn frame_bytes(&self) -> &[u8] {
-        self.inner.bytes()
     }
 }
 
@@ -160,7 +148,7 @@ impl IncrementalStreamDecoder {
     /// Once a terminal framing, limit, or decode error is encountered, later
     /// chunks are ignored and the complete prefix remains available from
     /// [`Self::finish`].
-    pub fn push<F>(&mut self, input: &[u8], mut visitor: F)
+    fn push<F>(&mut self, input: &[u8], mut visitor: F)
     where
         F: FnMut(BepEvent),
     {
@@ -176,7 +164,7 @@ impl IncrementalStreamDecoder {
     /// [`IncrementalStreamControl::ResetAfterFrame`] resets stream byte/event
     /// accounting after that frame, which lets retry-aware transports retain
     /// only the next attempt even when two writers' bytes arrive in one read.
-    pub fn push_framed<F>(&mut self, input: &[u8], mut visitor: F)
+    fn push_framed<F>(&mut self, input: &[u8], mut visitor: F)
     where
         F: FnMut(BepEvent, &[u8]) -> IncrementalStreamControl,
     {
@@ -593,11 +581,6 @@ pub fn encode_frame<M: Message>(message: &M) -> Vec<u8> {
     write_varint(body.len() as u64, &mut framed);
     framed.extend_from_slice(&body);
     framed
-}
-
-/// Decode a single borrowed frame into a retained zero-copy event handle.
-pub fn decode_event(frame: &[u8]) -> Result<BepEvent, buffa::DecodeError> {
-    BepEvent::decode_slice(frame)
 }
 
 /// Decode an event-id submessage as a borrowed view into its parent event.

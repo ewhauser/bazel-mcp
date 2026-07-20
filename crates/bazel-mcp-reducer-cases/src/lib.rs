@@ -15,7 +15,7 @@ pub use manifest::{
 };
 pub use mcp::{LiveOptions, LiveRun, run_live_case};
 pub use replay::{
-    ReplayOutput, replay_case, replay_with_evidence, verify_case_contract, verify_case_evidence,
+    ReplayOutput, replay_with_evidence, verify_case_contract, verify_case_evidence,
     verify_recorded_case,
 };
 pub use sanitize::{sanitize_binary, sanitize_text, verify_sanitized_evidence};
@@ -24,4 +24,4 @@ pub use semantics::{
     verify_live_replay_parity,
 };
 
-pub const CASE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const CASE_SCHEMA_VERSION: u32 = 1;

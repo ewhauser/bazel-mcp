@@ -78,8 +78,8 @@ impl Default for EvidenceSpec {
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReplaySpec {
-    pub max_items: usize,
-    pub max_bytes: usize,
+    pub(crate) max_items: usize,
+    pub(crate) max_bytes: usize,
 }
 
 impl Default for ReplaySpec {
@@ -119,54 +119,54 @@ pub struct CaseExpectation {
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticExpectation {
     #[serde(default)]
-    pub rank: Option<usize>,
+    pub(crate) rank: Option<usize>,
     #[serde(default)]
-    pub severity: Option<String>,
+    pub(crate) severity: Option<String>,
     #[serde(default)]
-    pub category: Option<String>,
+    pub(crate) category: Option<String>,
     #[serde(default)]
-    pub message_equals: Option<String>,
+    pub(crate) message_equals: Option<String>,
     #[serde(default)]
-    pub message_prefix: Option<String>,
+    pub(crate) message_prefix: Option<String>,
     #[serde(default)]
-    pub message_contains: Option<String>,
+    pub(crate) message_contains: Option<String>,
     #[serde(default)]
-    pub path: Option<String>,
+    pub(crate) path: Option<String>,
     #[serde(default)]
-    pub line: Option<u32>,
+    pub(crate) line: Option<u32>,
     #[serde(default)]
-    pub column: Option<u32>,
+    pub(crate) column: Option<u32>,
     #[serde(default)]
-    pub target: Option<String>,
+    pub(crate) target: Option<String>,
     #[serde(default)]
-    pub action: Option<String>,
+    pub(crate) action: Option<String>,
     #[serde(default)]
-    pub repetition_count: Option<u32>,
+    pub(crate) repetition_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactExpectation {
     #[serde(default)]
-    pub name_equals: Option<String>,
+    pub(crate) name_equals: Option<String>,
     #[serde(default)]
-    pub name_contains: Option<String>,
+    pub(crate) name_contains: Option<String>,
     #[serde(default)]
-    pub kind: Option<String>,
+    pub(crate) kind: Option<String>,
     #[serde(default)]
-    pub uri_contains: Option<String>,
+    pub(crate) uri_contains: Option<String>,
     #[serde(default)]
-    pub locally_available: Option<bool>,
+    pub(crate) locally_available: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AbsentExpectation {
-    pub message_contains: Vec<String>,
-    pub path_contains: Vec<String>,
-    pub target_contains: Vec<String>,
-    pub artifact_uri_contains: Vec<String>,
-    pub raw_contains: Vec<String>,
+    pub(crate) message_contains: Vec<String>,
+    pub(crate) path_contains: Vec<String>,
+    pub(crate) target_contains: Vec<String>,
+    pub(crate) artifact_uri_contains: Vec<String>,
+    pub(crate) raw_contains: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -196,7 +196,7 @@ impl LoadedCase {
 }
 
 impl CaseManifest {
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == CASE_SCHEMA_VERSION,
             "case {} uses schema {}, expected {}",

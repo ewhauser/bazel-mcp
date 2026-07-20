@@ -11,7 +11,8 @@ pub enum CoverageError {
     Io(#[from] std::io::Error),
 }
 
-pub fn parse_lcov(input: &str) -> Result<CoverageSummary, CoverageError> {
+#[cfg(test)]
+fn parse_lcov(input: &str) -> Result<CoverageSummary, CoverageError> {
     parse_lcov_reader(std::io::Cursor::new(input.as_bytes()))
 }
 

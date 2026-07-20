@@ -7,9 +7,9 @@ use thiserror::Error;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RawRetentionConfig {
-    pub retention_days: u64,
-    pub maximum_storage_bytes: u64,
-    pub retention_cleanup_interval_seconds: u64,
+    retention_days: u64,
+    maximum_storage_bytes: u64,
+    retention_cleanup_interval_seconds: u64,
 }
 
 impl Default for RawRetentionConfig {

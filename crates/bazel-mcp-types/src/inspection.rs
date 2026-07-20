@@ -21,7 +21,7 @@ pub enum InspectView {
 }
 
 impl InspectView {
-    pub const FOLLOW_UP: [Self; 9] = [
+    const FOLLOW_UP: [Self; 9] = [
         Self::Summary,
         Self::Metrics,
         Self::Diagnostics,
@@ -80,22 +80,6 @@ impl AvailableViews {
     #[must_use]
     pub fn follow_up() -> Self {
         Self(InspectView::FOLLOW_UP.to_vec())
-    }
-
-    #[must_use]
-    pub fn contains(&self, view: InspectView) -> bool {
-        self.0.contains(&view)
-    }
-
-    #[must_use]
-    pub fn has_details(&self) -> bool {
-        self.0
-            .iter()
-            .any(|view| !matches!(view, InspectView::Summary | InspectView::Metrics))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = InspectView> + '_ {
-        self.0.iter().copied()
     }
 }
 
@@ -189,7 +173,7 @@ pub enum InspectPayload {
 
 impl InspectPayload {
     #[must_use]
-    pub fn view(&self) -> InspectView {
+    fn view(&self) -> InspectView {
         match self {
             Self::Summary(_) => InspectView::Summary,
             Self::Metrics(_) => InspectView::Metrics,
@@ -224,7 +208,7 @@ impl InspectPayload {
         self.len() == 0
     }
 
-    pub fn truncate(&mut self, len: usize) {
+    fn truncate(&mut self, len: usize) {
         match self {
             Self::Summary(items) => items.truncate(len),
             Self::Metrics(items) => items.truncate(len),
@@ -260,17 +244,17 @@ impl Serialize for InspectPayload {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct InspectResult {
-    pub invocation_id: Option<InvocationId>,
-    pub view: InspectView,
+    invocation_id: Option<InvocationId>,
+    view: InspectView,
     pub items: InspectPayload,
-    pub total_count: Option<u64>,
-    pub filtered_count: Option<u64>,
+    total_count: Option<u64>,
+    filtered_count: Option<u64>,
     pub next_cursor: Option<String>,
     pub truncated: bool,
     #[serde(skip)]
-    pub start_cursor: Option<String>,
+    start_cursor: Option<String>,
     #[serde(skip)]
-    pub item_cursors: Vec<String>,
+    item_cursors: Vec<String>,
 }
 
 impl InspectResult {

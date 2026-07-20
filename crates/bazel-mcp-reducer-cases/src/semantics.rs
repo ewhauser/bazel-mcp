@@ -7,19 +7,19 @@ use crate::{ArtifactExpectation, CaseExpectation, DiagnosticExpectation, ReplayO
 
 #[derive(Clone, Debug)]
 pub struct CaseObservation {
-    pub state: String,
+    pub(crate) state: String,
     pub exit_code: Option<i32>,
-    pub headline: String,
-    pub inspect_hint: Option<String>,
-    pub diagnostics: Vec<Diagnostic>,
-    pub artifacts: Vec<Artifact>,
-    pub visible_bytes: usize,
-    pub raw_text: String,
+    pub(crate) headline: String,
+    pub(crate) inspect_hint: Option<String>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) artifacts: Vec<Artifact>,
+    pub(crate) visible_bytes: usize,
+    pub(crate) raw_text: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationFailure {
-    pub messages: Vec<String>,
+    messages: Vec<String>,
 }
 
 impl fmt::Display for VerificationFailure {

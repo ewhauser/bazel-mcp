@@ -273,10 +273,7 @@ pub(crate) fn artifact_matches_test(artifact: &bazel_mcp_types::Artifact, label:
     artifact.uri.replace('\\', "/").contains(&fragment)
 }
 
-pub(crate) fn set_test_log_unavailable(
-    summary: &mut bazel_mcp_types::InvocationSummary,
-    reason: &str,
-) {
+fn set_test_log_unavailable(summary: &mut bazel_mcp_types::InvocationSummary, reason: &str) {
     for test in summary
         .tests
         .iter_mut()

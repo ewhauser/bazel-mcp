@@ -70,18 +70,18 @@ pub enum BepTransport {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RawRunnerConfig {
-    pub default_timeout_seconds: u64,
-    pub maximum_timeout_seconds: u64,
-    pub maximum_run_output_bytes: u64,
-    pub cancellation_interrupt_grace_seconds: u64,
-    pub cancellation_terminate_grace_seconds: u64,
-    pub global_concurrency: usize,
+    default_timeout_seconds: u64,
+    maximum_timeout_seconds: u64,
+    maximum_run_output_bytes: u64,
+    cancellation_interrupt_grace_seconds: u64,
+    cancellation_terminate_grace_seconds: u64,
+    global_concurrency: usize,
     pub output_user_root: Option<PathBuf>,
-    pub isolated_bazel_server_idle_seconds: u64,
-    pub supported_bazel_major_versions: BTreeSet<u32>,
-    pub allow_unsupported_bazel_versions: bool,
-    pub version_check_timeout_seconds: u64,
-    pub maximum_pending_invocations: usize,
+    isolated_bazel_server_idle_seconds: u64,
+    supported_bazel_major_versions: BTreeSet<u32>,
+    allow_unsupported_bazel_versions: bool,
+    version_check_timeout_seconds: u64,
+    maximum_pending_invocations: usize,
     pub bep_transport: BepTransport,
     pub aspect: RawAspectConfig,
     pub starlark: RawStarlarkConfig,
@@ -161,7 +161,7 @@ impl RunnerConfig {
     /// Keeping this check on the runner configuration lets configuration
     /// frontends reject invalid settings without duplicating the runner's
     /// invariants.
-    pub fn validate(&self) -> Result<(), RunnerError> {
+    fn validate(&self) -> Result<(), RunnerError> {
         if self.global_concurrency == 0 {
             return Err(RunnerError::InvalidConfiguration(
                 "global concurrency must be greater than zero",
@@ -406,9 +406,9 @@ pub struct InvocationProgress {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CancelResult {
-    pub invocation_id: InvocationId,
-    pub prior_state: InvocationState,
-    pub current_state: InvocationState,
+    invocation_id: InvocationId,
+    prior_state: InvocationState,
+    current_state: InvocationState,
     pub cancellation_requested: bool,
 }
 
@@ -1114,7 +1114,7 @@ impl InvocationService {
         Ok(())
     }
 
-    pub async fn invocation_state(&self, id: InvocationId) -> Result<InvocationState, RunnerError> {
+    async fn invocation_state(&self, id: InvocationId) -> Result<InvocationState, RunnerError> {
         if let Some(state) = self.scheduler.lifecycle_state(id) {
             return Ok(state);
         }

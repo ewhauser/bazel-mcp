@@ -22,4 +22,4 @@ pub use report::{
     AdapterMetrics, BaselineComparison, BenchmarkReport, EnvironmentMetadata, Estimate,
     SummaryStatistics,
 };
-pub use transcript::{Transcript, TranscriptEvent, TranscriptKind, TranscriptMetrics};
+pub use transcript::TranscriptMetrics;

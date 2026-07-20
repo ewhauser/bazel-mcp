@@ -192,7 +192,10 @@ impl Store {
         .await
     }
 
-    pub async fn delete_expired_deferred_results(&self, now_ms: i64) -> Result<usize, StoreError> {
+    pub(crate) async fn delete_expired_deferred_results(
+        &self,
+        now_ms: i64,
+    ) -> Result<usize, StoreError> {
         self.refresh_index_if_stale().await?;
         let ids: Vec<_> = {
             let index = self.inner.index.read().await;

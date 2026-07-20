@@ -29,15 +29,6 @@ impl DeferredRetrieval {
             Self::InlineResult => "inline_result",
         }
     }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "separate_result" => Some(Self::SeparateResult),
-            "inline_result" => Some(Self::InlineResult),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -46,50 +37,12 @@ pub enum DeferredTerminalState {
     Cancelled,
 }
 
-impl DeferredTerminalState {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "cancelled" => Some(Self::Cancelled),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeferredFailureKind {
     Queue,
     Execution,
     Internal,
-}
-
-impl DeferredFailureKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Queue => "queue",
-            Self::Execution => "execution",
-            Self::Internal => "internal",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "queue" => Some(Self::Queue),
-            "execution" => Some(Self::Execution),
-            "internal" => Some(Self::Internal),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -131,7 +84,7 @@ impl DeferredResultRecord {
     }
 
     #[must_use]
-    pub fn configured_ttl_ms(&self) -> i64 {
+    fn configured_ttl_ms(&self) -> i64 {
         self.expires_at_ms.saturating_sub(self.updated_at_ms).max(1)
     }
 

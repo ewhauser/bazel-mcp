@@ -1430,7 +1430,7 @@ impl InvocationService {
 }
 
 #[cfg(unix)]
-pub(crate) async fn probe_bazel_server_pid(
+async fn probe_bazel_server_pid(
     executable: &Path,
     workspace: &Path,
     startup_arguments: &[String],
@@ -1494,7 +1494,7 @@ pub(crate) async fn probe_bazel_server_pid(
         })
 }
 
-pub(crate) fn custom_reducer_notice(message: String) -> Diagnostic {
+fn custom_reducer_notice(message: String) -> Diagnostic {
     Diagnostic {
         severity: Severity::Note,
         category: DiagnosticCategory::Bazel,
@@ -1506,7 +1506,7 @@ pub(crate) fn custom_reducer_notice(message: String) -> Diagnostic {
     }
 }
 
-pub(crate) fn finalize_with_custom_notices(
+fn finalize_with_custom_notices(
     summary: &mut bazel_mcp_types::InvocationSummary,
     notices: Vec<Diagnostic>,
 ) {
@@ -1546,9 +1546,7 @@ pub(crate) fn finalize_with_custom_notices(
     }
 }
 
-pub(crate) fn finish_from_status(
-    status: ExitStatus,
-) -> (Option<ExitStatus>, Termination, InvocationState) {
+fn finish_from_status(status: ExitStatus) -> (Option<ExitStatus>, Termination, InvocationState) {
     let state = if status.success() {
         InvocationState::Succeeded
     } else {
@@ -1586,7 +1584,7 @@ async fn wait_for_run_output_limit(stdout: &Path, stderr: &Path, maximum_bytes: 
     }
 }
 
-pub(crate) fn duration_millis(duration: Duration) -> u64 {
+fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -1598,7 +1596,7 @@ pub(crate) fn cancelled_summary() -> bazel_mcp_types::InvocationSummary {
     }
 }
 
-pub(crate) fn fallback_summary(
+fn fallback_summary(
     exit_code: Option<i32>,
     elapsed_ms: u64,
     stderr: &[u8],

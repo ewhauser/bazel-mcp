@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct RawAspectConfig {
     pub executable: Option<PathBuf>,
-    pub commands: BTreeSet<String>,
-    pub allow_workspace_mutation: bool,
+    commands: BTreeSet<String>,
+    allow_workspace_mutation: bool,
 }
 
 /// Optional Aspect CLI command routing.
@@ -46,12 +46,12 @@ impl From<AspectConfig> for RawAspectConfig {
 
 impl AspectConfig {
     #[must_use]
-    pub fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         !self.commands.is_empty()
     }
 
     #[must_use]
-    pub fn routes(&self, command: &BazelCommand) -> bool {
+    pub(crate) fn routes(&self, command: &BazelCommand) -> bool {
         self.commands.contains(command.as_str())
     }
 

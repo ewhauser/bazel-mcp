@@ -9,7 +9,7 @@ const VERSION_OUTPUT_LIMIT: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BazelVersion {
-    pub(crate) raw: String,
+    raw: String,
     pub(crate) major: u32,
 }
 

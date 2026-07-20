@@ -31,7 +31,7 @@ impl Store {
 
     /// Read one complete invocation, hydrating target, test, and coverage
     /// collections from the detail sidecar.
-    pub async fn get_hydrated_invocation(
+    pub(crate) async fn get_hydrated_invocation(
         &self,
         id: InvocationId,
     ) -> Result<HydratedInvocation, StoreError> {
