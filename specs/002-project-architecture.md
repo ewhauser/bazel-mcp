@@ -725,7 +725,7 @@ bazel-mcp-reducer = { path = "crates/bazel-mcp-reducer" }
 bazel-mcp-runner = { path = "crates/bazel-mcp-runner" }
 bazel-mcp-store = { path = "crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "crates/bazel-mcp-types" }
-logcompact-builtins = "0.3.3"
+logcompact-builtins = "0.4.0"
 ```
 
 External dependencies are grouped by purpose in the root manifest. The initial

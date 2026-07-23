@@ -24,7 +24,7 @@ bazel-mcp-policy = { path = "../crates/bazel-mcp-policy" }
 bazel-mcp-reducer = { path = "../crates/bazel-mcp-reducer" }
 bazel-mcp-store = { path = "../crates/bazel-mcp-store" }
 bazel-mcp-types = { path = "../crates/bazel-mcp-types" }
-logcompact-builtins = "0.3.3"
+logcompact-builtins = "0.4.0"
 buffa = "=0.8.1"
 
 [[bin]]
