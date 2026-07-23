@@ -1206,9 +1206,9 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "logcompact-builtins"
-version = "0.3.3"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f392ae9a2f4f7581b2a45f8a8e73143b6ad93f2f1802ff8227c4eb3a225ce5db"
+checksum = "c702f49e6904ef263c8a6ebc9d2e86c448279a3d41c436ff9ca7783445a60645"
 dependencies = [
  "logcompact-core",
  "regex",
@@ -1218,9 +1218,9 @@ dependencies = [
 
 [[package]]
 name = "logcompact-core"
-version = "0.3.3"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8307428d78b0584651efd2fe82f835679c1c2a5533214aeaeb2617e7749764df"
+checksum = "e2e139e804e84fba4fed71ca78a62e2b84c821d4188e9e593f54718c444cbff9"
 dependencies = [
  "serde",
  "serde_json",
