@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/ewhauser/bazel-mcp/compare/v0.6.0...v0.7.0) (2026-07-23)
+
+
+### Features
+
+* add Bazel run support ([7c81f2f](https://github.com/ewhauser/bazel-mcp/commit/7c81f2f301a20c83f56b59a9a9b4856a028bef58))
+* **cli:** add ephemeral agent mode ([07f725e](https://github.com/ewhauser/bazel-mcp/commit/07f725e3e7b1e24efc5f086c62753c581f6cd559))
+* extract reusable diagnostic reducer ([4fe5e07](https://github.com/ewhauser/bazel-mcp/commit/4fe5e071c4cb60493c6a7dc43ead9cfa18d38ed5))
+* extract reusable diagnostic reducer ([7a5d16f](https://github.com/ewhauser/bazel-mcp/commit/7a5d16f2b9fe076fd814f2ba04716164b9e17d19))
+* **reducer:** extract source-agnostic diagnostic core ([c1724ef](https://github.com/ewhauser/bazel-mcp/commit/c1724ef9f0d8761b65b499b233b14d65ae0f73ce))
+* **runner:** add optional Aspect CLI executor ([71eeb7a](https://github.com/ewhauser/bazel-mcp/commit/71eeb7a890796a27217a566f2cdf246410cafe70))
+
+
+### Bug Fixes
+
+* **bazel:** wire diagnostic reducer target ([2e30ad7](https://github.com/ewhauser/bazel-mcp/commit/2e30ad7fb119cfa58908cc113a64b6dfd735e825))
+* **ci:** refresh pinned Nix installer action ([f3213d9](https://github.com/ewhauser/bazel-mcp/commit/f3213d906cb4268cf0f2d924fcd7105fd9381974))
+* **release:** track diagnostic reducer version ([4d2ffde](https://github.com/ewhauser/bazel-mcp/commit/4d2ffde729205cab621983517c44ece49d908ad3))
+* restore release and Bazel builds ([b38e65d](https://github.com/ewhauser/bazel-mcp/commit/b38e65de465fdd9cd736ad15c9b9e69b491638e0))
+
 ## [0.6.0](https://github.com/ewhauser/bazel-mcp/compare/v0.5.1...v0.6.0) (2026-07-17)
 
 
