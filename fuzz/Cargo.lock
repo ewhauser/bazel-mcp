@@ -176,7 +176,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bazel-mcp-bep"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-bes"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bazel-mcp-bep",
  "buffa",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-policy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bazel-mcp-types",
  "regex",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-reducer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bazel-mcp-bep",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-store"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "bazel-mcp-types",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bazel-mcp-types"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "thiserror",
