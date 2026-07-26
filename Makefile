@@ -198,6 +198,7 @@ fuzz-list: fuzz-setup
 	cd fuzz && cargo +nightly fuzz list
 
 fuzz-smoke: fuzz-setup
+	cd fuzz && cargo +nightly check --all-targets
 	cd fuzz && cargo +nightly fuzz run $(FUZZ_TARGET) -- -runs=1
 
 fuzz-run: fuzz-setup

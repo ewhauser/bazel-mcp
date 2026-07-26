@@ -8,7 +8,28 @@ concurrency:
   group: fuzz-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  fuzz-targets:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: { persist-credentials: false }
+      - name: Discover fuzz targets
+        id: targets
+        shell: bash
+        run: |
+          matrix="$(
+            cargo metadata --no-deps --format-version 1 \
+              --manifest-path fuzz/Cargo.toml |
+              jq -c '[.packages[].targets[] | select(.kind == ["bin"]) | .name]'
+          )"
+          test "$matrix" != "[]"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
   fuzz:
+    needs: fuzz-targets
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -16,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [bep_framing, bep_event_stream, named_file_sets, diagnostic_reducer, redaction, cursor_decode, lifecycle_sequence]
+        target: ${{ fromJSON(needs.fuzz-targets.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { persist-credentials: false }
