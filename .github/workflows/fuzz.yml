@@ -41,12 +41,12 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { persist-credentials: false }
-      - run: rustup toolchain install nightly --profile minimal
+      - run: rustup toolchain install "$(cat fuzz/rust-toolchain)" --profile minimal
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Fuzz selected target
         env:
           FUZZ_TARGET: ${{ matrix.target }}
-        run: cd fuzz && cargo +nightly fuzz run "$FUZZ_TARGET" -- -max_total_time=300
+        run: make fuzz-run FUZZ_ARGS=-max_total_time=300
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:

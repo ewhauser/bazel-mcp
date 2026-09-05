@@ -15,6 +15,12 @@ contract. Run `make test-reducer-corpus`; use the explicitly gated record and
 accept workflow in [the reducer integration testing guide](docs/reducer-integration-testing.md)
 for evidence changes. Live Bazel cases must be executed through the MCP harness.
 
+Install the pinned fuzz compiler with
+`rustup toolchain install "$(cat fuzz/rust-toolchain)" --profile minimal`.
+The pin matches the last passing scheduled run before newer nightlies made
+`allocative` 0.3.6's `Infallible` and never-type implementations conflict.
+Update it only after validating all fuzz targets.
+
 Fuzz with `make fuzz-smoke` or `make fuzz-run FUZZ_TARGET=<name>`. Set up the
 explicit Abseil cache with `make setup-oss-corpus`; normal tests never fetch it.
 

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p fuzz/corpus fuzz/artifacts
-cargo +nightly fuzz list >/dev/null
+rustup run "$(cat fuzz/rust-toolchain)" cargo fuzz list >/dev/null
