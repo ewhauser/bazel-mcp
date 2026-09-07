@@ -17,6 +17,7 @@ HAWK_CARGO ?= $(shell rustup which --toolchain $(HAWK_TOOLCHAIN) cargo)
 HAWK_RUSTC ?= $(shell rustup which --toolchain $(HAWK_TOOLCHAIN) rustc)
 HAWK_TARGET_DIR ?= target/hawk
 BAZEL_BUILD_FLAGS ?=
+FUZZ_TOOLCHAIN := $(shell cat fuzz/rust-toolchain)
 FUZZ_TARGET ?= bep_framing
 FUZZ_ARGS ?= -max_total_time=60
 NIX_DEVELOP ?= nix --extra-experimental-features 'nix-command flakes' develop --command
@@ -195,14 +196,14 @@ fuzz-setup:
 	./scripts/fuzz-init.sh
 
 fuzz-list: fuzz-setup
-	cd fuzz && cargo +nightly fuzz list
+	cd fuzz && rustup run $(FUZZ_TOOLCHAIN) cargo fuzz list
 
 fuzz-smoke: fuzz-setup
-	cd fuzz && cargo +nightly check --all-targets
-	cd fuzz && cargo +nightly fuzz run $(FUZZ_TARGET) -- -runs=1
+	cd fuzz && rustup run $(FUZZ_TOOLCHAIN) cargo check --all-targets
+	cd fuzz && rustup run $(FUZZ_TOOLCHAIN) cargo fuzz run $(FUZZ_TARGET) -- -runs=1
 
 fuzz-run: fuzz-setup
-	cd fuzz && cargo +nightly fuzz run $(FUZZ_TARGET) -- $(FUZZ_ARGS)
+	cd fuzz && rustup run $(FUZZ_TOOLCHAIN) cargo fuzz run $(FUZZ_TARGET) -- $(FUZZ_ARGS)
 
 harden-release:
 	python3 ./scripts/check-release-security.py

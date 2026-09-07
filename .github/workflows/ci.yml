@@ -216,6 +216,6 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { persist-credentials: false }
-      - run: rustup toolchain install nightly --profile minimal
+      - run: rustup toolchain install "$(cat fuzz/rust-toolchain)" --profile minimal
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: make fuzz-smoke
