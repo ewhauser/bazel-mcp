@@ -4,10 +4,10 @@ module(
 )
 
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.9.2", dev_dependency = True)
-bazel_dep(name = "llvm", version = "0.8.9")
+bazel_dep(name = "llvm", version = "0.8.18")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "34.0.bcr.1", repo_name = "com_google_protobuf")
-bazel_dep(name = "rules_rs", version = "0.0.94")
+bazel_dep(name = "rules_rs", version = "0.0.109")
 
 toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 toolchains.toolchain(
@@ -20,7 +20,7 @@ rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
 
 register_toolchains(
-    "@default_rust_toolchains//:all",
+    "@default_rust_toolchains//...",
     "@llvm//toolchain:all",
 )
 
