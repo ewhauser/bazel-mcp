@@ -169,9 +169,42 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
             }),
         )?;
     }
-    if let Some(expected) = case.manifest.expect.exit_code
-        && run_result.get("exit_code").and_then(Value::as_i64) != Some(i64::from(expected))
-    {
+    let diagnostics = run_result
+        .get("diagnostics")
+        .cloned()
+        .map(serde_json::from_value::<Vec<Diagnostic>>)
+        .transpose()
+        .context("decode live diagnostics")?
+        .unwrap_or_default();
+    let artifacts = artifact_result
+        .get("items")
+        .cloned()
+        .map(serde_json::from_value::<Vec<Artifact>>)
+        .transpose()
+        .context("decode live artifacts")?
+        .unwrap_or_default();
+    let id = InvocationId::from_uuid(
+        Uuid::parse_str(&invocation_id).context("parse live invocation UUID")?,
+    );
+    let invocation_paths = InvocationPaths::new(&cache_root, id);
+    let raw_text = read_retained_text(&invocation_paths)?;
+    let observation = CaseObservation {
+        state: required_string(&run_result, "state")?.to_owned(),
+        exit_code: run_result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        headline: required_string(&run_result, "headline")?.to_owned(),
+        inspect_hint: run_result
+            .get("inspect_hint")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        diagnostics,
+        artifacts,
+        visible_bytes: serde_json::to_vec(&run_result)?.len(),
+        raw_text,
+    };
+    if crate::verify_expectations(&case.manifest.id, &case.manifest.expect, &observation).is_err() {
         let log = client.call_tool(
             "bazel.inspect",
             json!({
@@ -181,7 +214,10 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
                 "max_bytes": 8192,
             }),
         )?;
-        eprintln!("{}: unexpected exit code; MCP log: {log}", case.manifest.id);
+        eprintln!(
+            "{}: live verification failure; MCP log: {log}",
+            case.manifest.id
+        );
         for entry in fs::read_dir(&output_user_root)?.flatten() {
             let path = entry.path().join("server/jvm.out");
             if let Ok(file) = fs::File::open(&path) {
@@ -221,42 +257,6 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
         }
     }
     client.stop();
-
-    let diagnostics = run_result
-        .get("diagnostics")
-        .cloned()
-        .map(serde_json::from_value::<Vec<Diagnostic>>)
-        .transpose()
-        .context("decode live diagnostics")?
-        .unwrap_or_default();
-    let artifacts = artifact_result
-        .get("items")
-        .cloned()
-        .map(serde_json::from_value::<Vec<Artifact>>)
-        .transpose()
-        .context("decode live artifacts")?
-        .unwrap_or_default();
-    let id = InvocationId::from_uuid(
-        Uuid::parse_str(&invocation_id).context("parse live invocation UUID")?,
-    );
-    let invocation_paths = InvocationPaths::new(&cache_root, id);
-    let raw_text = read_retained_text(&invocation_paths)?;
-    let observation = CaseObservation {
-        state: required_string(&run_result, "state")?.to_owned(),
-        exit_code: run_result
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok()),
-        headline: required_string(&run_result, "headline")?.to_owned(),
-        inspect_hint: run_result
-            .get("inspect_hint")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        diagnostics,
-        artifacts,
-        visible_bytes: serde_json::to_vec(&run_result)?.len(),
-        raw_text,
-    };
     Ok(LiveRun {
         observation,
         invocation_id,
