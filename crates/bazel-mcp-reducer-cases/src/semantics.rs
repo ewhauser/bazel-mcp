@@ -68,8 +68,8 @@ pub fn verify_expectations(
         && actual.exit_code != Some(exit_code)
     {
         failures.push(format!(
-            "{case_id}: expected exit code {exit_code}, observed {:?}",
-            actual.exit_code
+            "{case_id}: expected exit code {exit_code}, observed {:?}: {}",
+            actual.exit_code, actual.headline
         ));
     }
     if let Some(headline) = &expected.headline_equals
@@ -462,6 +462,18 @@ mod tests {
     #[test]
     fn verifies_structured_and_negative_expectations() {
         verify_expectations("cpp/link", &expected(), &observation()).unwrap();
+    }
+
+    #[test]
+    fn unexpected_exit_reports_the_mcp_headline() {
+        let mut actual = observation();
+        actual.exit_code = Some(37);
+        let error = verify_expectations("cpp/link", &expected(), &actual).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("observed Some(37): Bazel failed: missing symbol invoice_total")
+        );
     }
 
     #[test]

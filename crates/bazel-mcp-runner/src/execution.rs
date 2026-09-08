@@ -423,7 +423,10 @@ impl InvocationService {
             ExecutionDriver::Bazel { .. } => {
                 if let Some(output_user_root) = &self.config.output_user_root {
                     command
-                        .arg(format!("--output_user_root={}", output_user_root.display()))
+                        .arg(format!(
+                            "--output_user_root={}",
+                            crate::path_args::bazel_path(output_user_root)
+                        ))
                         .arg(format!(
                             "--max_idle_secs={}",
                             self.config.isolated_bazel_server_idle_timeout.as_secs()
@@ -437,7 +440,10 @@ impl InvocationService {
                     match bep_transport {
                         BepTransport::Tail => {
                             command
-                                .arg(format!("--build_event_binary_file={}", paths.bep.display()))
+                                .arg(format!(
+                                    "--build_event_binary_file={}",
+                                    crate::path_args::bazel_path(&paths.bep)
+                                ))
                                 .arg("--build_event_binary_file_path_conversion=false");
                         }
                         BepTransport::Fifo => {
@@ -448,7 +454,10 @@ impl InvocationService {
                             #[cfg(not(unix))]
                             let output = paths.bep.as_path();
                             command
-                                .arg(format!("--build_event_binary_file={}", output.display()))
+                                .arg(format!(
+                                    "--build_event_binary_file={}",
+                                    crate::path_args::bazel_path(output)
+                                ))
                                 .arg("--build_event_binary_file_path_conversion=false");
                         }
                         BepTransport::Bes => {
@@ -514,7 +523,7 @@ impl InvocationService {
                     command
                         .arg(format!(
                             "--bazel-startup-flag=--output_user_root={}",
-                            output_user_root.display()
+                            crate::path_args::bazel_path(output_user_root)
                         ))
                         .arg(format!(
                             "--bazel-startup-flag=--max_idle_secs={}",
@@ -1206,7 +1215,11 @@ impl InvocationService {
         for diagnostic in &mut summary.diagnostics {
             diagnostic.message = sanitize(&diagnostic.message, 1_000);
             if let Some(location) = &mut diagnostic.location {
-                let path = location.path.replace(workspace.as_ref(), "<workspace>");
+                let path = crate::path_args::workspace_relative_path(
+                    &location.path,
+                    workspace.as_ref(),
+                    cfg!(windows),
+                );
                 let path = path
                     .strip_prefix("<workspace>/")
                     .or_else(|| path.strip_prefix("<workspace>\\"))
@@ -1444,7 +1457,10 @@ async fn probe_bazel_server_pid(
         .envs(filtered_environment(&config.policy));
     if let Some(output_user_root) = &config.output_user_root {
         command
-            .arg(format!("--output_user_root={}", output_user_root.display()))
+            .arg(format!(
+                "--output_user_root={}",
+                crate::path_args::bazel_path(output_user_root)
+            ))
             .arg(format!(
                 "--max_idle_secs={}",
                 config.isolated_bazel_server_idle_timeout.as_secs()

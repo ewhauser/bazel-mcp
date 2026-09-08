@@ -8,6 +8,7 @@ mod evidence;
 mod execution;
 mod inspection;
 mod output_base_lock;
+mod path_args;
 mod scheduler;
 mod service;
 mod test_evidence;

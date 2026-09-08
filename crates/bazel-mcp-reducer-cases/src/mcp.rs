@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
@@ -50,7 +50,7 @@ struct HarnessConfig<'a> {
     output_user_root: &'a Path,
     #[serde(skip_serializing_if = "Option::is_none")]
     bazel_executable: Option<&'a Path>,
-    environment_allowlist: [&'static str; 2],
+    environment_allowlist: Vec<&'static str>,
     redaction_patterns: [&'static str; 3],
     result_encoding: &'static str,
     bep_transport: &'static str,
@@ -94,7 +94,23 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
         cache_root: &cache_root,
         output_user_root: &output_user_root,
         bazel_executable: options.bazel_executable.as_deref(),
-        environment_allowlist: ["BAZELISK_HOME", "USE_BAZEL_VERSION"],
+        environment_allowlist: {
+            let mut names = vec!["BAZELISK_HOME", "USE_BAZEL_VERSION"];
+            if cfg!(windows) {
+                // Explicit toolchain location plus the system directories used
+                // by Visual Studio's compiler/SDK setup scripts.
+                names.extend([
+                    "BAZEL_VC",
+                    "ProgramFiles",
+                    "ProgramFiles(x86)",
+                    "ProgramW6432",
+                    "ProgramData",
+                    "COMSPEC",
+                    "SystemDrive",
+                ]);
+            }
+            names
+        },
         redaction_patterns: [
             "(?i)token=[^\\s]+",
             "(?i)(authorization|x-buildbuddy-api-key)=[^\\s]+",
@@ -169,8 +185,6 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
             }),
         )?;
     }
-    client.stop();
-
     let diagnostics = run_result
         .get("diagnostics")
         .cloned()
@@ -206,6 +220,59 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
         visible_bytes: serde_json::to_vec(&run_result)?.len(),
         raw_text,
     };
+    if crate::verify_expectations(&case.manifest.id, &case.manifest.expect, &observation).is_err() {
+        let log = client.call_tool(
+            "bazel.inspect",
+            json!({
+                "invocation_id": &invocation_id,
+                "view": "log",
+                "limit": 100,
+                "max_bytes": 8192,
+            }),
+        )?;
+        eprintln!(
+            "{}: live verification failure; MCP log: {log}",
+            case.manifest.id
+        );
+        for entry in fs::read_dir(&output_user_root)?.flatten() {
+            let path = entry.path().join("server/jvm.out");
+            if let Ok(file) = fs::File::open(&path) {
+                let mut bytes = Vec::new();
+                file.take(8192).read_to_end(&mut bytes)?;
+                let paths = [
+                    (
+                        "RUNTIME",
+                        runtime.path().to_string_lossy().replace('\\', "/"),
+                    ),
+                    ("WORKSPACE", workspace.to_string_lossy().replace('\\', "/")),
+                    (
+                        "HOME",
+                        std::env::var("USERPROFILE")
+                            .unwrap_or_default()
+                            .replace('\\', "/"),
+                    ),
+                    (
+                        "HOME",
+                        std::env::var("HOME").unwrap_or_default().replace('\\', "/"),
+                    ),
+                ];
+                match sanitize_startup_log(&bytes, &paths) {
+                    Ok(text) => eprintln!(
+                        "{}: JVM startup log: {}",
+                        case.manifest.id,
+                        String::from_utf8_lossy(&text)
+                    ),
+                    Err(_) => {
+                        eprintln!(
+                            "{}: JVM startup log withheld because sanitization failed",
+                            case.manifest.id
+                        )
+                    }
+                }
+            }
+        }
+    }
+    client.stop();
     Ok(LiveRun {
         observation,
         invocation_id,
@@ -329,5 +396,39 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+fn sanitize_startup_log(bytes: &[u8], paths: &[(&str, String)]) -> Result<Vec<u8>> {
+    let text = String::from_utf8_lossy(bytes).replace('\\', "/");
+    let normalized_paths: Vec<_> = paths
+        .iter()
+        .map(|(label, path)| (*label, path.replace('\\', "/")))
+        .collect();
+    let replacements: Vec<_> = normalized_paths
+        .iter()
+        .map(|(label, path)| (*label, path.as_bytes()))
+        .collect();
+    crate::sanitize_text(text.as_bytes(), &replacements)
+}
+
+#[cfg(test)]
+mod startup_log_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_both_windows_path_separators_and_rejects_secrets() {
+        let paths = [("HOME", r"C:\Users\runneradmin".to_owned())];
+        for text in [
+            r"fatal: C:\Users\runneradmin\server\jvm.out",
+            "fatal: C:/Users/runneradmin/server/jvm.out",
+        ] {
+            let sanitized = sanitize_startup_log(text.as_bytes(), &paths).unwrap();
+            assert_eq!(
+                String::from_utf8(sanitized).unwrap(),
+                "fatal: <HOME>/server/jvm.out\n"
+            );
+        }
+        assert!(sanitize_startup_log(b"token=SECRET_SENTINEL", &paths).is_err());
     }
 }

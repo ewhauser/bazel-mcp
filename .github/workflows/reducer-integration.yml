@@ -85,6 +85,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.0"
+          cache: false
       - run: go install github.com/bazelbuild/bazelisk@v1.26.0
       - run: cargo build -p bazel-mcp-server --bin bazel-mcp
       - name: Verify changed examples through MCP
@@ -107,6 +111,10 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { persist-credentials: false }
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.0"
+          cache: false
       - run: go install github.com/bazelbuild/bazelisk@v1.26.0
       - run: cargo build -p bazel-mcp-server --bin bazel-mcp
       - run: >-
@@ -131,18 +139,33 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { persist-credentials: false }
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.0"
+          cache: false
       - run: go install github.com/bazelbuild/bazelisk@v1.26.0
       - run: cargo build -p bazel-mcp-server --bin bazel-mcp
+      - name: Locate Windows C++ toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw "Visual C++ build tools were not found" }
+          "BAZEL_VC=$installation\VC" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # MSVC cannot open response files beyond MAX_PATH, even when Rust can.
+          "MCP_RUNTIME_PARENT=$env:SystemDrive/bmc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Locate platform executables
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "BAZELISK_BIN=$HOME/go/bin/bazelisk.exe" >> "$GITHUB_ENV"
-            echo "MCP_SERVER_BIN=$PWD/target/debug/bazel-mcp.exe" >> "$GITHUB_ENV"
+            echo "BAZELISK_BIN=$HOME/go/bin/bazelisk.exe"
+            echo "MCP_SERVER_BIN=$PWD/target/debug/bazel-mcp.exe"
           else
-            echo "BAZELISK_BIN=$HOME/go/bin/bazelisk" >> "$GITHUB_ENV"
-            echo "MCP_SERVER_BIN=$PWD/target/debug/bazel-mcp" >> "$GITHUB_ENV"
-          fi
+            echo "BAZELISK_BIN=$HOME/go/bin/bazelisk"
+            echo "MCP_SERVER_BIN=$PWD/target/debug/bazel-mcp"
+            echo "MCP_RUNTIME_PARENT=$RUNNER_TEMP"
+          fi >> "$GITHUB_ENV"
       - name: Verify all supported fast cases through MCP
         env:
           BAZEL_VERSION: ${{ matrix.bazel }}
@@ -151,6 +174,7 @@ jobs:
           cargo run -p bazel-mcp-reducer-cases -- verify --live
           --tag fast --bazel-version "$BAZEL_VERSION"
           --server "$MCP_SERVER_BIN" --bazel "$BAZELISK_BIN"
+          --runtime-parent "$MCP_RUNTIME_PARENT"
 
   reducer-live-heavy:
     name: Live heavy cases
@@ -162,6 +186,10 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { persist-credentials: false }
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.0"
+          cache: false
       - run: go install github.com/bazelbuild/bazelisk@v1.26.0
       - run: cargo build -p bazel-mcp-server --bin bazel-mcp
       - run: >-

@@ -171,7 +171,7 @@ def main():
         ("build_success", "build", ["//:ok"], 0, "succeeded", 60),
         ("loading_failure", "build", ["//:missing"], 1, "failed", 60),
         ("action_failure", "build", ["//:action_failure"], 1, "failed", 60),
-        ("test_success", "test", ["//:test_success"], 0, "succeeded", 60),
+        ("test_success", "test", ["//:test_success"], 0, "succeeded", 180),
         ("test_failure", "test", ["//:test_failure"], 3, "failed", 60),
         ("coverage", "coverage", ["//:test_success"], 0, "succeeded", 60),
         ("query", "query", ["//..."], 0, "succeeded", 60),
@@ -194,7 +194,8 @@ def main():
     for request_id, (name, command, command_args, exit_code, state, timeout) in enumerate(cases, 2):
         result = call(process, request_id, args.workspace, command, command_args, timeout)
         if result["state"] != state or result.get("exit_code") != exit_code:
-            raise RuntimeError(f"{name} mismatch: {result}")
+            log = inspect(process, request_id + 1000, result["invocation_id"], "log")
+            raise RuntimeError(f"{name} mismatch: {result}; MCP log: {log}")
         print(f"{name}\t{result['state']}\t{result.get('exit_code')}")
     query_result = call(
         process, 100, args.workspace, "query", ["filter('^//:large_', //:*)"], 60

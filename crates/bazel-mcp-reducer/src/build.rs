@@ -1598,6 +1598,31 @@ TypeError: Cannot read properties of undefined (reading 'lines')
     }
 
     #[test]
+    fn maps_windows_node_stack_frames_from_bazel_bin() {
+        let summary = reduce_invocation(ReductionInput {
+            events: &[],
+            stdout: b"",
+            stderr: br#"C:\cache\execroot\_main\bazel-out\x64_windows-fastbuild\bin\cases\runtime_failure.js:2
+TypeError: Cannot read properties of undefined (reading 'lines')
+    at invoiceTotal (C:\cache\execroot\_main\bazel-out\x64_windows-fastbuild\bin\cases\runtime_failure.js:2:18)
+"#,
+            exit_code: Some(3),
+            elapsed_ms: 1,
+            budget: Budget::result_default(),
+        });
+        let diagnostic = &summary.diagnostics[0];
+        assert_eq!(diagnostic.category, DiagnosticCategory::Test);
+        assert_eq!(
+            diagnostic.location,
+            Some(DiagnosticLocation {
+                path: "cases/runtime_failure.js".into(),
+                line: Some(2),
+                column: Some(18),
+            })
+        );
+    }
+
+    #[test]
     fn pairs_node_syntax_errors_with_the_source_header() {
         let summary = reduce_invocation(ReductionInput {
             events: &[],
