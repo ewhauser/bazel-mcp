@@ -421,12 +421,23 @@ pub(crate) fn compact_bazel_path(path: &str) -> String {
             return relative.to_owned();
         }
     }
-    if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
+    let path = if let Some((_, after_execroot)) = path.rsplit_once("/execroot/")
         && let Some((_, relative)) = after_execroot.split_once('/')
+    {
+        relative
+    } else {
+        path.strip_prefix("./").unwrap_or(path)
+    };
+    // Rules may execute copied sources from the output tree instead of runfiles
+    // (notably rules_js on Windows). Remove only the known Bazel bin layout.
+    if let Some(output) = path.strip_prefix("bazel-out/")
+        && let Some((configuration, rest)) = output.split_once('/')
+        && !configuration.is_empty()
+        && let Some(relative) = rest.strip_prefix("bin/")
     {
         return relative.to_owned();
     }
-    path.strip_prefix("./").unwrap_or(path).to_owned()
+    path.to_owned()
 }
 
 #[cfg(test)]
@@ -443,7 +454,14 @@ mod tests {
             compact_bazel_path("/tmp/test.runfiles/_main/pkg/test.py"),
             "pkg/test.py"
         );
-        assert_eq!(compact_bazel_path("/opt/src/main.go"), "/opt/src/main.go");
+        for path in [
+            "/opt/src/main.go",
+            "/opt/bazel-out/config/bin/main.js",
+            "bazel-out/config/testlogs/pkg/test.log",
+            "bazel-out/config/genfiles/pkg/generated.h",
+        ] {
+            assert_eq!(compact_bazel_path(path), path);
+        }
     }
 
     #[test]
