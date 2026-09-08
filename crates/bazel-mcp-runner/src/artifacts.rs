@@ -72,7 +72,7 @@ pub(crate) fn local_artifact_path(artifact: &bazel_mcp_types::Artifact) -> Optio
         return None;
     }
     if let Some(path) = artifact.uri.strip_prefix("file://") {
-        return Some(PathBuf::from(path));
+        return Some(local_file_uri_path(path, cfg!(windows)));
     }
     let path = PathBuf::from(&artifact.uri);
     path.is_absolute().then_some(path)
@@ -101,4 +101,58 @@ fn bazel_test_log_output_base(path: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(components[..execroot].iter().collect())
+}
+
+fn local_file_uri_path(path: &str, windows: bool) -> PathBuf {
+    // A file URI adds a slash before a Windows drive (file:///C:/...).
+    // Keeping it makes canonicalization look for a different, invalid path.
+    let bytes = path.as_bytes();
+    if windows
+        && bytes.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2..4] == *b":/"
+    {
+        PathBuf::from(&path[1..])
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+#[cfg(test)]
+mod file_uri_tests {
+    use super::*;
+
+    #[test]
+    fn windows_drive_uri_drops_the_uri_root_slash() {
+        assert_eq!(
+            local_file_uri_path("/C:/cache/test.log", true),
+            PathBuf::from("C:/cache/test.log")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_a_real_windows_test_log_uri() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("test.log");
+        std::fs::write(&path, "test evidence").unwrap();
+        let artifact = bazel_mcp_types::Artifact {
+            name: "test.log".to_owned(),
+            kind: ArtifactKind::TestLog,
+            uri: format!("file:///{}", path.to_string_lossy().replace('\\', "/")),
+            size_bytes: None,
+            locally_available: true,
+        };
+        let resolved = local_artifact_path(&artifact).unwrap();
+        assert_eq!(std::fs::read_to_string(resolved).unwrap(), "test evidence");
+    }
+
+    #[test]
+    fn unix_uri_keeps_the_root_slash() {
+        assert_eq!(
+            local_file_uri_path("/tmp/test.log", false),
+            PathBuf::from("/tmp/test.log")
+        );
+    }
 }
