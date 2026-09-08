@@ -24,6 +24,29 @@ fn windows_bazel_path(path: &str) -> String {
     path.to_owned()
 }
 
+pub(crate) fn workspace_relative_path(path: &str, workspace: &str, windows: bool) -> String {
+    let (path, workspace) = if windows {
+        (
+            windows_bazel_path(path).replace('\\', "/"),
+            windows_bazel_path(workspace).replace('\\', "/"),
+        )
+    } else {
+        (path.to_owned(), workspace.to_owned())
+    };
+    let workspace = workspace.trim_end_matches('/');
+    let matches = path.get(..workspace.len()).is_some_and(|prefix| {
+        if windows {
+            prefix.eq_ignore_ascii_case(workspace)
+        } else {
+            prefix == workspace
+        }
+    });
+    if matches && let Some(relative) = path[workspace.len()..].strip_prefix('/') {
+        return relative.to_owned();
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,6 +64,34 @@ mod tests {
         assert_eq!(
             windows_bazel_path(r"\\?\UNC\server\share\events.bep"),
             r"\\server\share\events.bep"
+        );
+    }
+
+    #[test]
+    fn windows_workspace_paths_match_bazel_spelling_and_case() {
+        let workspace = r"\\?\D:\a\bazel-mcp\examples\starlark";
+        for path in [
+            "D:/a/bazel-mcp/examples/starlark/cases/analysis/defs.bzl",
+            r"d:\a\BAZEL-MCP\examples\starlark\cases\analysis\defs.bzl",
+        ] {
+            assert_eq!(
+                workspace_relative_path(path, workspace, true),
+                "cases/analysis/defs.bzl"
+            );
+        }
+        let sibling = "D:/a/bazel-mcp/examples/starlark-other/defs.bzl";
+        assert_eq!(workspace_relative_path(sibling, workspace, true), sibling);
+    }
+
+    #[test]
+    fn unix_workspace_paths_remain_case_sensitive() {
+        assert_eq!(
+            workspace_relative_path("/repo/pkg/main.go", "/repo", false),
+            "pkg/main.go"
+        );
+        assert_eq!(
+            workspace_relative_path("/REPO/pkg/main.go", "/repo", false),
+            "/REPO/pkg/main.go"
         );
     }
 

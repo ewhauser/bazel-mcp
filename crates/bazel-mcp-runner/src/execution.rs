@@ -1215,7 +1215,11 @@ impl InvocationService {
         for diagnostic in &mut summary.diagnostics {
             diagnostic.message = sanitize(&diagnostic.message, 1_000);
             if let Some(location) = &mut diagnostic.location {
-                let path = location.path.replace(workspace.as_ref(), "<workspace>");
+                let path = crate::path_args::workspace_relative_path(
+                    &location.path,
+                    workspace.as_ref(),
+                    cfg!(windows),
+                );
                 let path = path
                     .strip_prefix("<workspace>/")
                     .or_else(|| path.strip_prefix("<workspace>\\"))
