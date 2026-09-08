@@ -68,8 +68,8 @@ pub fn verify_expectations(
         && actual.exit_code != Some(exit_code)
     {
         failures.push(format!(
-            "{case_id}: expected exit code {exit_code}, observed {:?}",
-            actual.exit_code
+            "{case_id}: expected exit code {exit_code}, observed {:?}: {}",
+            actual.exit_code, actual.headline
         ));
     }
     if let Some(headline) = &expected.headline_equals

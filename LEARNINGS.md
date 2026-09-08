@@ -19,3 +19,10 @@ MCP efficiency. Do not include secrets or raw sensitive output.
 - Impact: the headline did not identify the cause; the response spent diagnostic entries and model-visible tokens on empty messages, requiring a scan of the remaining diagnostics.
 - Follow-up: discard empty normalized diagnostics before deduplication and select the first nonempty actionable message for the headline. Add a regression fixture for a toolchain-analysis failure with empty BEP failure messages.
 - Codex Thread ID: `01a07230-796a-77d1-9609-55bc1b9e4b4c`.
+
+### Live verification hides the MCP failure headline
+
+- Symptom: a Windows live case failed with exit code 37, but the verifier printed only expected/actual codes and dropped the MCP headline.
+- Impact: diagnosing the platform failure required another CI run despite an existing reduced diagnostic.
+- Follow-up: include the MCP headline in exit-code mismatch errors and verify the resulting Windows failure is actionable.
+- Codex Thread ID: `01a07230-796a-77d1-9609-55bc1b9e4b4c`.
