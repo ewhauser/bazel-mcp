@@ -50,7 +50,7 @@ struct HarnessConfig<'a> {
     output_user_root: &'a Path,
     #[serde(skip_serializing_if = "Option::is_none")]
     bazel_executable: Option<&'a Path>,
-    environment_allowlist: [&'static str; 2],
+    environment_allowlist: Vec<&'static str>,
     redaction_patterns: [&'static str; 3],
     result_encoding: &'static str,
     bep_transport: &'static str,
@@ -94,7 +94,23 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
         cache_root: &cache_root,
         output_user_root: &output_user_root,
         bazel_executable: options.bazel_executable.as_deref(),
-        environment_allowlist: ["BAZELISK_HOME", "USE_BAZEL_VERSION"],
+        environment_allowlist: {
+            let mut names = vec!["BAZELISK_HOME", "USE_BAZEL_VERSION"];
+            if cfg!(windows) {
+                // Explicit toolchain location plus the system directories used
+                // by Visual Studio's compiler/SDK setup scripts.
+                names.extend([
+                    "BAZEL_VC",
+                    "ProgramFiles",
+                    "ProgramFiles(x86)",
+                    "ProgramW6432",
+                    "ProgramData",
+                    "COMSPEC",
+                    "SystemDrive",
+                ]);
+            }
+            names
+        },
         redaction_patterns: [
             "(?i)token=[^\\s]+",
             "(?i)(authorization|x-buildbuddy-api-key)=[^\\s]+",
