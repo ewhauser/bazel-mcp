@@ -169,6 +169,20 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
             }),
         )?;
     }
+    if let Some(expected) = case.manifest.expect.exit_code
+        && run_result.get("exit_code").and_then(Value::as_i64) != Some(i64::from(expected))
+    {
+        let log = client.call_tool(
+            "bazel.inspect",
+            json!({
+                "invocation_id": &invocation_id,
+                "view": "log",
+                "limit": 100,
+                "max_bytes": 8192,
+            }),
+        )?;
+        eprintln!("{}: unexpected exit code; MCP log: {log}", case.manifest.id);
+    }
     client.stop();
 
     let diagnostics = run_result
