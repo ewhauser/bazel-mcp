@@ -187,13 +187,29 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
             if let Ok(file) = fs::File::open(&path) {
                 let mut bytes = Vec::new();
                 file.take(8192).read_to_end(&mut bytes)?;
-                let runtime_name = runtime.path().to_string_lossy();
-                let workspace_name = workspace.to_string_lossy();
-                let replacements = [
-                    ("RUNTIME", runtime_name.as_bytes()),
-                    ("WORKSPACE", workspace_name.as_bytes()),
+                let normalized = String::from_utf8_lossy(&bytes).replace('\\', "/");
+                let paths = [
+                    (
+                        "RUNTIME",
+                        runtime.path().to_string_lossy().replace('\\', "/"),
+                    ),
+                    ("WORKSPACE", workspace.to_string_lossy().replace('\\', "/")),
+                    (
+                        "HOME",
+                        std::env::var("USERPROFILE")
+                            .unwrap_or_default()
+                            .replace('\\', "/"),
+                    ),
+                    (
+                        "HOME",
+                        std::env::var("HOME").unwrap_or_default().replace('\\', "/"),
+                    ),
                 ];
-                match crate::sanitize_text(&bytes, &replacements) {
+                let replacements: Vec<_> = paths
+                    .iter()
+                    .map(|(label, path)| (*label, path.as_bytes()))
+                    .collect();
+                match crate::sanitize_text(normalized.as_bytes(), &replacements) {
                     Ok(text) => eprintln!(
                         "{}: JVM startup log: {}",
                         case.manifest.id,

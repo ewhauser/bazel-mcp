@@ -26,3 +26,10 @@ MCP efficiency. Do not include secrets or raw sensitive output.
 - Impact: diagnosing the platform failure required another CI run despite an existing reduced diagnostic.
 - Follow-up: include the MCP headline in exit-code mismatch errors and verify the resulting Windows failure is actionable.
 - Codex Thread ID: `01a07230-796a-77d1-9609-55bc1b9e4b4c`.
+
+### Bazel server startup failures lack retained JVM diagnostics
+
+- Symptom: Windows Bazel 9.2.0 returned exit code 37 with no diagnostics; the headline only repeated the exit code. `bazel.inspect` log contained only installation extraction and server-start messages.
+- Impact: neither the run result nor a bounded log inspection explained the failure. Investigating it required extra CI runs and a harness change to inspect `server/jvm.out` before the isolated runtime was deleted.
+- Follow-up: on server-start failures, capture a bounded, redacted JVM startup log from the effective output base into durable evidence and surface its actionable error through the normal inspection flow.
+- Codex Thread ID: `01a07230-796a-77d1-9609-55bc1b9e4b4c`.
