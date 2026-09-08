@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
@@ -182,6 +182,29 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
             }),
         )?;
         eprintln!("{}: unexpected exit code; MCP log: {log}", case.manifest.id);
+        for entry in fs::read_dir(&output_user_root)?.flatten() {
+            let path = entry.path().join("server/jvm.out");
+            if let Ok(file) = fs::File::open(&path) {
+                let mut bytes = Vec::new();
+                file.take(8192).read_to_end(&mut bytes)?;
+                let runtime_name = runtime.path().to_string_lossy();
+                let workspace_name = workspace.to_string_lossy();
+                let replacements = [
+                    ("RUNTIME", runtime_name.as_bytes()),
+                    ("WORKSPACE", workspace_name.as_bytes()),
+                ];
+                match crate::sanitize_text(&bytes, &replacements) {
+                    Ok(text) => eprintln!(
+                        "{}: JVM startup log: {}",
+                        case.manifest.id,
+                        String::from_utf8_lossy(&text)
+                    ),
+                    Err(error) => {
+                        eprintln!("{}: JVM startup log withheld: {error}", case.manifest.id)
+                    }
+                }
+            }
+        }
     }
     client.stop();
 

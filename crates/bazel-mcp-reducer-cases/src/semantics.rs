@@ -465,6 +465,18 @@ mod tests {
     }
 
     #[test]
+    fn unexpected_exit_reports_the_mcp_headline() {
+        let mut actual = observation();
+        actual.exit_code = Some(37);
+        let error = verify_expectations("cpp/link", &expected(), &actual).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("observed Some(37): Bazel failed: missing symbol invoice_total")
+        );
+    }
+
+    #[test]
     fn reports_all_semantic_mismatches() {
         let mut actual = observation();
         actual.state = "succeeded".to_owned();
