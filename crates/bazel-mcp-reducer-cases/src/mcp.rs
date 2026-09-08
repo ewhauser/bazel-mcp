@@ -187,7 +187,6 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
             if let Ok(file) = fs::File::open(&path) {
                 let mut bytes = Vec::new();
                 file.take(8192).read_to_end(&mut bytes)?;
-                let normalized = String::from_utf8_lossy(&bytes).replace('\\', "/");
                 let paths = [
                     (
                         "RUNTIME",
@@ -205,18 +204,17 @@ pub fn run_live_case(case: &LoadedCase, options: &LiveOptions) -> Result<LiveRun
                         std::env::var("HOME").unwrap_or_default().replace('\\', "/"),
                     ),
                 ];
-                let replacements: Vec<_> = paths
-                    .iter()
-                    .map(|(label, path)| (*label, path.as_bytes()))
-                    .collect();
-                match crate::sanitize_text(normalized.as_bytes(), &replacements) {
+                match sanitize_startup_log(&bytes, &paths) {
                     Ok(text) => eprintln!(
                         "{}: JVM startup log: {}",
                         case.manifest.id,
                         String::from_utf8_lossy(&text)
                     ),
-                    Err(error) => {
-                        eprintln!("{}: JVM startup log withheld: {error}", case.manifest.id)
+                    Err(_) => {
+                        eprintln!(
+                            "{}: JVM startup log withheld because sanitization failed",
+                            case.manifest.id
+                        )
                     }
                 }
             }
@@ -382,5 +380,39 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+fn sanitize_startup_log(bytes: &[u8], paths: &[(&str, String)]) -> Result<Vec<u8>> {
+    let text = String::from_utf8_lossy(bytes).replace('\\', "/");
+    let normalized_paths: Vec<_> = paths
+        .iter()
+        .map(|(label, path)| (*label, path.replace('\\', "/")))
+        .collect();
+    let replacements: Vec<_> = normalized_paths
+        .iter()
+        .map(|(label, path)| (*label, path.as_bytes()))
+        .collect();
+    crate::sanitize_text(text.as_bytes(), &replacements)
+}
+
+#[cfg(test)]
+mod startup_log_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_both_windows_path_separators_and_rejects_secrets() {
+        let paths = [("HOME", r"C:\Users\runneradmin".to_owned())];
+        for text in [
+            r"fatal: C:\Users\runneradmin\server\jvm.out",
+            "fatal: C:/Users/runneradmin/server/jvm.out",
+        ] {
+            let sanitized = sanitize_startup_log(text.as_bytes(), &paths).unwrap();
+            assert_eq!(
+                String::from_utf8(sanitized).unwrap(),
+                "fatal: <HOME>/server/jvm.out\n"
+            );
+        }
+        assert!(sanitize_startup_log(b"token=SECRET_SENTINEL", &paths).is_err());
     }
 }
