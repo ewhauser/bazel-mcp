@@ -196,6 +196,8 @@ def main():
         if result["state"] != state or result.get("exit_code") != exit_code:
             log = inspect(process, request_id + 1000, result["invocation_id"], "log")
             raise RuntimeError(f"{name} mismatch: {result}; MCP log: {log}")
+        if name in ("test_success", "coverage") and result["tests"]["passed"] != 1:
+            raise RuntimeError(f"{name} did not report its passing test target: {result}")
         print(f"{name}\t{result['state']}\t{result.get('exit_code')}")
     query_result = call(
         process, 100, args.workspace, "query", ["filter('^//:large_', //:*)"], 60

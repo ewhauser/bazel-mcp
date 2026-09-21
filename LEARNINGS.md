@@ -13,6 +13,13 @@ MCP efficiency. Do not include secrets or raw sensitive output.
 
 ## Highest priority remaining
 
+### Missing BEP can leave successful tests without counts
+
+- Symptom: `bazel.run test` could report success with zero test counts when the captured BEP had no `TestSummary` or `TestResult` events. A reported `js_test` run led the agent to rerun tests to establish counts. A local `js_test` through MCP returned one passing target, so the intermittent missing-evidence path remains to diagnose.
+- Impact: the missing count previously caused an extra `bazel.run` invocation and agent reasoning round trip. The console-summary fallback now recovers a count when Bazel emits its ordinary footer, but the capture defect is not yet reproduced.
+- Follow-up: correlate future zero-event invocations with transport and Bazel version, then fix the capture path that drops the BEP stream. Add a BES transport fault test alongside the current tail and console-fallback tests.
+- Codex Thread ID: `01a0bba8-6c68-7980-a502-3fa757ca4351`.
+
 ### Empty analysis diagnostics obscure the failure headline
 
 - Symptom: `bazel.run` for a toolchain-resolution failure returned `headline: "Bazel failed: "` and two diagnostics with empty messages, although another diagnostic contained the actionable error. Invocation: `01a07dec-fd69-77f0-aed2-02f829804b94`.

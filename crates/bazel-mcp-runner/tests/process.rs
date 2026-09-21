@@ -94,6 +94,173 @@ fn successful_run_build_bep(should_exec: bool) -> Vec<u8> {
     [encode_frame(&finished), encode_frame(&exec_request)].concat()
 }
 
+#[tokio::test]
+async fn successful_test_without_test_summaries_reports_no_test_targets() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let bep = root.path().join("no-tests.bep");
+    let finished = BuildEvent {
+        id: encode_event_id(&BuildEventId {
+            id: Some(build_event_id::Id::BuildFinished(Box::new(
+                build_event_id::EmptyId {},
+            ))),
+        }),
+        last_message: true,
+        payload: Some(build_event::Payload::Finished(Box::new(BuildFinished {
+            overall_success: true,
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    tokio::fs::write(&bep, encode_frame(&finished))
+        .await
+        .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\ncp '{}' \"$bep_path\"\nexit 0\n",
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//...".into()],
+        ))
+        .await
+        .unwrap();
+
+    let summary = record.summary.unwrap();
+    assert!(summary.success);
+    assert!(summary.tests.is_empty());
+    assert_eq!(
+        summary.headline,
+        "Bazel test succeeded: no test targets were found"
+    );
+}
+
+#[tokio::test]
+async fn successful_test_recovers_count_from_bep_test_result() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let bep = root.path().join("test-result-only.bep");
+    let test_result = BuildEvent {
+        id: encode_event_id(&BuildEventId {
+            id: Some(build_event_id::Id::TestResult(Box::new(
+                build_event_id::TestResultId {
+                    label: "//cases:typescript_test".into(),
+                    run: 1,
+                    attempt: 1,
+                    ..Default::default()
+                },
+            ))),
+        }),
+        payload: Some(build_event::Payload::TestResult(Box::new(BepTestResult {
+            status: 1,
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let finished = BuildEvent {
+        last_message: true,
+        payload: Some(build_event::Payload::Finished(Box::new(BuildFinished {
+            overall_success: true,
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    tokio::fs::write(
+        &bep,
+        [encode_frame(&test_result), encode_frame(&finished)].concat(),
+    )
+    .await
+    .unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"${{1:-}}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --build_event_binary_file=*) bep_path=${{arg#*=}} ;; esac; done\ncp '{}' \"$bep_path\"\nexit 0\n",
+        bep.display(),
+    );
+    let service = configured_service(&root, &workspace, &script, |_| {}).await;
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//cases:typescript_test".into()],
+        ))
+        .await
+        .unwrap();
+
+    let summary = record.summary.unwrap();
+    assert!(summary.success);
+    assert_eq!(summary.test_counts.passed, 1);
+    assert_eq!(summary.tests[0].label, "//cases:typescript_test");
+    assert_eq!(
+        summary.headline,
+        "Bazel test succeeded: 1 test target reported (1 recovered from BEP test attempts)"
+    );
+}
+
+#[tokio::test]
+async fn successful_test_without_bep_does_not_claim_no_tests() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = configured_service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\nexit 0\n",
+        |_| {},
+    )
+    .await;
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//...".into()],
+        ))
+        .await
+        .unwrap();
+
+    let summary = record.summary.unwrap();
+    assert!(summary.success);
+    assert!(summary.tests.is_empty());
+    assert_eq!(
+        summary.headline,
+        "Bazel test succeeded, but test counts are unavailable because BEP results are incomplete"
+    );
+}
+
+#[tokio::test]
+async fn successful_test_recovers_count_from_bazel_console_when_bep_is_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir(&workspace).await.unwrap();
+    let service = configured_service(
+        &root,
+        &workspace,
+        "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo 'bazel 9.1.0'; exit 0; fi\necho 'Executed 0 out of 2 tests: 2 tests pass.'\nexit 0\n",
+        |_| {},
+    )
+    .await;
+    let record = service
+        .run(InvocationRequest::new(
+            workspace,
+            BazelCommand::Test,
+            vec!["//...".into()],
+        ))
+        .await
+        .unwrap();
+
+    let summary = record.summary.unwrap();
+    assert!(summary.success);
+    assert_eq!(summary.test_counts.passed, 2);
+    assert!(summary.tests.is_empty());
+    assert_eq!(
+        summary.headline,
+        "Bazel test succeeded: 2 test targets passed (from Bazel console summary; BEP test results unavailable)"
+    );
+}
+
 async fn wait_for_path(path: &Path) {
     for _ in 0..500 {
         if path.exists() {
