@@ -151,6 +151,11 @@ command. Operators may also route explicitly allowed commands such as `lint`
 through Aspect CLI. Successful results are limited to 2 KiB and unsuccessful
 results to 8 KiB. Follow-up `bazel.inspect` calls are also bounded and
 paginated, so an agent only retrieves the evidence it needs.
+For `test` and `coverage`, the `tests` counts are Bazel test targets, not
+individual cases inside a target. If BEP summaries are missing, the server
+recovers counts from BEP test attempts or Bazel's short console summary. It
+distinguishes no test targets from unavailable counts when neither source can
+provide a count.
 
 The Bazel `run` command is denied by default. Once enabled by server policy, it
 accepts one explicit `target` and a separate sensitive `program_args` list:

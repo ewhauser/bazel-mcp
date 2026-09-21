@@ -484,7 +484,7 @@ impl InvocationService {
                         queued.request.command,
                         BazelCommand::Test | BazelCommand::Coverage
                     ) {
-                        command.args(["--test_output=errors", "--test_summary=none"]);
+                        command.args(["--test_output=errors", "--test_summary=short"]);
                     }
                     if queued.request.command == BazelCommand::Run {
                         // Command-line values override bazelrc defaults. Keep execution
@@ -550,7 +550,7 @@ impl InvocationService {
                     ) {
                         command
                             .arg("--bazel-flag=--test_output=errors")
-                            .arg("--bazel-flag=--test_summary=none");
+                            .arg("--bazel-flag=--test_summary=short");
                     }
                     let endpoint = self
                         .bes
@@ -1047,8 +1047,8 @@ impl InvocationService {
             }
         }
         finalize_with_custom_notices(&mut summary, custom_notices);
-        if let Some(headline) = custom_headline {
-            summary.headline = headline;
+        if let Some(headline) = &custom_headline {
+            summary.headline = headline.clone();
         } else if queued.driver.is_aspect() {
             if !summary.success
                 && let Some(first) = summary.diagnostics.first()
@@ -1069,6 +1069,49 @@ impl InvocationService {
                     "Aspect {} failed with exit code {exit_code:?}",
                     queued.request.command
                 );
+            }
+        }
+        if custom_headline.is_none()
+            && summary.success
+            && matches!(
+                queued.request.command,
+                BazelCommand::Test | BazelCommand::Coverage
+            )
+        {
+            if run_bep_outcome.recovered_test_targets > 0 {
+                summary.headline = format!(
+                    "Bazel {} succeeded: {} test target{} reported ({} recovered from BEP test attempts)",
+                    queued.request.command,
+                    summary.tests.len(),
+                    if summary.tests.len() == 1 { "" } else { "s" },
+                    run_bep_outcome.recovered_test_targets
+                );
+            } else if summary.tests.is_empty() {
+                if let Some(passed) = bazel_passed_test_targets(&stdout)
+                    .or_else(|| bazel_passed_test_targets(&stderr))
+                {
+                    summary.test_counts.passed = passed;
+                    summary.headline = format!(
+                        "Bazel {} succeeded: {passed} test targets passed (from Bazel console summary; BEP test results unavailable)",
+                        queued.request.command
+                    );
+                } else {
+                    summary.headline = if run_bep_outcome.build_success == Some(true)
+                        && bep_outcome.terminal_error.is_none()
+                        && !run_bep_outcome.test_result_seen
+                        && !summary.truncated
+                    {
+                        format!(
+                            "Bazel {} succeeded: no test targets were found",
+                            queued.request.command
+                        )
+                    } else {
+                        format!(
+                            "Bazel {} succeeded, but test counts are unavailable because BEP results are incomplete",
+                            queued.request.command
+                        )
+                    };
+                }
             }
         }
         if !summary.success && summary.inspect_hint.is_none() {
@@ -1602,6 +1645,30 @@ async fn wait_for_run_output_limit(stdout: &Path, stderr: &Path, maximum_bytes: 
 
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn bazel_passed_test_targets(output: &[u8]) -> Option<usize> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let line = line.trim().strip_prefix("INFO: ").unwrap_or(line.trim());
+            let rest = line.strip_prefix("Executed ")?;
+            let (executed, rest) = rest.split_once(" out of ")?;
+            let executed = executed.parse::<usize>().ok()?;
+            let (total, rest) = rest.split_once(" test")?;
+            let total = total.parse::<usize>().ok()?;
+            let rest = rest
+                .strip_prefix(": ")
+                .or_else(|| rest.strip_prefix("s: "))?;
+            let (passed, rest) = rest.split_once(" test")?;
+            let passed = passed.parse::<usize>().ok()?;
+            (total > 0
+                && executed <= total
+                && passed == total
+                && matches!(rest, " passes." | "s pass."))
+            .then_some(total)
+        })
 }
 
 pub(crate) fn cancelled_summary() -> bazel_mcp_types::InvocationSummary {

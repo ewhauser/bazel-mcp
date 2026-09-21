@@ -32,6 +32,7 @@ pub struct BepAccumulator {
     diagnostics: Vec<Diagnostic>,
     targets: Vec<TargetResult>,
     tests: Vec<TestResult>,
+    test_attempts: BTreeMap<String, TestAttemptOutcome>,
     named_sets: BTreeMap<String, OwnedNamedSet>,
     artifact_roots: Vec<String>,
     direct_artifacts: Vec<Artifact>,
@@ -63,6 +64,37 @@ pub struct StreamReductionOutput {
 pub struct RunBepOutcome {
     pub build_success: Option<bool>,
     pub exec_request_should_execute: Option<bool>,
+    pub test_result_seen: bool,
+    pub recovered_test_targets: usize,
+}
+
+#[derive(Default)]
+struct TestAttemptOutcome {
+    passed: bool,
+    not_passed: bool,
+    flaky: bool,
+    attempts: u32,
+}
+
+impl TestAttemptOutcome {
+    fn observe(&mut self, status: TestStatus) {
+        self.attempts = self.attempts.saturating_add(1);
+        match status {
+            TestStatus::Passed => self.passed = true,
+            TestStatus::Flaky => self.flaky = true,
+            _ => self.not_passed = true,
+        }
+    }
+
+    fn successful_status(&self) -> Option<TestStatus> {
+        if self.flaky || (self.passed && self.not_passed) {
+            Some(TestStatus::Flaky)
+        } else if self.passed {
+            Some(TestStatus::Passed)
+        } else {
+            None
+        }
+    }
 }
 
 struct ExtensionEventCollector {
@@ -209,6 +241,16 @@ impl BepAccumulator {
                 }
             }
             Some(build_event::Payload::TestResult(result)) => {
+                self.run_bep_outcome.test_result_seen = true;
+                if let Some(label) = label_from_id(id.as_ref()) {
+                    if let Some(attempts) = self.test_attempts.get_mut(&label) {
+                        attempts.observe(test_status(result.status));
+                    } else if self.reserve(1, label.len()) {
+                        let mut attempts = TestAttemptOutcome::default();
+                        attempts.observe(test_status(result.status));
+                        self.test_attempts.insert(label, attempts);
+                    }
+                }
                 for file in &result.test_action_output {
                     if let Some(artifact) = file_artifact(file) {
                         self.push_direct_artifact(artifact);
@@ -291,6 +333,33 @@ impl BepAccumulator {
         self.tests
             .sort_by(|left, right| left.label.cmp(&right.label));
         self.tests.dedup_by(|left, right| left.label == right.label);
+        if success && self.run_bep_outcome.build_success == Some(true) {
+            let summarized = self
+                .tests
+                .iter()
+                .map(|test| test.label.clone())
+                .collect::<BTreeSet<_>>();
+            for (label, attempts) in &self.test_attempts {
+                if summarized.contains(label) {
+                    continue;
+                }
+                if let Some(status) = attempts.successful_status() {
+                    self.tests.push(TestResult {
+                        label: label.clone(),
+                        status,
+                        duration_ms: None,
+                        attempts: attempts.attempts,
+                        shard: None,
+                        cases: Vec::new(),
+                        test_log_available: false,
+                        test_log_unavailable_reason: None,
+                    });
+                    self.run_bep_outcome.recovered_test_targets += 1;
+                }
+            }
+            self.tests
+                .sort_by(|left, right| left.label.cmp(&right.label));
+        }
 
         let target_counts = TargetCounts {
             requested: self.targets.len(),
