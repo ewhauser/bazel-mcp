@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.1](https://github.com/ewhauser/bazel-mcp/compare/v0.7.0...v0.7.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* **ci:** restore fuzzing, Bazel downloads, and security checks ([#138](https://github.com/ewhauser/bazel-mcp/issues/138)) ([d02d310](https://github.com/ewhauser/bazel-mcp/commit/d02d3102ddd90373f1a674c87f12afb6450cee14))
+* **fuzz:** repair scheduled target coverage ([#133](https://github.com/ewhauser/bazel-mcp/issues/133)) ([137eaa8](https://github.com/ewhauser/bazel-mcp/commit/137eaa80f6bd68bd920f5b55347b8c7bcde7a770))
+* recover missing Bazel test counts ([#146](https://github.com/ewhauser/bazel-mcp/issues/146)) ([5ea229d](https://github.com/ewhauser/bazel-mcp/commit/5ea229d2569732e7fbdce65278e3e9a4854023e4))
+* restore nightly reducer tests across macOS and Windows ([#139](https://github.com/ewhauser/bazel-mcp/issues/139)) ([a6874bc](https://github.com/ewhauser/bazel-mcp/commit/a6874bc291530b3eb94efd23304162b0aa779a69))
+
 ## [0.7.0](https://github.com/ewhauser/bazel-mcp/compare/v0.6.0...v0.7.0) (2026-07-23)
 
 
