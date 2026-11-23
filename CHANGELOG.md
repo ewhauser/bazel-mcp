@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/ewhauser/bazel-mcp/compare/v0.7.1...v0.7.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **README:** fix brew command typo ([#150](https://github.com/ewhauser/bazel-mcp/issues/150)) ([b800210](https://github.com/ewhauser/bazel-mcp/commit/b800210f454953b3aa71eabc8756003fadfaf6f8))
+
 ## [0.7.1](https://github.com/ewhauser/bazel-mcp/compare/v0.7.0...v0.7.1) (2026-09-21)
 
 
