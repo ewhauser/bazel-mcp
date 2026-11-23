@@ -43,7 +43,7 @@ toolchains, and remote execution settings.
 ### Install with Homebrew
 
 ```sh
-brew install ewhauser/tap/bazel-mcp
+brew install ewhauser/tap/bazel-mcp-server
 ```
 
 ### Install from a release
